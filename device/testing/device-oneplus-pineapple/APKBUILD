@@ -1,0 +1,42 @@
+# Reference: <https://postmarketos.org/devicepkg>
+maintainer=""
+pkgname=device-oneplus-pineapple
+pkgdesc="OnePlus Pad 2"
+pkgver=1
+pkgrel=0
+url="https://postmarketos.org"
+license="MIT"
+arch="aarch64"
+options="!check !archcheck"
+depends="
+	linux-oneplus-pineapple
+	mkbootimg
+	android-tools
+	postmarketos-base
+	lz4
+	msm-firmware-loader
+	soc-qcom
+	soc-qcom-qbootctl
+	unl0kr-fbforcerefresh
+	make-dynpart-mappings
+	hexagonrpcd
+	firmware-oneplus-pineapple
+"
+makedepends="devicepkg-dev"
+source="
+	deviceinfo
+	modules-initfs
+"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+}
+
+sha512sums="
+a697c6504359bfbbf5a3fb5e7508a8b45b32098e54c3b40401e5cf659957e1c696785c52d78405fbabc2a1ce9a85be6eb60d66461d55088a2626e66c762aa33f  deviceinfo
+9cce102d1ce5e4ad67249c863d1f6c7c47bb063e77dc430c9aa20a5e6c97cc058564f7326d3e14883c28e502518a50093d8847bc813130f32e5b28eda4460702  modules-initfs
+"
