@@ -1,0 +1,902 @@
+--- /dev/null	2026-08-21 07:35:49.106641906 +0200
++++ fakesrc/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts	2026-08-25 07:52:42.694285821 +0200
+@@ -0,0 +1,899 @@
++/dts-v1/;
++#include "sm8650-mtp.dts"
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/leds/common.h>
++
++/ {
++	#address-cells = <0x02>;
++	#size-cells = <0x02>;
++	model = "Qualcomm Technologies, Inc. Pineapple MTP,caihong";
++	compatible = "qcom,pineapple-mtp", "qcom,pineapple", "qcom,pineapplep-mtp", "qcom,pineapplep", "qcom,mtp", "qcom,sm8650";
++	//compatible = "qcom,pineapplep";
++	// <557 0x20000>
++	qcom,msm-id = <557 0x20000 577 0x20000>;
++	// <8 0>
++	qcom,board-id = <8 0>;
++	oplus,project-id = <23976 23978>;
++	oplus,hw-id = <24 25 32 33 40 48 49 50>;
++	chassis-type = "tablet";
++
++	reserved-memory {
++	
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++	
++	        bootloader_log_mem: botloader_mem@0x81CE4000 {
++	                reg = <0 0x81CE4000 0 0x00010000>;
++	                label = "bootloader_log_mem";
++	        };
++	
++		dump_device_info_mem: device_info_mem@0xA4F00000 {
++			reg = <0 0xA4F00000 0 0x00008000>;
++			label = "dump_device_info_mem";
++		};
++	
++		gunyah_hyp_mem: gunyah_hyp_region@80000000 {
++			no-map;
++			reg = <0x0 0x80000000 0x0 0xe00000>;
++		};
++
++		chipinfo_mem: chipinfo_region@81cf4000 {
++			no-map;
++			reg = <0x0 0x81cf4000 0x0 0x1000>;
++		};
++	
++		qseecom_mem: qseecom_region {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x1400000>;
++		};
++	
++		qseecom_ta_mem: qseecom_ta_region {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x1000000>;
++		};
++	
++		qmc_dma_mem: qmc_dma_region {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x1000000>;
++		};
++	
++		non_secure_display_memory: non_secure_display_region {
++			compatible = "shared-dma-pool";
++			reusable;
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			size = <0x0 0xa400000>;
++			alignment = <0x0 0x400000>;
++		};
++	
++		lost_reg_mem {
++			no-map;
++			reg = <0x0 0x9b09c000 0x0 0x4000>;
++		};
++
++		cnss_wlan_region {
++			size = <0x00 0x2000000>;
++			alignment = <0x00 0x400000>;
++			reusable;
++			alloc-ranges = <0x00 0x00 0x00 0xffffffff>;
++			compatible = "shared-dma-pool";
++		};
++
++		mem_dump_region {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x01 0x00 0xfffffffe 0xffffffff>;
++			reusable;
++			alignment = <0x00 0x400000>;
++			size = <0x00 0x1800000>;
++		};
++	
++		vm_comm_mem: vm_comm_mem_region {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x400000>;
++		};
++	
++		va_md_mem: va_md_mem_region {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			size = <0 0x1000000>;
++		};
++	
++		sp_mem: sp_region {  /* SPSS-HLOS ION shared mem */
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x1000000>;
++		};
++	
++		cdsp_eva_mem: cdsp_eva_region {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x400000>;
++		};
++	
++		adsp_mem_heap: adsp_heap_region {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0xC00000>;
++		};
++	
++		system_cma: linux,cma {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x2000000>;
++			linux,cma-default;
++		};
++	
++		cdsp_secure_heap_cma: secure_cdsp_region { /* Secure DSP */
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x4800000>;
++		};
++	
++		kinfo_mem: debug_kinfo_region {
++			alloc-ranges = <0x0 0x00000000 0xffffffff 0xffffffff>;
++			size = <0x0 0x1000>;
++			no-map;
++		};
++	
++		ramoops_region@afe5c0000 {
++		    compatible = "ramoops";
++		    
++		    // < High_Addr  Low_Addr     High_Size  Low_Size >
++		    reg = <0x0a     0xfe5c0000   0x00       0x240000>;
++		    
++		    no-map;
++		    record-size = <0x40000>;
++		    console-size = <0x40000>;
++		    pmsg-size = <0x200000>;
++		};
++
++		demura_region_0 {
++			label = "demura hfc region 0";
++			reg = <0x00 0x00 0x00 0x00>;
++		};
++		
++		demura_region_1 {
++			label = "demura hfc region 1";
++			reg = <0x00 0x00 0x00 0x00>;
++		};
++
++		splash_region {
++			label = "cont_splash_region";
++			reg = <0x00 0xd5100000 0x00 0x2b00000>;
++			no-map;
++		};
++	}; 
++
++	/* 4. The Chosen Node (Passing commands to the Kernel) */
++	chosen {
++		#address-cells = <2>;
++		#size-cells = <2>;
++
++		bootargs = "";
++
++	};
++
++	/* 5. The Simple Framebuffer (Your Screen) */
++	/* Coordinates pulled from your OEM splash_region */
++	/*framebuffer: framebuffer@d5100000 {
++		compatible = "simple-framebuffer";
++		reg = <0x0 0xd5100000 0x0 0x2b00000>;
++		width = <3000>;
++		height = <2120>;
++		stride = <12000>;
++		format = "a8r8g8b8";
++		status = "okay";
++	};*/
++
++	hypervisor: hypervisor {
++		gh_watchdog: qcom,gh-watchdog { };
++	};
++
++	arch_timer: timer { };
++
++	aliases: aliases { };
++
++	firmware {
++		
++		qcom_smcinvoke {
++			compatible = "qcom,smcinvoke";
++		};
++	
++		qtee_shmbridge {
++			compatible = "qcom,tee-shared-memory-bridge";
++		};
++	};
++
++	gpio-keys {
++		compatible = "gpio-keys";
++		pinctrl-names = "default";
++		pinctrl-0 = <&vol_up_default>;
++		
++		key-volume-up {
++		    label = "Volume Up";
++		    gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
++		    linux,code = <KEY_VOLUMEUP>;
++		    debounce-interval = <15>;
++		    wakeup-source;
++		};
++	};
++
++	reboot-mode {
++		mode-bootloader = <0x02>;
++		mode-recovery = <0x01>;
++	};
++
++	bl_vddpos_5p5: bl-vddpos-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "bl_vddpos_5p5";
++		regulator-min-microvolt = <5500000>;
++		regulator-max-microvolt = <5500000>;
++		regulator-enable-ramp-delay = <233>;
++		gpio = <&tlmm 90 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++	};
++
++	bl_vddneg_5p5: bl-vddneg-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "bl_vddneg_5p5";
++		regulator-min-microvolt = <5500000>;
++		regulator-max-microvolt = <5500000>;
++		regulator-enable-ramp-delay = <233>;
++		gpio = <&tlmm 91 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++	};
++
++	thermal-zones {
++		skin-temp-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <0>;
++			thermal-sensors = <&vadc 0x144>;
++
++			trips {
++				skin_alert: skin-alert {
++					temperature = <45000>; /* 45C */
++					hysteresis = <2000>;
++					type = "passive";
++				};
++				skin_crit: skin-crit {
++					temperature = <60000>; /* 60C */
++					hysteresis = <2000>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				/* Tell the kernel to throttle the CPU if the skin gets too hot */
++				map0 {
++					trip = <&skin_alert>;
++					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++		cam-flash-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <0>;
++			thermal-sensors = <&vadc 0x145>;
++
++			trips {
++				flash_alert: flash-alert {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "passive";
++				};
++				flash_crit: flash-crit {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "critical";
++				};
++			};
++		};
++		wlan-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <0>;
++			thermal-sensors = <&vadc 0x146>;
++
++			trips {
++				wlan_alert: wlan-alert {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "passive";
++				};
++				wlan_crit: wlan-crit {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "critical";
++				};
++			};
++		};
++		rear-tof-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <0>;
++			thermal-sensors = <&vadc 0x148>;
++
++			trips {
++				rear_tof_alert: rear-tof-alert {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "passive";
++				};
++				rear_tof_crit: rear-tof-crit {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "critical";
++				};
++			};
++		};
++		usb-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <0>;
++			thermal-sensors = <&vadc 0x747>;
++
++			trips {
++				usb_alert: usb-alert {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "passive";
++				};
++				usb_crit: usb-crit {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "critical";
++				};
++			};
++		};
++		wls-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <0>;
++			thermal-sensors = <&vadc 0x749>;
++
++			trips {
++				wls_alert: wls-alert {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "passive";
++				};
++				wls_crit: wls-crit {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "critical";
++				};
++			};
++		};
++		svooc-mos-btb-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <0>;
++			thermal-governor = "user_space";
++			thermal-sensors = <&vadc 0x14d>;
++			wake-capable-sensor;
++
++			trips {
++				svooc_mos_btb_alert: svooc-mos-btb-alert {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "passive";
++				};
++				svooc_mos_btb_crit: svooc-mos-btb-crit {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "critical";
++				};
++			};
++		};
++		batt-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <0>;
++			thermal-sensors = <&vadc 0x744>;
++
++			trips {
++				batt_alert: batt-alert {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "passive";
++				};
++				batt_crit: batt-crit {
++					temperature = <125000>; /* 125C */
++					hysteresis = <1000>;
++					type = "critical";
++				};
++			};
++		};
++
++	};
++
++};
++
++
++&soc {
++	
++	bootloader_log {
++		compatible = "bootloader_log";
++		linux,contiguous-region = <&bootloader_log_mem>;
++	};
++
++	dump_device_info {
++		compatible = "dump_device_info";
++		linux,contiguous-region = <&dump_device_info_mem>;
++	};
++
++	// OPlus customs :)
++	// Will investigate it someday, maybe it's something useful...
++
++	oplus_secure_common {
++		compatible = "oplus,secure_common";
++		oplus,sec_reg_num = <0x221C8C70>;
++		oplus,sec_en_anti_reg = <0x221C8314>;
++		oplus,sec_override1_reg = <0x221C8314>;
++		oplus,override1_en_value = <0x1>;
++	};
++
++	qfprom@221c2000 {
++        compatible = "qcom,sm8650-qfprom", "qcom,qfprom";
++        reg = <0x0 0x221c2000 0x0 0x2000>;
++
++        #address-cells = <1>;
++        #size-cells = <1>;
++        read-only;
++
++        gpu_speed_bin: gpu-speed-bin@9b {
++            reg = <0x9b 0x1>;
++            bits = <4 3>;
++        };
++    };
++};
++
++&pm8550b_eusb2_repeater {
++	/* Amplitude: Register 0x51, Value 0x0d */
++	qcom,tune-usb2-amplitude = /bits/ 8 <0x0d>;
++
++	/* Disconnect Threshold: Register 0x53, Value 0x06 */
++	qcom,tune-usb2-disc-thres = /bits/ 8 <0x06>;
++    
++	/* Pre-emphasis: Register 0x57, Value 0x03 */
++	qcom,tune-usb2-preem = /bits/ 8 <0x03>;
++
++	/* Squelch Detector: Register 0x54, Value 0x06
++	(Mapped via mainline array index 6) */
++	qcom,squelch-detector-bp = <0>;
++};
++
++&tlmm {
++    /*
++     * NOTE: disp0-reset-n (133) and mdp-vsync (86) are already defined
++     * by your mainline tree, so we skip them here.
++     */
++
++    /* =========================================
++     * MCU RESET (GPIO 161)
++     * ========================================= */
++    ts_reset_active: ts-reset-active-state {
++        pins = "gpio161";
++        function = "gpio";
++        drive-strength = <8>;
++        output-low;
++        bias-disable;
++    };
++
++    ts_reset_suspend: ts-reset-suspend-state {
++        pins = "gpio161";
++        function = "gpio";
++        drive-strength = <2>;
++        bias-pull-down;
++    };
++
++    /* =========================================
++     * MCU INTERRUPT (GPIO 162)
++     * ========================================= */
++    ts_int_active: ts-int-active-state {
++        pins = "gpio162";
++        function = "gpio";
++        drive-strength = <8>;
++        input-enable;
++        bias-disable;
++    };
++
++    ts_int_suspend: ts-int-suspend-state {
++        pins = "gpio162";
++        function = "gpio";
++        drive-strength = <2>;
++        bias-pull-down;
++    };
++
++    /* =========================================
++     * DSI POWER RESET (GPIO 97)
++     * ========================================= */
++    dsi_pw_reset_active: dsi-pw-reset-active-state {
++        pins = "gpio97";
++        function = "gpio";
++        drive-strength = <2>;
++        bias-pull-up;
++    };
++
++    dsi_pw_reset_suspend: dsi-pw-reset-suspend-state {
++        pins = "gpio97";
++        function = "gpio";
++        drive-strength = <2>;
++        bias-pull-down;
++    };
++};
++
++&pcie1 {
++	status = "disabled";
++};
++
++&pcie1_phy {
++	status = "disabled";
++};
++
++
++&mdss_dsi0 {
++	qcom,dual-dsi-mode;
++	qcom,sync-dual-dsi;
++	qcom,master-dsi;
++	mdss_dsi0_panel: panel@0 {
++		compatible = "novatek,nf_nt36532", "csot,ppc100hb1-1";
++		backlight = <&backlight_ktz8866>;
++		vddio-supply = <&vreg_l12b_1p8>; /* PMIC 1.8V LDO */
++		vdd-supply = <&vreg_l11b_1p2>;    /* PMIC 1.2V LDO */
++		vci-supply = <&vreg_l13b_3p0>;   /* PMIC 3.0V LDO */
++		te-gpios = <&tlmm 86 GPIO_ACTIVE_HIGH>, <&tlmm 43 GPIO_ACTIVE_HIGH>;
++		spi-max-frequency = <12000000>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <162 0x2002>;
++		//irq-gpio = <&tlmm 162 0x2002>;
++                reset-gpios = <&tlmm 133 GPIO_ACTIVE_HIGH>;
++		//cs-gpio = <&tlmm 51 GPIO_ACTIVE_HIGH>;
++		pinctrl-0 = <&disp0_reset_n_active>, <&ts_reset_active>,
++                <&mdp_vsync>, <&dsi_pw_reset_active>;
++		pinctrl-1 = <&disp0_reset_n_suspend>, <&ts_reset_suspend>,
++                <&mdp_vsync>, <&dsi_pw_reset_suspend>;
++		touch-controller = <&novatek_touch>;
++
++		/delete-node/ port;
++
++		ports {
++			panel0_in: port@0 {
++				reg = <0>;
++				endpoint {
++					remote-endpoint = <&mdss_dsi0_out>;
++				};
++			};
++			panel1_in: port@1 {
++				reg = <1>;
++				endpoint {
++					remote-endpoint = <&mdss_dsi1_out>;
++				};
++			};
++		};
++
++	};
++};
++
++&mdss_dsi0_out {
++	remote-endpoint = <&panel0_in>;
++	data-lanes = <0 1 2 3>;
++};
++
++&mdss_dsi1_out {
++	remote-endpoint = <&panel1_in>;
++	data-lanes = <0 1 2 3>;
++};
++
++&mdss_dsi1 {
++	status = "okay";
++	qcom,dual-dsi-mode; /* Force bonded mode */
++	qcom,sync-dual-dsi;
++	assigned-clock-parents = <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>,
++                                 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>;
++	vdda-supply = <&vreg_l3i_1p2>;
++};
++
++&mdss_dsi1_phy {
++	status = "okay";
++	vdds-supply = <&vreg_l1i_0p88>;
++};
++
++&mdss_dp0 {
++	status = "okay";
++};
++
++&pon_pwrkey {
++	status = "okay";
++};
++
++&pon_resin {
++	status = "okay";
++	linux,code = <0x73>;
++};
++
++&pmk8550_gpios {
++    vol_up_default: vol-up-default-state {
++        pins = "gpio6";
++        function = "normal";
++        bias-pull-up;
++        input-enable;
++        power-source = <0>; /* 1.8V domain */
++    };
++};
++
++&remoteproc_mpss {
++	status = "disabled";
++};
++
++// Renaming mbn to mdt, as OnePlus ships it in mdt format
++&remoteproc_adsp {
++	firmware-name = "qcom/sm8650/adsp.mdt", "qcom/sm8650/adsp_dtb.mdt";
++};
++
++&remoteproc_cdsp {
++	firmware-name = "qcom/sm8650/cdsp.mdt", "qcom/sm8650/cdsp_dtb.mdt";
++};
++
++&gpu {
++	status = "okay";
++	// Need to backport speedbin functionality to mainline
++	// or even recreate it, as sm8650 mtp platform does not have
++	// opp-supported-hw property, which makes speedbin unusable.
++	//nvmem-cell-names = "speed_bin";
++	//nvmem-cells = <&gpu_speed_bin>;
++};
++
++&qupv3_id_0 {
++	status = "okay";
++};
++
++&i2c2 {
++	status = "okay";
++	backlight_ktz8866_slave: ktz8866@11 {
++		reg = <0x11>;
++		compatible = "kinetic,ktz8866-slave";
++	};
++};
++
++&i2c6 {
++	status = "okay";
++	backlight_ktz8866: ktz8866@11 {
++		reg = <0x11>;
++		compatible = "kinetic,ktz8866";
++		enable-gpios = <&tlmm 89 GPIO_ACTIVE_HIGH>;
++		vddpos-supply = <&bl_vddpos_5p5>;
++		vddneg-supply = <&bl_vddneg_5p5>;
++		current-num-sinks = <5>;
++		kinetic,current-ramp-delay-ms = <128>;
++		kinetic,led-enable-ramp-delay-ms = <1>;
++		kinetic,enable-lcd-bias;
++		kinetic,slave = <&backlight_ktz8866_slave>;
++	};
++};
++
++&gpi_dma1 {
++	status = "okay";
++};
++
++&i2c4 {
++	status = "disabled";
++};
++
++&spi4 {
++	status = "okay";
++	
++	novatek_touch: touch@0 {
++	        compatible = "novatek,nt36532-ts";
++	        reg = <0>;
++	        
++	        /* 12 MHz SPI Clock */
++	        spi-max-frequency = <12000000>;
++	        
++	        interrupt-parent = <&tlmm>;
++	        interrupts = <162 IRQ_TYPE_EDGE_FALLING>;
++		reset-gpios = <&tlmm 161 GPIO_ACTIVE_HIGH>;
++
++		touchscreen-size-y = <30000>;
++		touchscreen-size-x = <21200>;
++		touchscreen-swapped-x-y; // otherwise not matching with physical orientation of panel
++		touchscreen-inverted-x; // required.
++		panel = <&mdss_dsi0_panel>;
++	};
++};
++
++/* Reference the PMK8550 node (which is pmic@0) */
++&pmk8550 {
++	/* Inject the missing Voltage ADC block */
++	vadc: adc@9000 {
++		compatible = "qcom,spmi-adc5-gen3", "qcom,spmi-adc5";
++		reg = <0x9000>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		#io-channel-cells = <1>;
++
++		/* 0x90 0x01 is the End of Conversion (EOC) interrupt on SPMI */
++		interrupts = <0x0 0x90 0x01 IRQ_TYPE_EDGE_RISING>;
++
++		/* OnePlus Pad 2 Skin Thermistor */
++		channel@144 {
++			reg = <0x144>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "skin_msm_therm";
++		};
++
++		/* Camera Flash Thermistor */
++		channel@145 {
++			reg = <0x145>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "cam_flash_therm";
++		};
++		/* WLAN Thermistor */
++		channel@146 {
++			reg = <0x146>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "wlan_therm";
++		};
++		/* Rear TOF Thermistor */
++		channel@148 {
++			reg = <0x148>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "rear_tof_therm";
++		};
++		/* Battery (Real) Thermistor */
++		channel@14b {
++			reg = <0x14b>;
++			qcom,pre-scaling = <0x01 0x01>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "batt_con_therm";
++		};
++		/* SVOOC Thermistor */
++		channel@14d {
++			reg = <0x14d>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "svooc_therm";
++		};
++		/* Battery (Fake) Thermistor */
++		channel@744 {
++			reg = <0x744>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "batt_therm";
++		};
++		/* USB Thermistor */
++		channel@747 {
++			reg = <0x747>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "usb_therm";
++		};
++		/* WLS Thermistor */
++		channel@749 {
++			reg = <0x749>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "wls_therm";
++		};
++		channel@78f {
++			reg = <0x78f>;
++			qcom,pre-scaling = <1 3>;
++			label = "vbat_sns_qbg";
++		};
++	};
++};
++
++
++&pm8550_flash {
++	status = "okay";
++
++	led-0 {
++		function = LED_FUNCTION_FLASH;
++		color = <LED_COLOR_ID_WHITE>;
++
++		/* In mainline, led-sources is 1-indexed. <1> maps to downstream qcom,id = <0> */
++		led-sources = <1>;
++
++		/* Torch mode maximum (500 mA) */
++		led-max-microamp = <500000>;
++
++		/* Flash strobe maximum (1.5 A) */
++		flash-max-microamp = <1500000>;
++		flash-max-timeout-us = <1280000>;
++	};
++
++};
++
++&i2c_master_hub_0 {
++	status = "okay";
++};
++
++&i2c_hub_4 {
++	status = "okay";
++	clock-frequency = <400000>;
++
++	speaker_amp0: audio-codec@34 {
++		compatible = "awinic,aw88261";
++		reg = <0x34>;
++		#sound-dai-cells = <0>;
++		awinic,audio-channel = <0>;
++	};
++
++	speaker_amp2: audio-codec@35 {
++		compatible = "awinic,aw88261";
++		reg = <0x35>;
++		#sound-dai-cells = <0>;
++		awinic,audio-channel = <2>;
++	};
++
++	speaker_amp6: audio-codec@37 {
++		compatible = "awinic,aw88261";
++		reg = <0x37>;
++		#sound-dai-cells = <0>;
++		awinic,audio-channel = <6>;
++	};
++};
++
++&i2c_hub_7 {
++	status = "okay";
++	clock-frequency = <400000>;
++
++	speaker_amp1: audio-codec@34 {
++		compatible = "awinic,aw88261";
++		reg = <0x34>;
++		#sound-dai-cells = <0>;
++		awinic,audio-channel = <1>;
++	};
++
++	speaker_amp3: audio-codec@35 {
++		compatible = "awinic,aw88261";
++		reg = <0x35>;
++		#sound-dai-cells = <0>;
++		awinic,audio-channel = <3>;
++	};
++
++	speaker_amp5: audio-codec@37 {
++		compatible = "awinic,aw88261";
++		reg = <0x37>;
++		#sound-dai-cells = <0>;
++		awinic,audio-channel = <5>;
++	};
++};
++
++// Resizing adsp and cdsp
++&adspslpi_mem {
++	reg = <0 0x9df00000 0 0x5280000>;
++};
