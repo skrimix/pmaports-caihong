@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=6
+pkgrel=7
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -17,13 +17,17 @@ makedepends="
 	bison
 	clang
 	devicepkg-dev
+	elfutils-dev
 	findutils
 	flex
+	linux-headers
 	lld
 	llvm
 	openssl-dev
+	pahole
 	perl
 	xz
+	zlib-dev
 	zstd
 	util-linux
 	dtc
@@ -125,5 +129,5 @@ c965e01ccf7e2ebc05b29a3e9b89a6eb44afe2470e277717a7310879ba8be49452706d618d54bc1b
 d30a9b631e959e7454740b66b1ac7b08ee27a97ec7da8d1e4e748463db9ac6e651655c58ff9c9ad0718a0f338bbc8cd95b803921f745dac930a604cbc4220479  0018-drivers-input-touchscreen-add-nt36532.patch
 97adb7d76dcdbe62a3632633c5cfdbb478625b54fcd189f0c5df45263006cf3722d20ba466a27f02e9b73e15b672e91abbec14ad2157d311e725f8506f09f07a  0019-drivers-power-supply-battmgr.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
-5c5ffea4dba42400c9c1f802347b58b0506efedb85ef4541a299172d31d21c3aedb8de03f854ea1e0c6d70824d07731dde36a1260d0c320eb25a541d44cb0247  config-oneplus-pineapple.aarch64
+593189e8e610e1d65e6f600920906f377f429f93bd0331ff7f1a7f1940f69bd1930a118a03724b67e5669382b635d83052a3fb46961d5386c024c32141829ca3  config-oneplus-pineapple.aarch64
 "
