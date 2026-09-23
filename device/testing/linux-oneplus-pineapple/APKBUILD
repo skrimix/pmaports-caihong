@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=7
+pkgrel=8
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -58,6 +58,7 @@ source="
 	0017-drivers-gpu-drm-msm-dsi-fix-dsc-pic_width.patch
 	0018-drivers-input-touchscreen-add-nt36532.patch
 	0019-drivers-power-supply-battmgr.patch
+	0020-libbpf-fix-strset-use-after-free.patch
 
 
 	dummy-dtbo.dtso
@@ -128,6 +129,7 @@ c965e01ccf7e2ebc05b29a3e9b89a6eb44afe2470e277717a7310879ba8be49452706d618d54bc1b
 3b66eb49dd0e2294546af1a2ad7d7bd32de8e775dbe62d12c43b320b021e10bf291cefa97733dc6ae5779262df01fe2215e51efae084a41278e7a978291555cd  0017-drivers-gpu-drm-msm-dsi-fix-dsc-pic_width.patch
 d30a9b631e959e7454740b66b1ac7b08ee27a97ec7da8d1e4e748463db9ac6e651655c58ff9c9ad0718a0f338bbc8cd95b803921f745dac930a604cbc4220479  0018-drivers-input-touchscreen-add-nt36532.patch
 97adb7d76dcdbe62a3632633c5cfdbb478625b54fcd189f0c5df45263006cf3722d20ba466a27f02e9b73e15b672e91abbec14ad2157d311e725f8506f09f07a  0019-drivers-power-supply-battmgr.patch
+e2555390d48cbbdc32a7d3f0c27599ff88f2fe3e786d1d0086caaa5b092cc3edcb6e95e2fb07034edb3793f6dc954da0662c723202eb7e2c4956c99b50919b12  0020-libbpf-fix-strset-use-after-free.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
 593189e8e610e1d65e6f600920906f377f429f93bd0331ff7f1a7f1940f69bd1930a118a03724b67e5669382b635d83052a3fb46961d5386c024c32141829ca3  config-oneplus-pineapple.aarch64
 "
