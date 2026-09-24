@@ -2,8 +2,8 @@
 maintainer="skrimix <skrimix.git@fastmail.org>"
 pkgname=qbootctl
 pkgver=0.2.2
-pkgrel=2
-_commit=f5bbc9f6f67da9f5ea09aef7da4049a456ce0550
+pkgrel=3
+_commit=55365bed22973d3d223104a4abbab54116714fbd
 pkgdesc="Tool for interacting with Android A/B slots"
 url="https://github.com/skrimix/qbootctl"
 # Only really useful on Qualcomm A/B Android devices
@@ -37,7 +37,7 @@ package() {
 }
 
 sha512sums="
-c9ff704ca8d765d01510119546f04a2b60ebde8c5e130366f4d970350e9b33f4f50565bd751e2997d3b4a4e7ed7b358a31f7baaa6c9cbd2eb6d7a34a6806eb70  qbootctl-f5bbc9f6f67da9f5ea09aef7da4049a456ce0550.tar.gz
+176e91de0cf2cbd64568f019934741a52db78a3fcfbff796839ec1ef75f734845e2d4275001048703791b0d6f0976f3d8d744fce77858f3d502c636616d57444  qbootctl-55365bed22973d3d223104a4abbab54116714fbd.tar.gz
 da586749da1dd63e19f2bbc361b8c6689a713f4ea9d46d5f299c574ceda14aedad6c6f0fb5849c88cc99904a38a7318456a21417d212c147dd9d367752676a1e  qbootctl-openrc.initd
 174a0eb013ca656aab8078ee4a0df792bfb763ed70ab96d0e6b5fd373847fc37d1f1221276a2e9777f4d7668b11fd9dca9cb59f7b72d4829921be03ae0b44ca2  systemd-service.patch
 "
