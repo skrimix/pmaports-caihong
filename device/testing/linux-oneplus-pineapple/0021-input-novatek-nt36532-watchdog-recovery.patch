@@ -1,0 +1,278 @@
+Subject: [PATCH] Input: novatek-nt36532 - recover firmware watchdog resets
+
+Recognize the OEM six-byte FD/FE signature before the touch checksum and
+reload cached firmware after four consecutive reports. Clear contacts and
+perform the OEM idle reset for FE reports. Keep IRQ reads, firmware loads
+and panel/PM transitions serialized; enable the IRQ only with firmware
+running and drain it before releasing the cached firmware on removal.
+Stop IRQ processing on recovery failure instead of reading an unknown page.
+
+--- a/drivers/input/touchscreen/novatek_nt36532_ts.c
++++ b/drivers/input/touchscreen/novatek_nt36532_ts.c
+@@ -14,6 +14,7 @@
+ #include <linux/input/touchscreen.h>
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of_irq.h>
+ #include <linux/spi/spi.h>
+ #include <linux/unaligned.h>
+@@ -63,6 +64,11 @@
+     struct gpio_desc* reset_gpio;
+     struct touchscreen_properties prop;
+     int max_touches;
++    struct mutex lock; /* Serializes IRQ, firmware loading and power changes. */
++    bool panel_prepared;
++    bool suspended;
++    bool enabled;
++    u8 watchdog_count;
+     u8 rx_buf[NVT_TS_POINT_DATA_LEN + 2];
+     const struct firmware* fw;
+     struct drm_panel_follower panel_follower;
+@@ -1459,10 +1465,14 @@
+     int ret, i;
+ 
+     /* 1. Halt MCU and wipe pointers */
+-    novatek_bootloader_reset(spi);
++    ret = novatek_bootloader_reset(spi);
++    if (ret)
++        return ret;
+ 
+     /* 2. Configure ILM/DLM memory banks for the incoming firmware payload */
+-    novatek_set_bld_hw_crc(spi, fw_data);
++    ret = novatek_set_bld_hw_crc(spi, fw_data);
++    if (ret)
++        return ret;
+ 
+     /* 3. Handle Cascade (Dual-Chip) Auto-Copy Setup */
+     if (fw_data->is_cascade) {
+@@ -1500,10 +1510,14 @@
+     }
+ 
+     /* 6. Tell the hardware to verify the checksum */
+-    novatek_fw_enable_crc(spi);
++    ret = novatek_fw_enable_crc(spi);
++    if (ret)
++        return ret;
+ 
+     /* 7. Flip the execution switch */
+-    novatek_fw_boot_ready(spi);
++    ret = novatek_fw_boot_ready(spi);
++    if (ret)
++        return ret;
+ 
+     /* 8. Wait for the MCU to confirm it successfully booted the payload */
+     ret = novatek_fw_check_reset_state(spi);
+@@ -1686,17 +1700,53 @@
+     int i, error, slot, x, y, width, pressure;
+     bool active;
+     u8* point;
++    /* Skip the SPI command response; payload[1] is the first data byte. */
++    u8* payload = &ts->rx_buf[1];
++
++    mutex_lock(&ts->lock);
++    if (!ts->enabled)
++        goto out;
+ 
+     error = nvt_ts_read_touch_data(ts);
+-    if (error)
+-        return IRQ_HANDLED;
+-
+-    /* Adjust the offset (+1 or +2) based on your SPI dummy byte response */
+-    u8* payload = &ts->rx_buf[1];
++    if (error) {
++        ts->watchdog_count = 0;
++        goto out;
++    }
++
++    /* OEM watchdog signature: six FD/FE bytes, four consecutive packets.
++     * These packets must be recognized before checking the touch checksum.
++     */
++    for (i = 1; i <= 6; i++) {
++        if (payload[i] != 0xfd && payload[i] != 0xfe)
++            break;
++    }
++    if (i == 7) {
++        if (++ts->watchdog_count < 4)
++            goto out;
++        ts->watchdog_count = 0;
++        dev_warn(&ts->spi->dev, "Touch firmware watchdog (0x%02x), reloading\n",
++            payload[1]);
++
++        /* An empty frame releases every contact (INPUT_MT_DROP_UNUSED). */
++        input_mt_sync_frame(ts->input);
++        input_sync(ts->input);
++
++        if (payload[1] == 0xfe) {
++            error = nvt_write_addr(ts->spi, NVT_SWRST_SIF_ADDR, 0xaa);
++            if (error)
++                goto recovery_failed;
++            msleep(15);
++        }
++        error = novatek_fw_load(ts);
++        if (error)
++            goto recovery_failed;
++        goto out;
++    }
++    ts->watchdog_count = 0;
+ 
+     /* Verify payload integrity */
+     if (nvt_ts_point_checksum(payload, NVT_TS_CHECKSUM_LEN))
+-        return IRQ_HANDLED;
++        goto out;
+ 
+     for (i = 0; i < ts->max_touches; i++) {
+         point = &payload[1 + (6 * i)];
+@@ -1739,6 +1789,14 @@
+     input_mt_sync_frame(ts->input);
+     input_sync(ts->input);
+ 
++    goto out;
++
++recovery_failed:
++    dev_err(&ts->spi->dev, "Touch recovery failed: %d; IRQ disabled\n", error);
++    ts->enabled = false;
++    disable_irq_nosync(ts->spi->irq);
++out:
++    mutex_unlock(&ts->lock);
+     return IRQ_HANDLED;
+ }
+ 
+@@ -1762,24 +1820,60 @@
+         gpiod_set_value_cansleep(ts->reset_gpio, 0);
+ }
+ 
++/* Caller holds ts->lock. IRQF_NO_AUTOEN keeps reads off until firmware is ready. */
++static int novatek_ts_start(struct novatek_ts_data* ts)
++{
++    int ret;
++
++    if (ts->enabled || !ts->panel_prepared || ts->suspended)
++        return 0;
++
++    novatek_ts_power_on(ts);
++    ret = novatek_fw_load(ts);
++    if (ret) {
++        novatek_ts_power_off(ts);
++        return ret;
++    }
++
++    ts->watchdog_count = 0;
++    ts->enabled = true;
++    enable_irq(ts->spi->irq);
++    return 0;
++}
++
++static void novatek_ts_stop(struct novatek_ts_data* ts)
++{
++    /* The IRQ thread takes this lock too; do not wait for it while holding it. */
++    if (ts->enabled) {
++        ts->enabled = false;
++        disable_irq_nosync(ts->spi->irq);
++    }
++    ts->watchdog_count = 0;
++    novatek_ts_power_off(ts);
++    input_mt_sync_frame(ts->input);
++    input_sync(ts->input);
++}
++
+ static int novatek_ts_panel_prepared(struct drm_panel_follower* follower)
+ {
+     struct novatek_ts_data* ts = container_of(follower, struct novatek_ts_data, panel_follower);
+-
+-    /* 1. Wake up the SPI bus after DSI init */
+-    novatek_ts_power_on(ts);
+-
+-    /* 2. Upload cached firmware */
+-    return novatek_fw_load(ts);
++    int ret;
++
++    mutex_lock(&ts->lock);
++    ts->panel_prepared = true;
++    ret = novatek_ts_start(ts);
++    mutex_unlock(&ts->lock);
++    return ret;
+ }
+ 
+ static int novatek_ts_panel_unpreparing(struct drm_panel_follower* follower)
+ {
+     struct novatek_ts_data* ts = container_of(follower, struct novatek_ts_data, panel_follower);
+ 
+-    disable_irq_nosync(ts->spi->irq);
+-    novatek_ts_power_off(ts);
+-
++    mutex_lock(&ts->lock);
++    ts->panel_prepared = false;
++    novatek_ts_stop(ts);
++    mutex_unlock(&ts->lock);
+     return 0;
+ }
+ 
+@@ -1806,6 +1900,7 @@
+     if (!ts)
+         return -ENOMEM;
+ 
++    mutex_init(&ts->lock);
+     ts->spi = spi;
+     ts->max_touches = NVT_TS_MAX_TOUCHES;
+     spi_set_drvdata(spi, ts);
+@@ -1848,7 +1943,7 @@
+     input_set_drvdata(ts->input, ts);
+ 
+     error = devm_request_threaded_irq(dev, spi->irq, NULL, novatek_ts_irq,
+-        IRQF_ONESHOT | IRQF_TRIGGER_FALLING,
++        IRQF_ONESHOT | IRQF_TRIGGER_FALLING | IRQF_NO_AUTOEN,
+         "novatek_nt36532_ts", ts);
+     if (error) {
+         dev_err(dev, "Failed to register threaded IRQ: %d\n", error);
+@@ -1880,18 +1975,21 @@
+     struct novatek_ts_data* ts = spi_get_drvdata(spi);
+ 
+     drm_panel_remove_follower(&ts->panel_follower);
+-    if (ts->fw)
+-        release_firmware(ts->fw);
+-    novatek_ts_power_off(ts);
++    mutex_lock(&ts->lock);
++    novatek_ts_stop(ts);
++    mutex_unlock(&ts->lock);
++    devm_free_irq(&spi->dev, spi->irq, ts);
++    release_firmware(ts->fw);
+ }
+ 
+ static int novatek_ts_suspend(struct device* dev)
+ {
+     struct novatek_ts_data* ts = spi_get_drvdata(to_spi_device(dev));
+ 
+-    disable_irq(ts->spi->irq);
+-    novatek_ts_power_off(ts);
+-
++    mutex_lock(&ts->lock);
++    ts->suspended = true;
++    novatek_ts_stop(ts);
++    mutex_unlock(&ts->lock);
+     return 0;
+ }
+ 
+@@ -1900,17 +1998,11 @@
+     struct novatek_ts_data* ts = spi_get_drvdata(to_spi_device(dev));
+     int ret;
+ 
+-    ret = novatek_ts_power_on(ts);
+-    if (ret)
+-        return ret;
+-
+-    ret = novatek_fw_load(ts);
+-    if (ret)
+-        return ret;
+-
+-    enable_irq(ts->spi->irq);
+-
+-    return 0;
++    mutex_lock(&ts->lock);
++    ts->suspended = false;
++    ret = novatek_ts_start(ts);
++    mutex_unlock(&ts->lock);
++    return ret;
+ }
+ 
+ static DEFINE_SIMPLE_DEV_PM_OPS(novatek_ts_pm_ops, novatek_ts_suspend, novatek_ts_resume);
