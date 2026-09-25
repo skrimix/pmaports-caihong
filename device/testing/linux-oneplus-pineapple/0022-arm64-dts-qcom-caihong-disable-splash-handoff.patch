@@ -1,0 +1,29 @@
+Subject: [PATCH] arm64: dts: qcom: caihong: stop requesting continuous splash
+
+Qualcomm ABL's UpdateSplashMemInfo() looks for the exact path
+/reserved-memory/splash_region. When it is absent, ABL calls
+DisableDisplay() to power down the panel and controller before Linux.
+When present, ABL updates the reservation and leaves the display running.
+
+This port does not implement continuous-splash handoff. Drop the splash
+reservation, matching the tablets-for-linux Caihong DT. On the Pad 2,
+this removes the white/red flash between the bootloader state warning 
+and Linux text, including with the earlier backlight, panel and IOMMU 
+experiments removed.
+
+Reference: QcomModulePkg/Library/BootLib/UpdateDeviceTree.c
+
+--- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
++++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+@@ -181,11 +181,6 @@
+ 			reg = <0x00 0x00 0x00 0x00>;
+ 		};
+ 
+-		splash_region {
+-			label = "cont_splash_region";
+-			reg = <0x00 0xd5100000 0x00 0x2b00000>;
+-			no-map;
+-		};
+ 	}; 
+ 
+ 	/* 4. The Chosen Node (Passing commands to the Kernel) */
