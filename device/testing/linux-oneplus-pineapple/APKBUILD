@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=18
+pkgrel=20
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -135,5 +135,5 @@ e2555390d48cbbdc32a7d3f0c27599ff88f2fe3e786d1d0086caaa5b092cc3edcb6e95e2fb07034e
 e883b4a9260195a52f1352856d77ce596337df065150bc1f172b7a64a4e59a3319755ceb3ec2475b57acc714f6c871146f66644f7062996d6fc390a0e1632ba5  0021-input-novatek-nt36532-watchdog-recovery.patch
 6e81749dd68fbfe9ee4b51b44a2fcc53ef6367e0e2a3ccf501f919c41ce639f9ff5474538edb89a57665d7ffbc6576d160826d2eceb603d601192e00a8957f91  0022-arm64-dts-qcom-caihong-disable-splash-handoff.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
-593189e8e610e1d65e6f600920906f377f429f93bd0331ff7f1a7f1940f69bd1930a118a03724b67e5669382b635d83052a3fb46961d5386c024c32141829ca3  config-oneplus-pineapple.aarch64
+40ea236dd274efd69e74e4d59df034d199e2247f0bef0bab6f0d00580a371b27475b0a4dd0f37ae4cef531d0acb81258f89e3221b684ced230555fbbe3bb181e  config-oneplus-pineapple.aarch64
 "
