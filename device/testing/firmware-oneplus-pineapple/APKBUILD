@@ -1,18 +1,20 @@
 maintainer=""
 pkgname=firmware-oneplus-pineapple
 pkgver=1
-pkgrel=0
+pkgrel=1
 _commit="e5f0b275675db29de8c88972cc5246d89f1c9bce"
 pkgdesc="Firmware files for OnePlus pineapple and pineapplep"
 url="https://github.com/RubyLegend/firmware-oneplus-pineapple"
 arch="aarch64"
-depends="linux-firmware-qcom"
+depends="linux-firmware-ath12k linux-firmware-qcom wireless-regdb"
 license="proprietary"
 source="
 	$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz 
 	0001-gpu-firmware.files
 	0002-display-firmware.files
 	0003-adsp-cdsp-firmware.files
+	0004-wifi-firmware.files
+	caihong-bdwlan.elf
 	"
 options="!check !strip !archcheck !spdx !tracedeps pmb:cross-native"
 builddir="$srcdir/firmware-oneplus-pineapple-$_commit"
@@ -28,9 +30,20 @@ package() {
 	install -m644 modem_partition/image/adsp* "$pkgdir/lib/firmware/qcom/sm8650/"
 	install -m644 modem_partition/image/cdsp* "$pkgdir/lib/firmware/qcom/sm8650/"
 
+	# The pinned archive has the validated OEM HMT.2.0 firmware. Use the
+	# kernel's standard override path to coexist with linux-firmware-ath12k.
+	install -Dm644 modem_partition/image/kiwi/amss20.bin \
+		"$pkgdir/lib/firmware/updates/ath12k/WCN7850/hw2.0/amss.bin"
+	install -Dm644 modem_partition/image/kiwi/phy_ucode20.elf \
+		"$pkgdir/lib/firmware/updates/ath12k/WCN7850/hw2.0/m3.bin"
+	# Stock ODM etc/wifi/kiwi/bdwlan.elf; the modem board file is different.
+	install -Dm644 "$srcdir/caihong-bdwlan.elf" \
+		"$pkgdir/lib/firmware/updates/ath12k/WCN7850/hw2.0/board.bin"
+
 	install -Dm644 "$srcdir/0001-gpu-firmware.files" "$pkgdir/usr/share/mkinitfs/files/0001-gpu-firmware.files"
 	install -Dm644 "$srcdir/0002-display-firmware.files" "$pkgdir/usr/share/mkinitfs/files/0002-display-firmware.files"
 	install -Dm644 "$srcdir/0003-adsp-cdsp-firmware.files" "$pkgdir/usr/share/mkinitfs/files/0003-adsp-cdsp-firmware.files"
+	install -Dm644 "$srcdir/0004-wifi-firmware.files" "$pkgdir/usr/share/mkinitfs/files/0004-wifi-firmware.files"
 }
 
 sha512sums="
@@ -38,4 +51,6 @@ e6d46ca82dc9de1119af35cfdcde14ae139c34fa31e727deee352a93adaa0fea6e6af96ad5c58e00
 dd22390e0ef5053fe19785db48ea7d2e7e580b4e753a01b727badee1d6b37f5e0c9d0a5297f44836e9881e546956f5a86d37ae42a0b706c70c03b805289b3bd0  0001-gpu-firmware.files
 c98052bca14a9677abe86b63567d4f4529a436a83c5fc71a9b26cce05e18f68a4a12e4dbbb82b563a38436da7c932fc2c6a4e0fdd3bc11145d98d4a7615a2eb9  0002-display-firmware.files
 71558da78915dc8c581ecb797f1f03b8572727f153aa7db95425b57668a167f31d5f54be5ef05a204c4a7e4114af8ad8a39c246c8cdaba510da99200c58f830e  0003-adsp-cdsp-firmware.files
+4786d53b66f3c2da49264e0f8fcd9461cbd2592b683e9899e29a4812176a94da433304ded5ac9a342961f5cbb08fefe5a08c0f1a6f0d68b67cb45526591754ce  0004-wifi-firmware.files
+490995949837e26686351b4aff061aa24b3b756b14356712caa54e23169f539c8bcc7bb523b009e0ccbe05e211321329bf8f83ce4b3974887bcef2b0315c7c47  caihong-bdwlan.elf
 "
