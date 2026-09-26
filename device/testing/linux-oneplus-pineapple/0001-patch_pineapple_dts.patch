@@ -234,12 +234,12 @@
 +	gpio-keys {
 +		compatible = "gpio-keys";
 +		pinctrl-names = "default";
-+		pinctrl-0 = <&vol_up_default>;
++		pinctrl-0 = <&vol_down_default>;
 +		
-+		key-volume-up {
-+		    label = "Volume Up";
++		key-volume-down {
++		    label = "Volume Down";
 +		    gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
-+		    linux,code = <KEY_VOLUMEUP>;
++		    linux,code = <KEY_VOLUMEDOWN>;
 +		    debounce-interval = <15>;
 +		    wakeup-source;
 +		};
@@ -635,13 +635,13 @@
 +	linux,code = <0x73>;
 +};
 +
-+&pmk8550_gpios {
-+    vol_up_default: vol-up-default-state {
++&pm8550_gpios {
++    vol_down_default: vol-down-default-state {
 +        pins = "gpio6";
 +        function = "normal";
 +        bias-pull-up;
 +        input-enable;
-+        power-source = <0>; /* 1.8V domain */
++        power-source = <1>; /* 1.8V domain */
 +    };
 +};
 +
