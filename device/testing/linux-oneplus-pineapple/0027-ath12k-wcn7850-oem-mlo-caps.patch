@@ -1,0 +1,44 @@
+From: Pad 2 bring-up <bringup@localhost>
+Subject: [DIAGNOSTIC] ath12k: send OEM WCN7850 MLO allocation capabilities
+
+OEM HMT.2.0 firmware omits the QMI single_chip_mlo_support indication, so
+ath12k skips MLO host capabilities. Its startup dump shows max_mlo_peer
+remaining zero and a subsequent allocation using that count minus two.
+Reproduce the OEM CNSS KIWI host request (32 peers, one chip, two links).
+Leave ag->mlo_capable unchanged to isolate firmware resource initialization.
+This is a diagnostic for the OEM firmware, not a general MLO support fix.
+
+--- a/drivers/net/wireless/ath/ath12k/qmi.c
++++ b/drivers/net/wireless/ath/ath12k/qmi.c
+@@ -2091,6 +2091,31 @@
+ 	struct ath12k_base *partner_ab;
+ 	u8 hw_link_id = 0;
+ 	int i, j, ret;
++
++	/* Diagnostic: reproduce OEM KIWI host caps without enabling host MLO. */
++	if (ab->hw_rev == ATH12K_HW_WCN7850_HW20 && !ag->mlo_capable) {
++		req->mlo_capable_valid = 1;
++		req->mlo_capable = 1;
++		req->mlo_chip_id_valid = 1;
++		req->mlo_chip_id = 0;
++		req->mlo_group_id_valid = 1;
++		req->mlo_group_id = 0;
++		req->max_mlo_peer_valid = 1;
++		req->max_mlo_peer = ab->hw_params->max_mlo_peer;
++		req->mlo_num_chips_valid = 1;
++		req->mlo_num_chips = 1;
++		req->mlo_chip_info_valid = 1;
++		info = &req->mlo_chip_info[0];
++		info->chip_id = 0;
++		info->num_local_links = 2;
++		info->hw_link_id[0] = 0;
++		info->hw_link_id[1] = 1;
++		info->valid_mlo_link_id[0] = 1;
++		info->valid_mlo_link_id[1] = 1;
++		ath12k_info(ab, "diagnostic OEM MLO QMI caps: peers %u, links 2\n",
++			    req->max_mlo_peer);
++		return 0;
++	}
+ 
+ 	if (!ag->mlo_capable) {
+ 		ath12k_dbg(ab, ATH12K_DBG_QMI,

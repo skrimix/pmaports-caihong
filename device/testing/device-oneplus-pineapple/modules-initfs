@@ -8,3 +8,6 @@
 # with different initramfs module requirements, one modules-initfs.$variant
 # file should be created for each of them.
 panel-novatek-nt36532
+
+# Power the PCIe Wi-Fi endpoint before enumeration.
+pci-pwrctrl-pwrseq
