@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=20
+pkgrel=44
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -61,6 +61,7 @@ source="
 	0020-libbpf-fix-strset-use-after-free.patch
 	0021-input-novatek-nt36532-watchdog-recovery.patch
 	0022-arm64-dts-qcom-caihong-disable-splash-handoff.patch
+	0024-iommu-arm-smmu-qcom-sm8650-display-identity.patch
 
 
 	dummy-dtbo.dtso
@@ -134,6 +135,7 @@ d30a9b631e959e7454740b66b1ac7b08ee27a97ec7da8d1e4e748463db9ac6e651655c58ff9c9ad0
 e2555390d48cbbdc32a7d3f0c27599ff88f2fe3e786d1d0086caaa5b092cc3edcb6e95e2fb07034edb3793f6dc954da0662c723202eb7e2c4956c99b50919b12  0020-libbpf-fix-strset-use-after-free.patch
 e883b4a9260195a52f1352856d77ce596337df065150bc1f172b7a64a4e59a3319755ceb3ec2475b57acc714f6c871146f66644f7062996d6fc390a0e1632ba5  0021-input-novatek-nt36532-watchdog-recovery.patch
 6e81749dd68fbfe9ee4b51b44a2fcc53ef6367e0e2a3ccf501f919c41ce639f9ff5474538edb89a57665d7ffbc6576d160826d2eceb603d601192e00a8957f91  0022-arm64-dts-qcom-caihong-disable-splash-handoff.patch
+63772da59d1c692431dd685fec8bfdf3606691f82ac55aa0330902850134e51fbdfaa4104ec6df3e2ea3d5ca843887e0f773b8d20e0aa364d67f4e66c137d375  0024-iommu-arm-smmu-qcom-sm8650-display-identity.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
 d261de369fd8c62d61323bd0637a87ab77557d8b0f6fb84c5c112f54b2cf445610542a130da8decaebfadffc4b178338f9814934bdd7c62d20592ecec1406109  config-oneplus-pineapple.aarch64
 "
