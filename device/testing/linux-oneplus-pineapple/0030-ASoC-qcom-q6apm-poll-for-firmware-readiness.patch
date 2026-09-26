@@ -1,0 +1,125 @@
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -18,6 +18,10 @@
+ #include "audioreach.h"
+ #include "q6apm.h"
+ 
++/* AudioReach status codes differ from the legacy APR error numbers. */
++#define AR_ENOTREADY	10
++#define AR_ENOTEXIST	19
++
+ /* Graph Management */
+ struct apm_graph_mgmt_cmd {
+ 	struct apm_module_param_data param_data;
+@@ -142,20 +146,45 @@
+ 
+ static int q6apm_get_apm_state(struct q6apm *apm)
+ {
+-	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(0,
+-								APM_CMD_GET_SPF_STATE, 0);
++	int ret, i;
++	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_pkt(0,
++					APM_CMD_GET_SPF_STATE, 0, GPR_APM_MODULE_IID);
+ 	if (IS_ERR(pkt))
+ 		return PTR_ERR(pkt);
+ 
+-	q6apm_send_cmd_sync(apm, pkt, APM_CMD_RSP_GET_SPF_STATE);
+-
+-	return apm->state;
++	mutex_lock(&apm->lock);
++	apm->state = 0;
++	apm->result.opcode = 0;
++	apm->result.status = 0;
++
++	/* The audio PD can be up before APM accepts readiness queries. */
++	for (i = 0; i < 50; i++) {
++		ret = gpr_send_pkt(apm->gdev, pkt);
++		if (ret < 0)
++			break;
++
++		if (!wait_event_timeout(apm->wait,
++				apm->state == 1 || apm->result.status,
++				msecs_to_jiffies(100))) {
++			ret = -ETIMEDOUT;
++			continue;
++		}
++
++		ret = apm->result.status ? -EINVAL : apm->state;
++		break;
++	}
++	mutex_unlock(&apm->lock);
++
++	if (ret < 0)
++		dev_err(apm->dev, "APM readiness query failed: %d\n", ret);
++
++	return ret;
+ }
+ 
+ bool q6apm_is_adsp_ready(void)
+ {
+ 	if (g_apm)
+-		return q6apm_get_apm_state(g_apm);
++		return q6apm_get_apm_state(g_apm) == 1;
+ 
+ 	return false;
+ }
+@@ -762,9 +791,9 @@
+ 
+ 	idr_init(&apm->modules_idr);
+ 
+-	g_apm = apm;
+-
+-	q6apm_get_apm_state(apm);
++	ret = q6apm_get_apm_state(apm);
++	if (ret < 0)
++		return ret;
+ 
+ 	ret = snd_soc_register_component(dev, &q6apm_audio_component, NULL, 0);
+ 	if (ret < 0) {
+@@ -775,12 +804,15 @@
+ 	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
+ 	if (ret)
+ 		snd_soc_unregister_component(dev);
++	else
++		g_apm = apm;
+ 
+ 	return ret;
+ }
+ 
+ static void apm_remove(gpr_device_t *gdev)
+ {
++	g_apm = NULL;
+ 	of_platform_depopulate(&gdev->dev);
+ 	snd_soc_unregister_component(&gdev->dev);
+ }
+@@ -816,6 +848,12 @@
+ 		break;
+ 	case GPR_BASIC_RSP_RESULT:
+ 		switch (result->opcode) {
++		case APM_CMD_GET_SPF_STATE:
++			/* APM may not have registered its GPR port yet. */
++			if (result->status == AR_ENOTREADY ||
++			    result->status == AR_ENOTEXIST)
++				break;
++			fallthrough;
+ 		case APM_CMD_SHARED_MEM_MAP_REGIONS:
+ 		case APM_CMD_GRAPH_START:
+ 		case APM_CMD_GRAPH_OPEN:
+@@ -884,6 +922,7 @@
+ 	.gpr_callback = apm_callback,
+ 	.driver = {
+ 		.name = "qcom-apm",
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+ 		.of_match_table = of_match_ptr(apm_device_id),
+ 	},
+ };
+--- a/sound/soc/qcom/qdsp6/q6prm.c
++++ b/sound/soc/qcom/qdsp6/q6prm.c
+@@ -231,6 +231,7 @@
+ 	.gpr_callback = prm_callback,
+ 	.driver = {
+ 		.name = "qcom-prm",
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+ 		.of_match_table = of_match_ptr(prm_device_id),
+ 	},
+ };

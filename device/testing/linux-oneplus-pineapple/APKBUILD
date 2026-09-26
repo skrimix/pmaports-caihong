@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=48
+pkgrel=51
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -65,6 +65,9 @@ source="
 	0025-arm64-dts-qcom-caihong-wifi-power.patch
 	0026-ath12k-capture-wmi-startup-crash.patch
 	0027-ath12k-wcn7850-oem-mlo-caps.patch
+	0028-soc-qcom-apr-enable-gpr-replies-during-probe.patch
+	0029-arm64-dts-qcom-caihong-six-speaker-card.patch
+	0030-ASoC-qcom-q6apm-poll-for-firmware-readiness.patch
 
 
 	dummy-dtbo.dtso
@@ -142,6 +145,9 @@ e883b4a9260195a52f1352856d77ce596337df065150bc1f172b7a64a4e59a3319755ceb3ec2475b
 5a9520284aa68a9ad183d24f821d91a547f025cebba7f5a93ff0a4563b91d0fe640064b5d42d6064e542dee18bbb423437c52ec2d35ae901e344509d66866c97  0025-arm64-dts-qcom-caihong-wifi-power.patch
 d38fcb4fdbc990239d292e7720bc59d1de53dcaeddc283082c80945c410fb27e54fb48ebd4a363448f45f0676a527ea6853da9e7b704ce741c592e83034d1c07  0026-ath12k-capture-wmi-startup-crash.patch
 38e4af1b9b388900256e6709e62454fbceafe736410fe3bc40505b8f76dc378585d3411d3bf9525cc2056217a2c09dbb5235919c98a70f0d0657517b393b0e57  0027-ath12k-wcn7850-oem-mlo-caps.patch
+5a16866fc98d3518e20512d24c697a336f3c12fbdd602e78944f5c7b40947e83b790c15d18b74ae3a6a1fbb614e7879dd6675cd6288d9477cbffe7035eba1523  0028-soc-qcom-apr-enable-gpr-replies-during-probe.patch
+f9039f6cb4be5aa3b3e08c0caad9e359453801be583133864e0e9619b96111ff53ae09af6d791a7ed930b69e1ab261a9d5e82189d6bffc52c16fad3fc26cea9f  0029-arm64-dts-qcom-caihong-six-speaker-card.patch
+60a53b885a38de8d54c23eef48e03c59a63fde255650843f43d70c60882369c0b7de6d71f8c3a90a9ffb4ffe1e57d4a6a11c4a1206541fd1fd230cfc47fdb030  0030-ASoC-qcom-q6apm-poll-for-firmware-readiness.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
-89ed74151d7f60f44f9867e64591b7673ba773c0f5f8d7748c2073c2949c7e5c84376c5fdef176103712584988d04b6f007c0f8aaa210932aab17b499af2c3ec  config-oneplus-pineapple.aarch64
+94fda93c9dee1b1ca91216fa19957602d1b31034e1838ef4ae176d768320a4cb0b1801a2d5539c322bca8da741567947dee388b3aee4e7fb62d5e55b2c406d50  config-oneplus-pineapple.aarch64
 "
