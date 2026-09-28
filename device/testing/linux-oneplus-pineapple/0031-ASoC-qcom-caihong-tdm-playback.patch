@@ -1,0 +1,265 @@
+Subject: [PATCH] ASoC: qcom: configure Caihong secondary TDM playback
+
+TDM ABI: AudioReach pcm_tdm_api.h. Board format matches the OEM ACDB
+PARAM_ID_TDM_INTF_CFG payload: 0/1/1/1/0xff/8/32/0/0/0/0.
+
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -10,6 +10,7 @@
+ #include <sound/pcm_params.h>
+ #include <dt-bindings/soc/qcom,gpr.h>
+ #include "q6apm.h"
++#include "q6dsp-common.h"
+ #include "audioreach.h"
+ 
+ /* SubGraph Config */
+@@ -304,6 +305,8 @@
+ 		ch_map[1] =  PCM_CHANNEL_FR;
+ 		ch_map[2] =  PCM_CHANNEL_LS;
+ 		ch_map[3] =  PCM_CHANNEL_RS;
++	} else if (num_channels == 8) {
++		q6dsp_map_channels(ch_map, num_channels);
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(audioreach_set_default_channel_mapping);
+@@ -974,6 +977,70 @@
+ }
+ EXPORT_SYMBOL_GPL(audioreach_compr_set_param);
+ 
++static int audioreach_tdm_set_media_format(struct q6apm_graph *graph,
++					 const struct audioreach_module *module,
++					 const struct audioreach_module_config *cfg)
++{
++	struct apm_module_param_data *param;
++	struct param_id_tdm_intf_cfg *tdm;
++	struct apm_module_hw_ep_mf_cfg *hw;
++	struct apm_module_frame_size_factor_cfg *fs;
++	unsigned int format = cfg->fmt & SND_SOC_DAIFMT_FORMAT_MASK;
++	int tdm_size = ALIGN(APM_MODULE_PARAM_DATA_SIZE + sizeof(*tdm), 8);
++	int size = tdm_size + APM_HW_EP_CFG_PSIZE + APM_FS_CFG_PSIZE;
++	void *p;
++
++	/* Single-lane TDM, with the CPU supplying a non-inverted bit clock. */
++	if ((format != SND_SOC_DAIFMT_DSP_A && format != SND_SOC_DAIFMT_DSP_B) ||
++	    (cfg->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) != SND_SOC_DAIFMT_BP_FP ||
++	    (cfg->fmt & SND_SOC_DAIFMT_INV_MASK) != SND_SOC_DAIFMT_NB_NF ||
++	    !cfg->tdm_slots || cfg->tdm_slots > 32 || !cfg->tdm_slot_mask ||
++	    (cfg->tdm_slots < 32 && cfg->tdm_slot_mask >> cfg->tdm_slots) ||
++	    (cfg->tdm_slot_width != 16 && cfg->tdm_slot_width != 32) ||
++	    cfg->bit_width > cfg->tdm_slot_width ||
++	    cfg->num_channels != hweight32(cfg->tdm_slot_mask))
++		return -EINVAL;
++
++	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
++	if (IS_ERR(pkt))
++		return PTR_ERR(pkt);
++
++	p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
++	param = p;
++	param->module_instance_id = module->instance_id;
++	param->param_id = PARAM_ID_TDM_INTF_CFG;
++	param->param_size = sizeof(*tdm);
++	tdm = p + APM_MODULE_PARAM_DATA_SIZE;
++	tdm->lpaif_type = module->hw_interface_type;
++	tdm->intf_idx = module->hw_interface_idx;
++	tdm->sync_src = 1;
++	tdm->ctrl_data_out_enable = 1;
++	tdm->slot_mask = cfg->tdm_slot_mask;
++	tdm->nslots_per_frame = cfg->tdm_slots;
++	tdm->slot_width = cfg->tdm_slot_width;
++	tdm->sync_mode = 0;
++	tdm->ctrl_invert_sync_pulse = 0;
++	tdm->ctrl_sync_data_delay = format == SND_SOC_DAIFMT_DSP_A;
++
++	p += tdm_size;
++	hw = p;
++	hw->param_data.module_instance_id = module->instance_id;
++	hw->param_data.param_id = PARAM_ID_HW_EP_MF_CFG;
++	hw->param_data.param_size = sizeof(hw->mf);
++	hw->mf.sample_rate = cfg->sample_rate;
++	hw->mf.bit_width = cfg->bit_width;
++	hw->mf.num_channels = cfg->num_channels;
++	hw->mf.data_format = module->data_format;
++
++	fs = p + APM_HW_EP_CFG_PSIZE;
++	fs->param_data.module_instance_id = module->instance_id;
++	fs->param_data.param_id = PARAM_ID_HW_EP_FRAME_SIZE_FACTOR;
++	fs->param_data.param_size = sizeof(fs->frame_size_factor);
++	fs->frame_size_factor = 1;
++
++	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
++}
++
+ static int audioreach_i2s_set_media_format(struct q6apm_graph *graph,
+ 					   const struct audioreach_module *module,
+ 					   const struct audioreach_module_config *cfg)
+@@ -1341,6 +1408,9 @@
+ 	case MODULE_ID_I2S_SINK:
+ 		rc = audioreach_i2s_set_media_format(graph, module, cfg);
+ 		break;
++	case MODULE_ID_TDM_SINK:
++		rc = audioreach_tdm_set_media_format(graph, module, cfg);
++		break;
+ 	case MODULE_ID_WR_SHARED_MEM_EP:
+ 		rc = audioreach_shmem_set_media_format(graph, module, cfg);
+ 		break;
+--- a/sound/soc/qcom/qdsp6/audioreach.h
++++ b/sound/soc/qcom/qdsp6/audioreach.h
+@@ -20,6 +20,7 @@
+ #define MODULE_ID_PLACEHOLDER_DECODER	0x07001009
+ #define MODULE_ID_I2S_SINK		0x0700100A
+ #define MODULE_ID_I2S_SOURCE		0x0700100B
++#define MODULE_ID_TDM_SINK		0x0700100E
+ #define MODULE_ID_SAL			0x07001010
+ #define MODULE_ID_MFC			0x07001015
+ #define MODULE_ID_DATA_LOGGING		0x0700101A
+@@ -474,6 +475,21 @@
+ #define CONFIG_I2S_WS_SRC_INTERNAL		0x1
+ 
+ #define PARAM_ID_I2S_INTF_CFG			0x08001019
++#define PARAM_ID_TDM_INTF_CFG			0x0800101B
++struct param_id_tdm_intf_cfg {
++	u32 lpaif_type;
++	u32 intf_idx;
++	u16 sync_src;
++	u16 ctrl_data_out_enable;
++	u32 slot_mask;
++	u16 nslots_per_frame;
++	u16 slot_width;
++	u16 sync_mode;
++	u16 ctrl_invert_sync_pulse;
++	u16 ctrl_sync_data_delay;
++	u16 reserved;
++} __packed;
++
+ struct param_id_i2s_intf_cfg {
+ 	uint32_t lpaif_type;
+ 	uint32_t intf_idx;
+@@ -815,6 +831,9 @@
+ 	u16	dp_idx;
+ 	u32	channel_allocation;
+ 	u32	sd_line_mask;
++	u32	tdm_slot_mask;
++	u16	tdm_slots;
++	u16	tdm_slot_width;
+ 	int	fmt;
+ 	struct snd_codec codec;
+ 	u8 channel_map[AR_PCM_MAX_NUM_CHANNEL];
+--- a/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
++++ b/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
+@@ -261,6 +261,34 @@
+ 	return 0;
+ }
+ 
++static int q6tdm_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
++			    unsigned int rx_mask, int slots, int slot_width)
++{
++	struct q6apm_lpass_dai_data *data = dev_get_drvdata(dai->dev);
++	struct audioreach_module_config *cfg = &data->module_config[dai->id];
++
++	/* RX ports have even IDs. Only playback is implemented. */
++	if (dai->id & 1 || tx_mask || !rx_mask || slots < 1 || slots > 32 ||
++	    (slots < 32 && rx_mask >> slots) ||
++	    (slot_width != 16 && slot_width != 32))
++		return -EINVAL;
++
++	cfg->tdm_slot_mask = rx_mask;
++	cfg->tdm_slots = slots;
++	cfg->tdm_slot_width = slot_width;
++	return 0;
++}
++
++static const struct snd_soc_dai_ops q6tdm_ops = {
++	.prepare = q6apm_lpass_dai_prepare,
++	.startup = q6apm_lpass_dai_startup,
++	.shutdown = q6apm_lpass_dai_shutdown,
++	.hw_params = q6dma_hw_params,
++	.set_fmt = q6i2s_set_fmt,
++	.set_tdm_slot = q6tdm_set_tdm_slot,
++	.trigger = q6apm_lpass_dai_trigger,
++};
++
+ static const struct snd_soc_dai_ops q6dma_ops = {
+ 	.prepare	= q6apm_lpass_dai_prepare,
+ 	.startup	= q6apm_lpass_dai_startup,
+@@ -313,6 +341,7 @@
+ 
+ 	memset(&cfg, 0, sizeof(cfg));
+ 	cfg.q6i2s_ops = &q6i2s_ops;
++	cfg.q6tdm_ops = &q6tdm_ops;
+ 	cfg.q6dma_ops = &q6dma_ops;
+ 	cfg.q6hdmi_ops = &q6hdmi_ops;
+ 	dais = q6dsp_audio_ports_set_config(dev, &cfg, &num_dais);
+--- a/sound/soc/qcom/qdsp6/q6prm-clocks.c
++++ b/sound/soc/qcom/qdsp6/q6prm-clocks.c
+@@ -19,6 +19,7 @@
+ 	}
+ 
+ static const struct q6dsp_clk_init q6prm_clks[] = {
++	Q6PRM_CLK(LPASS_CLK_ID_SEC_TDM_IBIT),
+ 	Q6PRM_CLK(LPASS_CLK_ID_PRI_MI2S_IBIT),
+ 	Q6PRM_CLK(LPASS_CLK_ID_PRI_MI2S_EBIT),
+ 	Q6PRM_CLK(LPASS_CLK_ID_SEC_MI2S_IBIT),
+--- a/sound/soc/qcom/qdsp6/q6prm.h
++++ b/sound/soc/qcom/qdsp6/q6prm.h
+@@ -84,6 +84,7 @@
+ #define Q6PRM_LPASS_CLK_ID_RX_CORE_MCLK2_2X_MCLK 0x318
+ 
+ #define Q6PRM_LPASS_CLK_SRC_INTERNAL	1
++#define Q6PRM_LPASS_CLK_ID_SEC_TDM_IBIT	0x202
+ #define Q6PRM_LPASS_CLK_ROOT_DEFAULT	0
+ #define Q6PRM_HW_CORE_ID_LPASS		1
+ #define Q6PRM_HW_CORE_ID_DCODEC		2
+--- a/sound/soc/qcom/qdsp6/topology.c
++++ b/sound/soc/qcom/qdsp6/topology.c
+@@ -797,6 +797,7 @@
+ 	switch (mod->module_id) {
+ 	case MODULE_ID_CODEC_DMA_SINK:
+ 	case MODULE_ID_CODEC_DMA_SOURCE:
++	case MODULE_ID_TDM_SINK:
+ 		audioreach_widget_dma_module_load(mod, mod_array);
+ 		break;
+ 	case MODULE_ID_DATA_LOGGING:
+--- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
++++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+@@ -2,3 +2,40 @@
+ 	sound-name-prefix = "Amp6";
+ 	firmware-name = "qcom/sm8650/oneplus/caihong/aw882xx_acf.bin";
+ };
++
++&{/sound} {
++	compatible = "oneplus,caihong-sndcard";
++	clocks = <&q6prmcc LPASS_CLK_ID_SEC_TDM_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++	clock-names = "tdm-bit";
++	pinctrl-names = "default";
++	pinctrl-0 = <&caihong_tdm_pins>;
++};
++
++&tlmm {
++	caihong_tdm_pins: caihong-tdm-state {
++		clock-pins {
++			pins = "gpio121";
++			function = "i2s1_sck";
++			drive-strength = <6>;
++			bias-disable;
++		};
++		data-in-pins {
++			pins = "gpio122";
++			function = "i2s1_data0";
++			drive-strength = <6>;
++			bias-disable;
++		};
++		frame-sync-pins {
++			pins = "gpio123";
++			function = "i2s1_ws";
++			drive-strength = <6>;
++			bias-disable;
++		};
++		data-out-pins {
++			pins = "gpio124";
++			function = "i2s1_data1";
++			drive-strength = <6>;
++			bias-pull-down;
++		};
++	};
++};

@@ -1,0 +1,654 @@
+Subject: [PATCH] ASoC: aw88261: fix register access and power sequencing
+
+Correct PID 2113 feedback/boost/trim fields and propagate profile, volume,
+fade and startup I/O failures. Match the OEM dither startup sequence, cancel
+pending startup before shutdown and keep the event-only DAPM widget NOPM.
+Shutdown attempts all mute, feedback-disable and power-down operations.
+
+The register layout and startup order were checked against the pinned OnePlus
+AW882xx driver and validated with all six Caihong Music profiles.
+
+--- a/sound/soc/codecs/aw88261.c
++++ b/sound/soc/codecs/aw88261.c
+@@ -25,121 +25,121 @@
+ 	.val_format_endian = REGMAP_ENDIAN_BIG,
+ };
+ 
+-static void aw88261_dev_set_volume(struct aw_device *aw_dev, unsigned int value)
+-{
+-	struct aw_volume_desc *vol_desc = &aw_dev->volume_desc;
+-	unsigned int real_value, volume;
+-	unsigned int reg_value;
+-
+-	volume = min((value + vol_desc->init_volume), (unsigned int)AW88261_MUTE_VOL);
+-	real_value = DB_TO_REG_VAL(volume);
+-
+-	regmap_read(aw_dev->regmap, AW88261_SYSCTRL2_REG, &reg_value);
+-
+-	real_value = (real_value | (reg_value & AW88261_VOL_START_MASK));
+-
+-	dev_dbg(aw_dev->dev, "value 0x%x , real_value:0x%x", value, real_value);
+-
+-	regmap_write(aw_dev->regmap, AW88261_SYSCTRL2_REG, real_value);
+-}
+-
+-static void aw88261_dev_fade_in(struct aw_device *aw_dev)
++static int aw88261_dev_set_volume(struct aw_device *aw_dev, unsigned int value)
+ {
+ 	struct aw_volume_desc *desc = &aw_dev->volume_desc;
+-	int fade_in_vol = desc->ctl_volume;
+-	int fade_step = aw_dev->fade_step;
+-	int i;
+-
+-	if (fade_step == 0 || aw_dev->fade_in_time == 0) {
+-		aw88261_dev_set_volume(aw_dev, fade_in_vol);
+-		return;
+-	}
+-
+-	for (i = AW88261_MUTE_VOL; i >= fade_in_vol; i -= fade_step) {
+-		aw88261_dev_set_volume(aw_dev, i);
+-		usleep_range(aw_dev->fade_in_time,
+-					aw_dev->fade_in_time + 10);
+-	}
+-
+-	if (i != fade_in_vol)
+-		aw88261_dev_set_volume(aw_dev, fade_in_vol);
+-}
+-
+-static void aw88261_dev_fade_out(struct aw_device *aw_dev)
+-{
+-	struct aw_volume_desc *desc = &aw_dev->volume_desc;
+-	int fade_step = aw_dev->fade_step;
+-	int i;
+-
+-	if (fade_step == 0 || aw_dev->fade_out_time == 0) {
+-		aw88261_dev_set_volume(aw_dev, AW88261_MUTE_VOL);
+-		return;
+-	}
+-
+-	for (i = desc->ctl_volume; i <= AW88261_MUTE_VOL; i += fade_step) {
+-		aw88261_dev_set_volume(aw_dev, i);
++	unsigned int volume;
++
++	if (value > AW88261_MUTE_VOL || desc->init_volume > AW88261_MUTE_VOL)
++		return -EINVAL;
++	volume = min(value + desc->init_volume, (unsigned int)AW88261_MUTE_VOL);
++	return regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL2_REG,
++				~AW88261_VOL_MASK, DB_TO_REG_VAL(volume));
++}
++
++static int aw88261_dev_fade_in(struct aw_device *aw_dev)
++{
++	int target = aw_dev->volume_desc.ctl_volume;
++	int step = aw_dev->fade_step;
++	int i, ret;
++
++	if (!step || !aw_dev->fade_in_time)
++		return aw88261_dev_set_volume(aw_dev, target);
++	for (i = AW88261_MUTE_VOL; i > target; i -= step) {
++		ret = aw88261_dev_set_volume(aw_dev, i);
++		if (ret)
++			return ret;
++		usleep_range(aw_dev->fade_in_time, aw_dev->fade_in_time + 10);
++	}
++	return aw88261_dev_set_volume(aw_dev, target);
++}
++
++static int aw88261_dev_fade_out(struct aw_device *aw_dev)
++{
++	int step = aw_dev->fade_step;
++	int i, ret;
++
++	if (!step || !aw_dev->fade_out_time)
++		return aw88261_dev_set_volume(aw_dev, AW88261_MUTE_VOL);
++	for (i = aw_dev->volume_desc.ctl_volume; i < AW88261_MUTE_VOL; i += step) {
++		ret = aw88261_dev_set_volume(aw_dev, i);
++		if (ret)
++			return ret;
+ 		usleep_range(aw_dev->fade_out_time, aw_dev->fade_out_time + 10);
+ 	}
+-
+-	if (i != AW88261_MUTE_VOL) {
+-		aw88261_dev_set_volume(aw_dev, AW88261_MUTE_VOL);
+-		usleep_range(aw_dev->fade_out_time, aw_dev->fade_out_time + 10);
+-	}
+-}
+-
+-static void aw88261_dev_i2s_tx_enable(struct aw_device *aw_dev, bool flag)
++	return aw88261_dev_set_volume(aw_dev, AW88261_MUTE_VOL);
++}
++
++static int aw88261_dev_i2s_tx_enable(struct aw_device *aw_dev, bool flag)
+ {
+ 	if (flag)
+-		regmap_update_bits(aw_dev->regmap, AW88261_I2SCFG1_REG,
++		return regmap_update_bits(aw_dev->regmap, AW88261_I2SCTRL3_REG,
+ 			~AW88261_I2STXEN_MASK, AW88261_I2STXEN_ENABLE_VALUE);
+ 	else
+-		regmap_update_bits(aw_dev->regmap, AW88261_I2SCFG1_REG,
++		return regmap_update_bits(aw_dev->regmap, AW88261_I2SCTRL3_REG,
+ 			~AW88261_I2STXEN_MASK, AW88261_I2STXEN_DISABLE_VALUE);
+ }
+ 
+-static void aw88261_dev_pwd(struct aw_device *aw_dev, bool pwd)
++static int aw88261_dev_pwd(struct aw_device *aw_dev, bool pwd)
+ {
+ 	if (pwd)
+-		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++		return regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
+ 				~AW88261_PWDN_MASK, AW88261_PWDN_POWER_DOWN_VALUE);
+ 	else
+-		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++		return regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
+ 				~AW88261_PWDN_MASK, AW88261_PWDN_WORKING_VALUE);
+ }
+ 
+-static void aw88261_dev_amppd(struct aw_device *aw_dev, bool amppd)
++static int aw88261_dev_amppd(struct aw_device *aw_dev, bool amppd)
+ {
+ 	if (amppd)
+-		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++		return regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
+ 				~AW88261_AMPPD_MASK, AW88261_AMPPD_POWER_DOWN_VALUE);
+ 	else
+-		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++		return regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
+ 				~AW88261_AMPPD_MASK, AW88261_AMPPD_WORKING_VALUE);
+ }
+ 
+-static void aw88261_dev_mute(struct aw_device *aw_dev, bool is_mute)
+-{
++static int aw88261_dev_mute(struct aw_device *aw_dev, bool is_mute)
++{
++	int ret, cleanup;
++
+ 	if (is_mute) {
+-		aw88261_dev_fade_out(aw_dev);
+-		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++		ret = aw88261_dev_fade_out(aw_dev);
++		cleanup = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
+ 				~AW88261_HMUTE_MASK, AW88261_HMUTE_ENABLE_VALUE);
++		if (!ret)
++			ret = cleanup;
+ 	} else {
+-		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++		/* Establish maximum attenuation before clearing HMUTE. */
++		ret = aw88261_dev_set_volume(aw_dev, AW88261_MUTE_VOL);
++		if (ret)
++			return ret;
++		ret = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
+ 				~AW88261_HMUTE_MASK, AW88261_HMUTE_DISABLE_VALUE);
+-		aw88261_dev_fade_in(aw_dev);
+-	}
+-}
+-
+-static void aw88261_dev_clear_int_status(struct aw_device *aw_dev)
+-{
+-	unsigned int int_status;
+-
+-	/* read int status and clear */
+-	regmap_read(aw_dev->regmap, AW88261_SYSINT_REG, &int_status);
+-	/* make sure int status is clear */
+-	regmap_read(aw_dev->regmap, AW88261_SYSINT_REG, &int_status);
+-
+-	dev_dbg(aw_dev->dev, "read interrupt reg = 0x%04x", int_status);
++		if (!ret)
++			ret = aw88261_dev_fade_in(aw_dev);
++	}
++	if (ret) {
++		/* Try all mute/power-down bits even after a volume I/O failure. */
++		cleanup = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++				AW88261_SHUTDOWN_BITS, AW88261_SHUTDOWN_BITS);
++		if (cleanup)
++			dev_err(aw_dev->dev, "mute/power-down failed: %d", cleanup);
++		aw_dev->status = AW88261_DEV_PW_OFF;
++	}
++	return ret;
++}
++
++static int aw88261_dev_clear_int_status(struct aw_device *aw_dev)
++{
++	unsigned int status;
++	int ret;
++
++	ret = regmap_read(aw_dev->regmap, AW88261_SYSINT_REG, &status);
++	if (ret)
++		return ret;
++	return regmap_read(aw_dev->regmap, AW88261_SYSINT_REG, &status);
+ }
+ 
+ static int aw88261_dev_get_iis_status(struct aw_device *aw_dev)
+@@ -253,8 +253,7 @@
+ 		if (ret)
+ 			return ret;
+ 
+-		check_val = reg_val & (~AW88261_BIT_SYSST_CHECK_MASK)
+-							& AW88261_BIT_SYSST_CHECK;
++		check_val = reg_val & (~AW88261_BIT_SYSST_CHECK_MASK);
+ 		if (check_val != AW88261_BIT_SYSST_CHECK) {
+ 			dev_err(aw_dev->dev, "check sysst fail, reg_val=0x%04x, check:0x%x",
+ 				reg_val, AW88261_BIT_SYSST_CHECK);
+@@ -267,42 +266,57 @@
+ 	return -EPERM;
+ }
+ 
+-static void aw88261_dev_uls_hmute(struct aw_device *aw_dev, bool uls_hmute)
++static int aw88261_dev_uls_hmute(struct aw_device *aw_dev, bool uls_hmute)
+ {
+ 	if (uls_hmute)
+-		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++		return regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
+ 				~AW88261_ULS_HMUTE_MASK,
+ 				AW88261_ULS_HMUTE_ENABLE_VALUE);
+ 	else
+-		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
++		return regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
+ 				~AW88261_ULS_HMUTE_MASK,
+ 				AW88261_ULS_HMUTE_DISABLE_VALUE);
+ }
+ 
+-static void aw88261_reg_force_set(struct aw88261 *aw88261)
+-{
++static int aw88261_reg_force_set(struct aw88261 *aw88261)
++{
++	int ret;
++
+ 	if (aw88261->frcset_en == AW88261_FRCSET_ENABLE) {
+ 		/* set FORCE_PWM */
+-		regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL3_REG,
+-				AW88261_FORCE_PWM_MASK, AW88261_FORCE_PWM_FORCEMINUS_PWM_VALUE);
++		ret = regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL3_REG,
++				~AW88261_FORCE_PWM_MASK, AW88261_FORCE_PWM_FORCEMINUS_PWM_VALUE);
++		if (ret)
++			return ret;
+ 		/* set BOOST_OS_WIDTH */
+-		regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL5_REG,
+-				AW88261_BST_OS_WIDTH_MASK, AW88261_BST_OS_WIDTH_50NS_VALUE);
++		ret = regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL5_REG,
++				~AW88261_BST_OS_WIDTH_MASK, AW88261_BST_OS_WIDTH_50NS_VALUE);
++		if (ret)
++			return ret;
+ 		/* set BURST_LOOPR */
+-		regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL6_REG,
+-				AW88261_BST_LOOPR_MASK, AW88261_BST_LOOPR_340K_VALUE);
++		ret = regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL6_REG,
++				~AW88261_BST_LOOPR_MASK, AW88261_BST_LOOPR_340K_VALUE);
++		if (ret)
++			return ret;
+ 		/* set RSQN_DLY */
+-		regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL7_REG,
+-				AW88261_RSQN_DLY_MASK, AW88261_RSQN_DLY_35NS_VALUE);
++		ret = regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL7_REG,
++				~AW88261_RSQN_DLY_MASK, AW88261_RSQN_DLY_35NS_VALUE);
++		if (ret)
++			return ret;
+ 		/* set BURST_SSMODE */
+-		regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL8_REG,
+-				AW88261_BURST_SSMODE_MASK, AW88261_BURST_SSMODE_FAST_VALUE);
++		ret = regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL8_REG,
++				~AW88261_BURST_SSMODE_MASK, AW88261_BURST_SSMODE_FAST_VALUE);
++		if (ret)
++			return ret;
+ 		/* set BST_BURST */
+-		regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL9_REG,
+-				AW88261_BST_BURST_MASK, AW88261_BST_BURST_30MA_VALUE);
++		ret = regmap_update_bits(aw88261->regmap, AW88261_BSTCTRL9_REG,
++				~AW88261_BST_BURST_MASK, AW88261_BST_BURST_30MA_VALUE);
++		if (ret)
++			return ret;
+ 	} else {
+ 		dev_dbg(aw88261->aw_pa->dev, "needn't set reg value");
+ 	}
++	return 0;
+ }
+ 
+ static int aw88261_dev_get_icalk(struct aw_device *aw_dev, int16_t *icalk)
+@@ -353,7 +367,7 @@
+ 
+ 	reg_vcalk = (reg_vcalk >> AW88261_VCALK_SHIFT) & (reg_vcalkl >> AW88261_VCALKL_SHIFT);
+ 
+-	if (reg_vcalk & AW88261_EF_VSN_GESLP_SIGN_MASK)
++	if (reg_vcalk & (~AW88261_EF_VSN_GESLP_SIGN_MASK))
+ 		reg_vcalk = reg_vcalk | (~AW88261_EF_VSN_GESLP_NEG);
+ 	*vcalk = (int16_t)reg_vcalk;
+ 
+@@ -401,8 +415,8 @@
+ 	u16 reg_val;
+ 	u8 reg_addr;
+ 
+-	if (!len || !data) {
+-		dev_err(aw_dev->dev, "reg data is null or len is 0");
++	if (!len || !data || len % 4) {
++		dev_err(aw_dev->dev, "invalid register profile data or length");
+ 		return -EINVAL;
+ 	}
+ 
+@@ -422,7 +436,7 @@
+ 			aw88261->amppd_st = reg_val & (~AW88261_AMPPD_MASK);
+ 			ret = regmap_read(aw_dev->regmap, reg_addr, &read_val);
+ 			if (ret)
+-				break;
++				return ret;
+ 
+ 			/* keep all three bits from current hw status */
+ 			read_val &= (~AW88261_AMPPD_MASK) | (~AW88261_PWDN_MASK) |
+@@ -436,6 +450,7 @@
+ 		}
+ 
+ 		if (reg_addr == AW88261_DBGCTRL_REG) {
++			aw88261->dither_st = reg_val & ~AW88261_DITHER_MASK;
+ 			efcheck_val = reg_val & (~AW88261_EF_DBMD_MASK);
+ 			if (efcheck_val == AW88261_OR_VALUE)
+ 				aw88261->efuse_check = AW88261_EF_OR_CHECK;
+@@ -462,7 +477,7 @@
+ 
+ 		ret = regmap_write(aw_dev->regmap, reg_addr, reg_val);
+ 		if (ret)
+-			break;
++			return ret;
+ 	}
+ 
+ 	ret = aw88261_dev_set_vcalb(aw_dev);
+@@ -473,9 +488,7 @@
+ 		vol_desc->ctl_volume = 0;
+ 
+ 	/* keep min volume */
+-	aw88261_dev_set_volume(aw_dev, vol_desc->mute_volume);
+-
+-	return ret;
++	return aw88261_dev_set_volume(aw_dev, vol_desc->mute_volume);
+ }
+ 
+ static int aw88261_dev_get_prof_name(struct aw_device *aw_dev, int index, char **prof_name)
+@@ -554,8 +567,16 @@
+ 		return 0;
+ 	}
+ 
++	/* Keep dither off until the amplifier startup checks have passed. */
++	ret = regmap_update_bits(aw_dev->regmap, AW88261_DBGCTRL_REG,
++				~AW88261_DITHER_MASK, 0);
++	if (ret)
++		return ret;
++
+ 	/* power on */
+-	aw88261_dev_pwd(aw_dev, false);
++	ret = aw88261_dev_pwd(aw_dev, false);
++	if (ret)
++		goto sysst_check_fail;
+ 	usleep_range(AW88261_2000_US, AW88261_2000_US + 10);
+ 
+ 	ret = aw88261_dev_check_syspll(aw_dev);
+@@ -565,7 +586,9 @@
+ 	}
+ 
+ 	/* amppd on */
+-	aw88261_dev_amppd(aw_dev, false);
++	ret = aw88261_dev_amppd(aw_dev, false);
++	if (ret)
++		goto sysst_check_fail;
+ 	usleep_range(AW88261_1000_US, AW88261_1000_US + 50);
+ 
+ 	/* check i2s status */
+@@ -576,27 +599,52 @@
+ 	}
+ 
+ 	/* enable tx feedback */
+-	aw88261_dev_i2s_tx_enable(aw_dev, true);
+-
+-	if (aw88261->amppd_st)
+-		aw88261_dev_amppd(aw_dev, true);
+-
+-	aw88261_reg_force_set(aw88261);
++	ret = aw88261_dev_i2s_tx_enable(aw_dev, true);
++	if (ret)
++		goto sysst_check_fail;
++
++	if (aw88261->amppd_st) {
++		ret = aw88261_dev_amppd(aw_dev, true);
++		if (ret)
++			goto sysst_check_fail;
++	}
++
++	ret = aw88261_reg_force_set(aw88261);
++	if (ret)
++		goto sysst_check_fail;
+ 
+ 	/* close uls mute */
+-	aw88261_dev_uls_hmute(aw_dev, false);
++	ret = aw88261_dev_uls_hmute(aw_dev, false);
++	if (ret)
++		goto sysst_check_fail;
++
++	/* Restore the profile dither setting before unmuting. */
++	if (aw88261->dither_st) {
++		ret = regmap_update_bits(aw_dev->regmap, AW88261_DBGCTRL_REG,
++				~AW88261_DITHER_MASK, aw88261->dither_st);
++		if (ret) {
++			aw88261_dev_uls_hmute(aw_dev, true);
++			goto sysst_check_fail;
++		}
++	}
+ 
+ 	/* close mute */
+-	if (!aw88261->mute_st)
+-		aw88261_dev_mute(aw_dev, false);
+-
+-	/* clear inturrupt */
+-	aw88261_dev_clear_int_status(aw_dev);
++	if (!aw88261->mute_st) {
++		ret = aw88261_dev_mute(aw_dev, false);
++		if (ret)
++			goto sysst_check_fail;
++	}
++
++	/* clear interrupt */
++	ret = aw88261_dev_clear_int_status(aw_dev);
++	if (ret)
++		goto sysst_check_fail;
+ 	aw_dev->status = AW88261_DEV_PW_ON;
+ 
+ 	return 0;
+ 
+ sysst_check_fail:
++	regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG, AW88261_SHUTDOWN_BITS, AW88261_SHUTDOWN_BITS);
+ 	aw88261_dev_i2s_tx_enable(aw_dev, false);
+ 	aw88261_dev_clear_int_status(aw_dev);
+ 	aw88261_dev_amppd(aw_dev, true);
+@@ -609,31 +657,27 @@
+ 
+ static int aw88261_dev_stop(struct aw_device *aw_dev)
+ {
+-	if (aw_dev->status == AW88261_DEV_PW_OFF) {
+-		dev_info(aw_dev->dev, "already power off");
+-		return 0;
+-	}
+-
++	int ret = 0, err;
++
++	/* Attempt every shutdown operation, including after a partial start. */
++	err = aw88261_dev_mute(aw_dev, true);
++	if (!ret)
++		ret = err;
++	err = aw88261_dev_uls_hmute(aw_dev, true);
++	if (!ret)
++		ret = err;
++	err = aw88261_dev_i2s_tx_enable(aw_dev, false);
++	if (!ret)
++		ret = err;
++	usleep_range(AW88261_1000_US, AW88261_1000_US + 100);
++	err = aw88261_dev_amppd(aw_dev, true);
++	if (!ret)
++		ret = err;
++	err = aw88261_dev_pwd(aw_dev, true);
++	if (!ret)
++		ret = err;
+ 	aw_dev->status = AW88261_DEV_PW_OFF;
+-
+-	/* clear inturrupt */
+-	aw88261_dev_clear_int_status(aw_dev);
+-
+-	aw88261_dev_uls_hmute(aw_dev, true);
+-	/* set mute */
+-	aw88261_dev_mute(aw_dev, true);
+-
+-	/* close tx feedback */
+-	aw88261_dev_i2s_tx_enable(aw_dev, false);
+-	usleep_range(AW88261_1000_US, AW88261_1000_US + 100);
+-
+-	/* enable amppd */
+-	aw88261_dev_amppd(aw_dev, true);
+-
+-	/* set power down */
+-	aw88261_dev_pwd(aw_dev, true);
+-
+-	return 0;
++	return ret;
+ }
+ 
+ static int aw88261_reg_update(struct aw88261 *aw88261, bool force)
+@@ -680,7 +724,7 @@
+ 			dev_err(aw88261->aw_pa->dev, "aw88261 device start failed. retry = %d", i);
+ 			continue;
+ 		} else {
+-			dev_info(aw88261->aw_pa->dev, "start success\n");
++			dev_dbg(aw88261->aw_pa->dev, "start success\n");
+ 			break;
+ 		}
+ 	}
+@@ -879,7 +923,11 @@
+ 	}
+ 
+ 	if (aw88261->aw_pa->status) {
+-		aw88261_dev_stop(aw88261->aw_pa);
++		ret = aw88261_dev_stop(aw88261->aw_pa);
++		if (ret) {
++			mutex_unlock(&aw88261->lock);
++			return ret;
++		}
+ 		aw88261_start(aw88261, AW88261_SYNC_START);
+ 	}
+ 
+@@ -908,21 +956,23 @@
+ 	struct aw_volume_desc *vol_desc = &aw88261->aw_pa->volume_desc;
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+-	int value;
++	int value, ret = 0;
+ 
+ 	value = ucontrol->value.integer.value[0];
+ 
+ 	if (value < mc->min || value > mc->max)
+ 		return -EINVAL;
+ 
++	mutex_lock(&aw88261->lock);
+ 	if (vol_desc->ctl_volume != value) {
+-		vol_desc->ctl_volume = value;
+-		aw88261_dev_set_volume(aw88261->aw_pa, vol_desc->ctl_volume);
+-
+-		return 1;
+-	}
+-
+-	return 0;
++		ret = aw88261_dev_set_volume(aw88261->aw_pa, value);
++		if (!ret) {
++			vol_desc->ctl_volume = value;
++			ret = 1;
++		}
++	}
++	mutex_unlock(&aw88261->lock);
++	return ret;
+ }
+ 
+ static int aw88261_get_fade_step(struct snd_kcontrol *kcontrol,
+@@ -977,25 +1027,30 @@
+ 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+ 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
+ 
++	int ret = 0;
++
++	if (event == SND_SOC_DAPM_POST_PMD)
++		cancel_delayed_work_sync(&aw88261->start_work);
++
+ 	mutex_lock(&aw88261->lock);
+ 	switch (event) {
+ 	case SND_SOC_DAPM_PRE_PMU:
+ 		aw88261_start(aw88261, AW88261_ASYNC_START);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+-		aw88261_dev_stop(aw88261->aw_pa);
++		ret = aw88261_dev_stop(aw88261->aw_pa);
+ 		break;
+ 	default:
+ 		break;
+ 	}
+ 	mutex_unlock(&aw88261->lock);
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static const struct snd_soc_dapm_widget aw88261_dapm_widgets[] = {
+ 	 /* playback */
+-	SND_SOC_DAPM_AIF_IN_E("AIF_RX", "Speaker_Playback", 0, 0, 0, 0,
++	SND_SOC_DAPM_AIF_IN_E("AIF_RX", "Speaker_Playback", 0, SND_SOC_NOPM, 0, 0,
+ 					aw88261_playback_event,
+ 					SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+ 	SND_SOC_DAPM_OUTPUT("DAC Output"),
+@@ -1045,7 +1100,7 @@
+ static int aw88261_dev_init(struct aw88261 *aw88261, struct aw_container *aw_cfg)
+ {
+ 	struct aw_device *aw_dev = aw88261->aw_pa;
+-	int ret;
++	int ret, stop_ret;
+ 
+ 	ret = aw88395_dev_cfg_load(aw_dev, aw_cfg);
+ 	if (ret) {
+@@ -1074,21 +1129,9 @@
+ 		return ret;
+ 	}
+ 
+-	aw88261_dev_clear_int_status(aw_dev);
+-
+-	aw88261_dev_uls_hmute(aw_dev, true);
+-
+-	aw88261_dev_mute(aw_dev, true);
+-
+-	aw88261_dev_i2s_tx_enable(aw_dev, false);
+-
+-	usleep_range(AW88261_1000_US, AW88261_1000_US + 100);
+-
+-	aw88261_dev_amppd(aw_dev, true);
+-
+-	aw88261_dev_pwd(aw_dev, true);
+-
+-	return 0;
++	ret = aw88261_dev_clear_int_status(aw_dev);
++	stop_ret = aw88261_dev_stop(aw_dev);
++	return ret ? ret : stop_ret;
+ }
+ 
+ static int aw88261_request_firmware_file(struct aw88261 *aw88261)
+--- a/sound/soc/codecs/aw88261.h
++++ b/sound/soc/codecs/aw88261.h
+@@ -107,6 +107,13 @@
+ #define AW88261_EF_DBMD_MASK		(0xfff7)
+ #define AW88261_OR_VALUE		(0x0008)
+ 
++#define AW88261_SHUTDOWN_BITS		(AW88261_HMUTE_ENABLE_VALUE | \
++		AW88261_ULS_HMUTE_ENABLE_VALUE | AW88261_AMPPD_POWER_DOWN_VALUE | \
++		AW88261_PWDN_POWER_DOWN_VALUE)
++
++#define AW88261_DITHER_MASK		(~(1 << 14))
++#define AW88261_DITHER_ENABLE_VALUE	(1 << 14)
++
+ #define AW88261_TEMH_MASK		(0x83ff)
+ #define AW88261_TEML_MASK		(0x83ff)
+ #define AW88261_DEFAULT_CFG		(0x0000)
+@@ -450,6 +457,7 @@
+ 	int frcset_en;
+ 	unsigned int mute_st;
+ 	unsigned int amppd_st;
++	unsigned int dither_st;
+ 
+ 	bool phase_sync;
+ };

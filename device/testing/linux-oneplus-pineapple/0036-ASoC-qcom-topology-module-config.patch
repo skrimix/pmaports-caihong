@@ -1,0 +1,247 @@
+Subject: [PATCH] ASoC: qcom: load explicit module configurations safely
+
+Allow effect widgets and complete topology-supplied module parameters. Correct
+the private-array length, reject malformed parameter records and propagate
+widget load failures. OEM data takes precedence over generated defaults.
+
+--- a/sound/soc/qcom/qdsp6/topology.c
++++ b/sound/soc/qcom/qdsp6/topology.c
+@@ -220,7 +220,7 @@
+ 		sg_array = (struct snd_soc_tplg_vendor_array *)((u8 *)private->array + sz);
+ 		sg_elem = sg_array->value;
+ 		sz = sz + le32_to_cpu(sg_array->size);
+-		while (!found && tkn_count <= (le32_to_cpu(sg_array->num_elems) - 1)) {
++		while (!found && tkn_count < le32_to_cpu(sg_array->num_elems)) {
+ 			switch (le32_to_cpu(sg_elem->token)) {
+ 			case AR_TKN_U32_SUB_GRAPH_INSTANCE_ID:
+ 				found = true;
+@@ -253,7 +253,7 @@
+ 		cont_array = (struct snd_soc_tplg_vendor_array *)((u8 *)private->array + sz);
+ 		cont_elem = cont_array->value;
+ 		sz = sz + le32_to_cpu(cont_array->size);
+-		while (!found && tkn_count <= (le32_to_cpu(cont_array->num_elems) - 1)) {
++		while (!found && tkn_count < le32_to_cpu(cont_array->num_elems)) {
+ 			switch (le32_to_cpu(cont_elem->token)) {
+ 			case AR_TKN_U32_CONTAINER_INSTANCE_ID:
+ 				found = true;
+@@ -286,7 +286,7 @@
+ 		mod_array = (struct snd_soc_tplg_vendor_array *)((u8 *)private->array + sz);
+ 		mod_elem = mod_array->value;
+ 		sz = sz + le32_to_cpu(mod_array->size);
+-		while (!found && tkn_count <= (le32_to_cpu(mod_array->num_elems) - 1)) {
++		while (!found && tkn_count < le32_to_cpu(mod_array->num_elems)) {
+ 			switch (le32_to_cpu(mod_elem->token)) {
+ 			case AR_TKN_U32_MODULE_INSTANCE_ID:
+ 				found = true;
+@@ -308,28 +308,45 @@
+ static struct audioreach_module_priv_data *
+ audioreach_get_module_priv_data(const struct snd_soc_tplg_private *private)
+ {
+-	int sz;
+-
+-	for (sz = 0; sz < le32_to_cpu(private->size); ) {
++	const struct audioreach_module_priv_data *config = NULL;
++	u32 remaining = le32_to_cpu(private->size);
++	const u8 *p = (const void *)private->data;
++
++	while (remaining) {
+ 		const struct snd_soc_tplg_vendor_array *mod_array;
+-
+-		mod_array = (struct snd_soc_tplg_vendor_array *)((u8 *)private->array + sz);
++		u32 size;
++
++		if (remaining < sizeof(*mod_array))
++			return ERR_PTR(-EINVAL);
++		mod_array = (const void *)p;
++		size = le32_to_cpu(mod_array->size);
++		if (size < sizeof(*mod_array) || size > remaining || size % 4)
++			return ERR_PTR(-EINVAL);
+ 		if (le32_to_cpu(mod_array->type) == SND_SOC_AR_TPLG_MODULE_CFG_TYPE) {
+-			struct audioreach_module_priv_data *pdata;
+-
+-			pdata = kzalloc_flex(*pdata, data,
+-					     le32_to_cpu(mod_array->size));
+-			if (!pdata)
+-				return ERR_PTR(-ENOMEM);
+-
+-			memcpy(pdata, ((u8 *)private->data + sz), struct_size(pdata, data,
+-						le32_to_cpu(mod_array->size)));
+-			return pdata;
+-		}
+-
+-		sz = sz + le32_to_cpu(mod_array->size);
+-	}
+-
++			if (config || size <= sizeof(*config))
++				return ERR_PTR(-EINVAL);
++			config = (const void *)p;
++			if (config->priv[0] || config->priv[1])
++				return ERR_PTR(-EINVAL);
++		} else {
++			/* Module tokens are u32 values; bound the token walkers below. */
++			if (le32_to_cpu(mod_array->type) != SND_SOC_TPLG_TUPLE_TYPE_WORD ||
++			    !le32_to_cpu(mod_array->num_elems) ||
++			    (size - sizeof(*mod_array)) % sizeof(mod_array->value[0]) ||
++			    le32_to_cpu(mod_array->num_elems) !=
++			    (size - sizeof(*mod_array)) / sizeof(mod_array->value[0]))
++				return ERR_PTR(-EINVAL);
++		}
++		p += size;
++		remaining -= size;
++	}
++
++	if (config) {
++		struct audioreach_module_priv_data *data;
++
++		data = kmemdup(config, le32_to_cpu(config->size), GFP_KERNEL);
++		return data ? data : ERR_PTR(-ENOMEM);
++	}
+ 	return NULL;
+ }
+ 
+@@ -567,13 +584,13 @@
+ 	}
+ 
+ 	if (mod) {
+-		int pn, id = 0;
++		unsigned int pn, id = 0;
+ 
+ 		mod->module_id = module_id;
+ 		mod->max_ip_port = max_ip_port;
+ 		mod->max_op_port = max_op_port;
+ 		mod->src_mod_inst_id = src_mod_inst_id;
+-		for (pn = 0; pn < mod->max_op_port; pn++) {
++		for (pn = 0; pn < AR_MAX_MOD_LINKS && pn < mod->max_op_port; pn++) {
+ 			if (src_mod_op_port_id[pn] && dst_mod_inst_id[pn] &&
+ 			    dst_mod_ip_port_id[pn]) {
+ 				mod->src_mod_op_port_id[id] = src_mod_op_port_id[pn];
+@@ -597,6 +614,15 @@
+ 	struct audioreach_sub_graph *sg;
+ 	struct audioreach_module *mod;
+ 	struct snd_soc_dobj *dobj;
++	struct audioreach_module_priv_data *data __free(kfree) =
++		audioreach_get_module_priv_data(&tplg_w->priv);
++
++	if (IS_ERR(data))
++		return PTR_ERR(no_free_ptr(data));
++	if (!audioreach_get_sg_array(&tplg_w->priv) ||
++	    !audioreach_get_cont_array(&tplg_w->priv) ||
++	    !audioreach_get_module_array(&tplg_w->priv))
++		return -EINVAL;
+ 
+ 	sg = audioreach_parse_sg_tokens(apm, &tplg_w->priv);
+ 	if (IS_ERR(sg))
+@@ -610,7 +636,7 @@
+ 	if (IS_ERR_OR_NULL(mod))
+ 		return mod ? PTR_ERR(mod) : -ENODEV;
+ 
+-	mod->data = audioreach_get_module_priv_data(&tplg_w->priv);
++	mod->data = no_free_ptr(data);
+ 
+ 	dobj = &w->dobj;
+ 	dobj->private = mod;
+@@ -795,6 +821,10 @@
+ 	mod_array = audioreach_get_module_array(&tplg_w->priv);
+ 
+ 	switch (mod->module_id) {
++	case MODULE_ID_WR_SHARED_MEM_EP:
++	case MODULE_ID_RD_SHARED_MEM_EP:
++		/* Shared-memory endpoints need no hardware-interface tokens. */
++		break;
+ 	case MODULE_ID_CODEC_DMA_SINK:
+ 	case MODULE_ID_CODEC_DMA_SOURCE:
+ 	case MODULE_ID_TDM_SINK:
+@@ -920,16 +950,15 @@
+ 	switch (w->id) {
+ 	case snd_soc_dapm_aif_in:
+ 	case snd_soc_dapm_aif_out:
+-		audioreach_widget_load_buffer(component, index, w, tplg_w);
+-		break;
++		return audioreach_widget_load_buffer(component, index, w, tplg_w);
+ 	case snd_soc_dapm_decoder:
+ 	case snd_soc_dapm_encoder:
+ 	case snd_soc_dapm_src:
+-		audioreach_widget_load_enc_dec_cnv(component, index, w, tplg_w);
+-		break;
++		return audioreach_widget_load_enc_dec_cnv(component, index, w, tplg_w);
+ 	case snd_soc_dapm_buffer:
+-		audioreach_widget_load_buffer(component, index, w, tplg_w);
+-		break;
++		return audioreach_widget_load_buffer(component, index, w, tplg_w);
++	case snd_soc_dapm_effect:
++		return audioreach_widget_load_module_common(component, index, w, tplg_w);
+ 	case snd_soc_dapm_mixer:
+ 		return audioreach_widget_load_mixer(component, index, w, tplg_w);
+ 	case snd_soc_dapm_pga:
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -817,11 +817,36 @@
+ }
+ 
+ static int audioreach_set_module_config(struct q6apm_graph *graph,
+-					const struct audioreach_module *module,
+-					const struct audioreach_module_config *cfg)
+-{
+-	int size = le32_to_cpu(module->data->size);
++					const struct audioreach_module *module)
++{
++	const struct audioreach_module_priv_data *data = module->data;
++	const struct apm_module_param_data *param;
++	u32 size, remaining, param_size;
++	const u8 *record;
+ 	void *p;
++
++	if (!data || le32_to_cpu(data->size) <= sizeof(*data))
++		return -EINVAL;
++	/* The topology size includes its header; the APM payload does not. */
++	size = le32_to_cpu(data->size) - sizeof(*data);
++	if (size > 0xffffff - GPR_HDR_SIZE - APM_CMD_HDR_SIZE)
++		return -E2BIG;
++	remaining = size;
++	record = (const void *)data->data;
++	while (remaining) {
++		if (remaining < sizeof(*param))
++			return -EINVAL;
++		param = (const void *)record;
++		param_size = le32_to_cpu(param->param_size);
++		if (le32_to_cpu(param->module_instance_id) != module->instance_id ||
++		    !param->param_id || param->error_code ||
++		    param_size > remaining - sizeof(*param) ||
++		    ALIGN(param_size, 8) > remaining - sizeof(*param))
++			return -EINVAL;
++		param_size = sizeof(*param) + ALIGN(param_size, 8);
++		record += param_size;
++		remaining -= param_size;
++	}
+ 
+ 	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
+ 	if (IS_ERR(pkt))
+@@ -829,7 +854,7 @@
+ 
+ 	p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
+ 
+-	memcpy(p, module->data->data, size);
++	memcpy(p, data->data, size);
+ 
+ 	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
+ }
+@@ -1385,6 +1410,10 @@
+ {
+ 	int rc;
+ 
++	/* A complete topology-supplied configuration replaces generated defaults. */
++	if (module->data)
++		return audioreach_set_module_config(graph, module);
++
+ 	switch (module->module_id) {
+ 	case MODULE_ID_DATA_LOGGING:
+ 		rc = audioreach_module_enable(graph, module, true);
+@@ -1402,7 +1431,7 @@
+ 		rc = audioreach_display_port_set_media_format(graph, module, cfg);
+ 		break;
+ 	case  MODULE_ID_SMECNS_V2:
+-		rc = audioreach_set_module_config(graph, module, cfg);
++		rc = -EINVAL;
+ 		break;
+ 	case MODULE_ID_I2S_SOURCE:
+ 	case MODULE_ID_I2S_SINK:

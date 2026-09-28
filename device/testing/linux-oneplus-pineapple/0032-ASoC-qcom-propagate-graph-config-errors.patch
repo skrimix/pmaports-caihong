@@ -1,0 +1,77 @@
+Subject: [PATCH] ASoC: qcom: propagate graph-open and PCM-format failures
+
+Do not report a usable graph after the DSP rejects it, or continue to prepare
+a stream after a module rejects its media format.
+
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -42,7 +42,7 @@
+ {
+ 	struct audioreach_graph_info *info;
+ 	struct audioreach_graph *graph;
+-	int id;
++	int id, ret;
+ 
+ 	mutex_lock(&apm->lock);
+ 	graph = idr_find(&apm->graph_idr, graph_id);
+@@ -87,7 +87,15 @@
+ 
+ 	kref_init(&graph->refcount);
+ 
+-	q6apm_send_cmd_sync(apm, graph->graph, 0);
++	ret = q6apm_send_cmd_sync(apm, graph->graph, 0);
++	if (ret) {
++		mutex_lock(&apm->lock);
++		idr_remove(&apm->graph_idr, graph_id);
++		mutex_unlock(&apm->lock);
++		kfree(graph->graph);
++		kfree(graph);
++		return ERR_PTR(ret);
++	}
+ 
+ 	return graph;
+ }
+@@ -194,9 +202,7 @@
+ 	if (!module)
+ 		return -ENODEV;
+ 
+-	audioreach_set_media_format(graph, module, cfg);
+-
+-	return 0;
++	return audioreach_set_media_format(graph, module, cfg);
+ 
+ }
+ EXPORT_SYMBOL_GPL(q6apm_graph_media_format_shmem);
+@@ -399,6 +405,7 @@
+ 	struct audioreach_sub_graph *sgs;
+ 	struct audioreach_container *container;
+ 	struct audioreach_module *module;
++	int ret;
+ 
+ 	list_for_each_entry(sgs, &info->sg_list, node) {
+ 		list_for_each_entry(container, &sgs->container_list, node) {
+@@ -407,7 +414,9 @@
+ 					(module->module_id == MODULE_ID_RD_SHARED_MEM_EP))
+ 					continue;
+ 
+-				audioreach_set_media_format(graph, module, cfg);
++				ret = audioreach_set_media_format(graph, module, cfg);
++				if (ret)
++					return ret;
+ 			}
+ 		}
+ 	}
+--- a/sound/soc/qcom/qdsp6/q6apm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6apm-dai.c
+@@ -243,8 +243,10 @@
+ 	}
+ 
+ 	ret = q6apm_graph_media_format_pcm(prtd->graph, &cfg);
+-	if (ret < 0)
++	if (ret < 0) {
+ 		dev_err(dev, "%s: CMD Format block failed\n", __func__);
++		return ret;
++	}
+ 
+ 	ret = q6apm_alloc_fragments(prtd->graph, substream->stream, prtd->phys,
+ 				(prtd->pcm_size / prtd->periods), prtd->periods);

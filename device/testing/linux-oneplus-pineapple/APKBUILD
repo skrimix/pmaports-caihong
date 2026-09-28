@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=51
+pkgrel=67
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -68,6 +68,13 @@ source="
 	0028-soc-qcom-apr-enable-gpr-replies-during-probe.patch
 	0029-arm64-dts-qcom-caihong-six-speaker-card.patch
 	0030-ASoC-qcom-q6apm-poll-for-firmware-readiness.patch
+	0031-ASoC-qcom-caihong-tdm-playback.patch
+	0032-ASoC-qcom-propagate-graph-config-errors.patch
+	0034-ASoC-aw88261-fix-register-and-power-sequencing.patch
+	0036-ASoC-qcom-topology-module-config.patch
+	0037-ASoC-qcom-topology-control-links.patch
+	0039-ASoC-qcom-apm-config-shmem.patch
+	0040-ASoC-qcom-caihong-managed-speaker-playback.patch
 
 
 	dummy-dtbo.dtso
@@ -148,6 +155,13 @@ d38fcb4fdbc990239d292e7720bc59d1de53dcaeddc283082c80945c410fb27e54fb48ebd4a36344
 5a16866fc98d3518e20512d24c697a336f3c12fbdd602e78944f5c7b40947e83b790c15d18b74ae3a6a1fbb614e7879dd6675cd6288d9477cbffe7035eba1523  0028-soc-qcom-apr-enable-gpr-replies-during-probe.patch
 f9039f6cb4be5aa3b3e08c0caad9e359453801be583133864e0e9619b96111ff53ae09af6d791a7ed930b69e1ab261a9d5e82189d6bffc52c16fad3fc26cea9f  0029-arm64-dts-qcom-caihong-six-speaker-card.patch
 60a53b885a38de8d54c23eef48e03c59a63fde255650843f43d70c60882369c0b7de6d71f8c3a90a9ffb4ffe1e57d4a6a11c4a1206541fd1fd230cfc47fdb030  0030-ASoC-qcom-q6apm-poll-for-firmware-readiness.patch
+25c991163fc58a3932ec9b744a08337b8be80ae6283da4bf3efa889cbe991bc3d2337b042b6108b6850f788b2f7c17b77ec6abc9d8b7ff9b275a477fb5b5e24c  0031-ASoC-qcom-caihong-tdm-playback.patch
+852b46086958ed7d9c4ac10a3e0b81e37d11a5aa41d15b5e882266513792eadd0fb8df0f22cb3124c32cbb7429c7f84788539f2ad23ba0c7ebd5644e4b540a49  0032-ASoC-qcom-propagate-graph-config-errors.patch
+cc094d9ca54e820b7e706de06f8659b7d08ac65f080ced97e2c05d1643bd857b907e9a9a3c5bae081e32dd17f3cd91ad7077e32ec6cd26652549ae562876be14  0034-ASoC-aw88261-fix-register-and-power-sequencing.patch
+08f6acfe6753d3bb0a7b72c83e48e540fc8899a779ac8e6fbaeef4fc9e34c6b9d05123ac8629eb9330f6d38f920609869c3f4ed30726f2aa45d674d58f23931d  0036-ASoC-qcom-topology-module-config.patch
+458fdb356cc6751418bfa92a723fbc0bd419fa9a2dddcd35d078cef48d6db8b011fc0d28a2843a76036ed18cc87731f85cf645969e767ee831cadcf5b3b5ea86  0037-ASoC-qcom-topology-control-links.patch
+603cdd4d561a2615152693180aeac1f446fe744658d75d9883f1a2776a505935626351507de1e28ed0cbff9f55b7420191a1ddac2767dedf60684c9efeb375a5  0039-ASoC-qcom-apm-config-shmem.patch
+f8f5207baf9af56d79356aea975d95a7f2e24db2c54bbfdfd536b54b40a201775345c95a6aef55b62263aeec92a43fcda1bd93b70d71c0ebfb714517ef6f15c1  0040-ASoC-qcom-caihong-managed-speaker-playback.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
-94fda93c9dee1b1ca91216fa19957602d1b31034e1838ef4ae176d768320a4cb0b1801a2d5539c322bca8da741567947dee388b3aee4e7fb62d5e55b2c406d50  config-oneplus-pineapple.aarch64
+1a515612599e9ff445410b8ad4a0ba22ae373a7e78a31dd475f5f18c2e9c3210b2e7ed39fea48d4fc25d9ebaece62c090207d9b2887879dc209b5c40e0ef4646  config-oneplus-pineapple.aarch64
 "
