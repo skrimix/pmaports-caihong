@@ -1,0 +1,38 @@
+From: Pad 2 bring-up <local@localhost>
+Subject: [PATCH] power: supply: qcom_battmgr: read the USB adapter type
+
+The Qualcomm/Oplus USB property map assigns POWER_SUPPLY_PROP_USB_TYPE to
+USB_ADAP_TYPE (7). USB_TYPE (6) is a different property; on this device it
+returns 1 for both a PC port and a wall charger, misreported as SDP.
+Use property 7 for sysfs and the Oplus worker's diagnostic query, and cache
+its reply in usb_type. This changes telemetry reads, not USB control writes.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -1009,7 +1009,7 @@
+ 	[POWER_SUPPLY_PROP_CURRENT_NOW] = USB_CURR_NOW,
+ 	[POWER_SUPPLY_PROP_CURRENT_MAX] = USB_CURR_MAX,
+ 	[POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT] = USB_INPUT_CURR_LIMIT,
+-	[POWER_SUPPLY_PROP_USB_TYPE] = USB_TYPE,
++	[POWER_SUPPLY_PROP_USB_TYPE] = USB_ADAP_TYPE,
+ };
+ 
+ static int qcom_battmgr_usb_sm8350_update(struct qcom_battmgr *battmgr,
+@@ -1291,7 +1291,7 @@
+ 			 battmgr->oplus_was_online, battmgr->usb.online, battmgr->usb.usb_type, battmgr->usb.voltage_now, battmgr->oplus_otg_state);
+ 	/* Ask PMIC if we are currently receiving VBUS power */
+ 	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ONLINE, 0);
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_TYPE, 0);
++	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ADAP_TYPE, 0);
+ 	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_VOLT_NOW, 0);
+ 
+ 	dev_info(battmgr->dev, "[DIAGNOSTIC] 0x57 Fired, logging after query: | was_online: %d | online: %d | type: %d | volt: %d | otg_en: %d\n",
+@@ -1683,7 +1683,7 @@
+ 		case USB_INPUT_CURR_LIMIT:
+ 			battmgr->usb.current_limit = le32_to_cpu(resp->intval.value);
+ 			break;
+-		case USB_TYPE:
++		case USB_ADAP_TYPE:
+ 			battmgr->usb.usb_type = le32_to_cpu(resp->intval.value);
+ 			break;
+ 		default:
