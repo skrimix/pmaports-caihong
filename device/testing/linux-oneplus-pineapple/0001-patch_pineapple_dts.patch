@@ -1,6 +1,6 @@
 --- /dev/null	2026-08-21 07:35:49.106641906 +0200
 +++ fakesrc/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts	2026-08-25 07:52:42.694285821 +0200
-@@ -0,0 +1,899 @@
+@@ -0,0 +1,924 @@
 +/dts-v1/;
 +#include "sm8650-mtp.dts"
 +#include <dt-bindings/input/input.h>
@@ -723,6 +723,31 @@
 +		touchscreen-inverted-x; // required.
 +		panel = <&mdss_dsi0_panel>;
 +	};
++};
++
++/* Firmware PMIC inventory omits these inherited MTP SPMI devices. */
++&pmr735d_k {
++	status = "disabled";
++};
++
++&pm8010_m {
++	status = "disabled";
++};
++
++&pm8010_n {
++	status = "disabled";
++};
++
++&{/thermal-zones/pmr735d-k-thermal} {
++	status = "disabled";
++};
++
++&{/thermal-zones/pm8010-m-thermal} {
++	status = "disabled";
++};
++
++&{/thermal-zones/pm8010-n-thermal} {
++	status = "disabled";
 +};
 +
 +/* Reference the PMK8550 node (which is pmic@0) */
