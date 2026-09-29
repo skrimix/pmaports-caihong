@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=8
+pkgrel=9
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -12,6 +12,7 @@ depends="
 	linux-oneplus-pineapple
 	mkbootimg
 	android-tools
+	agetty
 	postmarketos-base
 	postmarketos-initramfs>=3.12.3-r2
 	lz4
@@ -21,6 +22,7 @@ depends="
 	unl0kr-fbforcerefresh
 	make-dynpart-mappings
 	hexagonrpcd
+	i2c-tools
 	firmware-oneplus-pineapple
 "
 makedepends="devicepkg-dev"
@@ -28,6 +30,9 @@ source="
 	deviceinfo
 	initfs.files
 	modules-initfs
+	pad2-usb-serial-initfs.sh
+	pad2-usb-serial-rootfs.service
+	80-oneplus-pineapple.preset
 "
 
 build() {
@@ -38,10 +43,22 @@ package() {
 	devicepkg_package $startdir $pkgname
 	install -Dm644 "$srcdir/initfs.files" \
 		"$pkgdir/usr/share/mkinitfs/files/00-$pkgname.files"
+	install -Dm755 "$srcdir/pad2-usb-serial-initfs.sh" \
+		"$pkgdir/usr/libexec/pad2-usb-serial-initfs.sh"
+	install -Dm644 "$srcdir/pad2-usb-serial-rootfs.service" \
+		"$pkgdir/usr/lib/systemd/system/pad2-usb-serial-rootfs.service"
+	install -Dm644 "$srcdir/80-oneplus-pineapple.preset" \
+		"$pkgdir/usr/lib/systemd/system-preset/80-oneplus-pineapple.preset"
+	# Sensor registry initialization crashes ADSP without the OEM configuration.
+	mkdir -p "$pkgdir/etc/systemd/system"
+	ln -s /dev/null "$pkgdir/etc/systemd/system/hexagonrpcd-adsp-sensorspd.service"
 }
 
 sha512sums="
 b66a8371d2403c78870b947c3fa4c39f4abefcfb5438158ad6c2187a63fc3c66a83167182d3337bfc125ab9a7f47feb919d60680a675b10c3fb660d5876e3506  deviceinfo
-6c43d4467231d4793107f638ea880d9a5d0fae2f0c2e10192b271c1892fad00f9e1a17c37384c3d06ce0da048afe57789d374a434a025d26e4629ae0ea8de353  initfs.files
+95260daa5bc5c6a1075fa7f704670dadf906f1740f969a9b5d233db8209bfeffc53f9a0e43bbec968c132ce386ce3aff4e52e2516f9aedf041b9afdf4d06435b  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
+d73a2cce5d39958340142d18ba550c32cc1df892d5137b7e87a29792afc1a3bb5d59fe4a78400bb25eb284e265ea93adb41c577e079319469cecbdb929a64bcc  pad2-usb-serial-initfs.sh
+47f4d8386431be7b425ac29af2a97c2b0beae8f5987c165ee4789a3e88cc733f89690cb0b2b24a2e50400cf5d183831e95f5df1be1997784c42929d607fe1caf  pad2-usb-serial-rootfs.service
+0aeda18749abb6af6ef3d45b7fedcab8c881085d8fbe6a3a06c22c5ddca9cd957f01b5ee4b9f78a87bae8ec7276a98ca5d2f46c8376edb4245426f1bbb35295c  80-oneplus-pineapple.preset
 "

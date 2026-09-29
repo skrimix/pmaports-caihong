@@ -1,0 +1,26 @@
+[Unit]
+Description=OnePlus Pad 2 USB root debug shell
+DefaultDependencies=no
+Requires=dev-ttyGS0.device
+After=dev-ttyGS0.device
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+IgnoreOnIsolate=yes
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/agetty --wait-cr --noclear --noissue --skip-login --login-program /bin/sh --login-options=-i -L 115200 - vt100
+Restart=always
+RestartSec=1
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyGS0
+TTYReset=yes
+TTYVHangup=yes
+SendSIGHUP=yes
+Environment=TERM=vt100 HOME=/root USER=root LOGNAME=root
+WorkingDirectory=/
+
+[Install]
+WantedBy=sysinit.target

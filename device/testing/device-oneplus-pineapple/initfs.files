@@ -1,1 +1,7 @@
 /usr/bin/qbootctl
+/usr/sbin/i2cdetect
+/usr/sbin/i2cget
+/usr/sbin/i2cdump
+/usr/sbin/i2cset
+/usr/sbin/i2ctransfer
+/usr/libexec/pad2-usb-serial-initfs.sh:/hooks-cleanup/99-pad2-usb-serial.sh
