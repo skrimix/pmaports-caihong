@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=2
+pkgrel=6
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -40,7 +40,7 @@ package() {
 }
 
 sha512sums="
-a697c6504359bfbbf5a3fb5e7508a8b45b32098e54c3b40401e5cf659957e1c696785c52d78405fbabc2a1ce9a85be6eb60d66461d55088a2626e66c762aa33f  deviceinfo
+b66a8371d2403c78870b947c3fa4c39f4abefcfb5438158ad6c2187a63fc3c66a83167182d3337bfc125ab9a7f47feb919d60680a675b10c3fb660d5876e3506  deviceinfo
 6c43d4467231d4793107f638ea880d9a5d0fae2f0c2e10192b271c1892fad00f9e1a17c37384c3d06ce0da048afe57789d374a434a025d26e4629ae0ea8de353  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
 "
