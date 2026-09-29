@@ -1059,6 +1059,7 @@ setup_usb_storage_configfs() {
 }
 
 debug_shell() {
+	local acm_getty_pid=""
 	splash_hide
 	echo "Entering debug shell"
 	# if we have a UDC it's already been configured for USB networking
@@ -1183,6 +1184,7 @@ debug_shell() {
 	# And on the usb acm port (if it exists)
 	if [ -e /dev/ttyGS0 ]; then
 		run_getty ttyGS0
+		acm_getty_pid=$!
 	fi
 
 	# To avoid racing with the host PC opening the ACM port, we spawn
@@ -1204,6 +1206,16 @@ debug_shell() {
 			export_logs
 		fi
 	done
+
+	# Stop the serial getty supervisor before closing its tty. Otherwise it
+	# can reopen the port, and gserial_free_port() waits forever in rmdir.
+	if [ -n "$acm_getty_pid" ]; then
+		# The supervisor may still be blocked in the initial read from the host.
+		kill -KILL "$acm_getty_pid" 2>/dev/null || true
+		wait "$acm_getty_pid" 2>/dev/null || true
+		# Close an active getty/login session as well, if one was started.
+		busybox fuser -k /dev/ttyGS0 2>/dev/null || true
+	fi
 
 	# Remove the ACM/mass storage gadget devices
 	# FIXME: would be nice to have a way to keep this on and

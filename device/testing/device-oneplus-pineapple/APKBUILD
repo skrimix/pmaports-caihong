@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=6
+pkgrel=8
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -13,6 +13,7 @@ depends="
 	mkbootimg
 	android-tools
 	postmarketos-base
+	postmarketos-initramfs>=3.12.3-r2
 	lz4
 	msm-firmware-loader
 	soc-qcom
