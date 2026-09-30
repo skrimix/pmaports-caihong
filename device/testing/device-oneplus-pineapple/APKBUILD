@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=12
+pkgrel=16
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -24,12 +24,17 @@ depends="
 	hexagonrpcd
 	i2c-tools
 	firmware-oneplus-pineapple
+	alsa-ucm-conf
+	alsa-utils
 "
 makedepends="devicepkg-dev"
 source="
 	deviceinfo
 	initfs.files
 	modules-initfs
+	caihong.conf
+	HiFi.conf
+	52-oneplus-pineapple.conf
 	pad2-usb-serial-initfs.sh
 	pad2-usb-serial-rootfs.service
 	80-oneplus-pineapple.preset
@@ -55,6 +60,19 @@ package() {
 		"$pkgdir/usr/libexec/caihong-persist-import"
 	install -Dm644 "$srcdir/caihong-persist-import.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-persist-import.service"
+	install -Dm644 "$srcdir/caihong.conf" \
+		"$pkgdir/usr/share/alsa/ucm2/Qualcomm/caihong/caihong.conf"
+	install -Dm644 "$srcdir/HiFi.conf" \
+		"$pkgdir/usr/share/alsa/ucm2/Qualcomm/caihong/HiFi.conf"
+	mkdir -p "$pkgdir/usr/share/alsa/ucm2/conf.d/caihong"
+	ln -s ../../Qualcomm/caihong/caihong.conf \
+		"$pkgdir/usr/share/alsa/ucm2/conf.d/caihong/caihong.conf"
+	install -Dm644 "$srcdir/52-oneplus-pineapple.conf" \
+		"$pkgdir/usr/share/wireplumber/wireplumber.conf.d/52-oneplus-pineapple.conf"
+	# Per-unit data stays in Linux state, outside the shared firmware package.
+	mkdir -p "$pkgdir/lib/firmware/qcom/caihong"
+	ln -s /var/lib/caihong-persist/media/aw_cali.bin \
+		"$pkgdir/lib/firmware/qcom/caihong/aw_cali.bin"
 	# Sensor registry initialization crashes ADSP without the OEM configuration.
 	mkdir -p "$pkgdir/etc/systemd/system"
 	ln -s /dev/null "$pkgdir/etc/systemd/system/hexagonrpcd-adsp-sensorspd.service"
@@ -64,6 +82,9 @@ sha512sums="
 b66a8371d2403c78870b947c3fa4c39f4abefcfb5438158ad6c2187a63fc3c66a83167182d3337bfc125ab9a7f47feb919d60680a675b10c3fb660d5876e3506  deviceinfo
 95260daa5bc5c6a1075fa7f704670dadf906f1740f969a9b5d233db8209bfeffc53f9a0e43bbec968c132ce386ce3aff4e52e2516f9aedf041b9afdf4d06435b  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
+fd79662c3ea9ea4eacd8711f5e9c386b8a3a052ec88cbefc59b98d998b0abd1bd1dd594907511e98e90c3b65762ad7a4f54dc9d8fff5ef508a16be76f645cf66  caihong.conf
+452cfacd546f0717e7c01da32449a98e7847a071229ed8cc95fb3adf28fdd843e2a67ae2816e29c69ef57ba27f2e8a094f1ecb17b298c1021ac9baaf4d054a68  HiFi.conf
+e777888dcee5616c5a2174a133417f1da83d82b945e224edc3551cbdea37bee53db8d65a53fd234adc72b485ac5e381ddff3c59152b215f547e18e9c27349b70  52-oneplus-pineapple.conf
 d73a2cce5d39958340142d18ba550c32cc1df892d5137b7e87a29792afc1a3bb5d59fe4a78400bb25eb284e265ea93adb41c577e079319469cecbdb929a64bcc  pad2-usb-serial-initfs.sh
 47f4d8386431be7b425ac29af2a97c2b0beae8f5987c165ee4789a3e88cc733f89690cb0b2b24a2e50400cf5d183831e95f5df1be1997784c42929d607fe1caf  pad2-usb-serial-rootfs.service
 c7e6a5fb642072589bd4891bcf34a6d90e50bda5085367e7b7ae6555ec31c3444fe4d8fc1fab0130314bfec9a9df434599b487bd517791a7952ec60484415c65  80-oneplus-pineapple.preset

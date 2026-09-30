@@ -265,11 +265,12 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +obj-$(CONFIG_SND_SOC_CAIHONG) += snd-soc-caihong.o
 --- /dev/null
 +++ b/sound/soc/qcom/caihong.c
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,592 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/* Caihong speaker supply limits, using the stock scene-0 RX/feedback graph. */
 +#include <dt-bindings/sound/qcom,q6afe.h>
 +#include <linux/clk.h>
++#include <linux/firmware.h>
 +#include <linux/module.h>
 +#include <linux/platform_device.h>
 +#include <sound/pcm_params.h>
@@ -284,6 +285,9 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +
 +#define CAIHONG_MONITOR_MS 5000
 +#define CAIHONG_RX_IID 0x42ce
++#define CAIHONG_CALIBRATION "qcom/caihong/aw_cali.bin"
++#define CAIHONG_RE 0x10013d32
++#define CAIHONG_ROTATION 0x10013d2e
 +#define CAIHONG_PARAM_BANK0 0x10013d2a
 +#define CAIHONG_VMAX_LEFT 0x10013d17
 +#define CAIHONG_WRITE_DATA 0
@@ -310,12 +314,83 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	struct delayed_work work;
 +	struct mutex lock;
 +	bool running, active, fault;
++	bool calibration_applied;
++	u32 resistance[4];
 +	unsigned int volume;
 +	int rows[6];
 +	u32 baseline[4];
 +	unsigned int applied_volume;
 +	unsigned long next_sample;
 +};
++
++/* Persist stores four right-aligned, ten-byte decimal milliohm records.
++ * Reject other layouts and values outside the OEM board's 4..30 ohm range.
++ * Never synthesize calibration for the populated channels 5/6.
++ */
++static int caihong_load_calibration(struct caihong_audio *audio)
++{
++	const struct firmware *fw;
++	u32 resistance[4];
++	unsigned int value;
++	int i, j, ret;
++
++	memset(audio->resistance, 0, sizeof(audio->resistance));
++	ret = request_firmware_direct(&fw, CAIHONG_CALIBRATION, audio->rtd->card->dev);
++	if (ret)
++		return ret;
++	ret = -EINVAL;
++	if (fw->size != 40)
++		goto out;
++	for (i = 0; i < ARRAY_SIZE(resistance); i++) {
++		const u8 *record = fw->data + i * 10;
++
++		for (j = 0; j < 10 && record[j] == ' '; j++)
++			;
++		if (j == 10)
++			goto out;
++		value = 0;
++		for (; j < 10; j++) {
++			if (record[j] < '0' || record[j] > '9')
++				goto out;
++			value = value * 10 + record[j] - '0';
++			if (value > 30000)
++				goto out;
++		}
++		if (value < 4000)
++			goto out;
++		resistance[i] = value * 4096 / 1000;
++	}
++	memcpy(audio->resistance, resistance, sizeof(resistance));
++	ret = 0;
++out:
++	release_firmware(fw);
++	return ret;
++}
++
++static int caihong_apply_calibration(struct caihong_audio *audio)
++{
++	struct device *dev = snd_soc_rtd_to_cpu(audio->rtd, 0)->dev;
++	u32 words[8], rotation = 0;
++	int i, ret;
++
++	for (i = 0; i < ARRAY_SIZE(audio->resistance); i++) {
++		if (!audio->resistance[i])
++			return -EINVAL;
++		words[i * 2] = i;
++		words[i * 2 + 1] = audio->resistance[i];
++	}
++	ret = q6apm_module_param(dev, CAIHONG_RX_IID, CAIHONG_RE,
++			       words, sizeof(words), false);
++	if (ret)
++		return ret;
++	ret = q6apm_module_param(dev, CAIHONG_RX_IID, CAIHONG_ROTATION,
++			       &rotation, sizeof(rotation), false);
++	if (ret)
++		return ret;
++	audio->calibration_applied = true;
++	dev_info(audio->rtd->card->dev, "speaker calibration applied: RE indices 0-3, rotation 0\n");
++	return 0;
++}
 +
 +static int select_limit(unsigned int raw, int previous)
 +{
@@ -405,6 +480,13 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +				ret = rows[i];
 +				goto fault;
 +			}
++		}
++		if (!audio->calibration_applied) {
++			operation = "apply speaker calibration";
++			i = 0;
++			ret = caihong_apply_calibration(audio);
++			if (ret)
++				goto fault;
 +		}
 +		for (i = 0; i < ARRAY_SIZE(audio->baseline); i++) {
 +			operation = "configure DSP vmax";
@@ -553,6 +635,10 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +			mutex_unlock(&audio->lock);
 +			return -ENODEV;
 +		}
++		if (!audio->resistance[0]) {
++			mutex_unlock(&audio->lock);
++			return -EINVAL;
++		}
 +		audio->active = false;
 +		audio->running = true;
 +		audio->fault = false;
@@ -635,6 +721,10 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +
 +	caihong_audio_stop(audio);
 +	cancel_delayed_work_sync(&audio->work);
++	/* The backend graph closes at shutdown, not on STOP/pause/resume. */
++	mutex_lock(&audio->lock);
++	audio->calibration_applied = false;
++	mutex_unlock(&audio->lock);
 +	clk_disable_unprepare(audio->tdm_clk);
 +}
 +
@@ -674,8 +764,16 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	mutex_lock(&audio->lock);
 +	if (audio->substream)
 +		ret = -EBUSY;
-+	else
-+		audio->substream = substream;
++	else {
++		/* The imported factory data is fixed for this card lifetime. */
++		if (!audio->resistance[0])
++			ret = caihong_load_calibration(audio);
++		if (ret)
++			dev_err(rtd->card->dev, "speaker calibration %s failed: %d; speakers remain muted\n",
++				CAIHONG_CALIBRATION, ret);
++		else
++			audio->substream = substream;
++	}
 +	mutex_unlock(&audio->lock);
 +	return ret;
 +}

@@ -1,13 +1,14 @@
 maintainer=""
 pkgname=firmware-oneplus-pineapple
 pkgver=1
-pkgrel=2
+pkgrel=4
 _commit="e5f0b275675db29de8c88972cc5246d89f1c9bce"
 pkgdesc="Firmware files for OnePlus pineapple and pineapplep"
 url="https://github.com/RubyLegend/firmware-oneplus-pineapple"
 arch="aarch64"
 depends="linux-firmware-ath12k linux-firmware-qcom wireless-regdb"
 license="proprietary"
+makedepends="alsa-utils"
 source="
 	$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz 
 	0001-gpu-firmware.files
@@ -17,9 +18,16 @@ source="
 	caihong-bdwlan.elf
 	0005-audio-firmware.files
 	caihong-aw882xx_acf.bin
+	caihong-topology.tar.gz
+	caihong-topology.txt
 	"
 options="!check !strip !archcheck !spdx !tracedeps pmb:cross-native"
 builddir="$srcdir/firmware-oneplus-pineapple-$_commit"
+
+build() {
+	cd "$srcdir/caihong-topology"
+	ALSA_CONFIG_TPLG="$srcdir/caihong-topology" alsatplg -c topology.conf -o OnePlus-Pad-2-tplg.bin
+}
 
 package() {
 	mkdir -p "$pkgdir/lib/firmware/qcom/sm8650/"
@@ -45,6 +53,10 @@ package() {
 	# Stock ODM AW88261 profiles, selected by the board audio-channel IDs.
 	install -Dm644 "$srcdir/caihong-aw882xx_acf.bin" \
 		"$pkgdir/lib/firmware/qcom/sm8650/oneplus/caihong/aw882xx_acf.bin"
+	install -Dm644 "$srcdir/caihong-topology/OnePlus-Pad-2-tplg.bin" \
+		"$pkgdir/lib/firmware/qcom/caihong/OnePlus-Pad-2-tplg.bin"
+	install -Dm644 "$srcdir/caihong-topology.txt" \
+		"$pkgdir/usr/share/doc/$pkgname/caihong-topology.txt"
 	install -Dm644 "$srcdir/0005-audio-firmware.files" \
 		"$pkgdir/usr/share/mkinitfs/files/0005-audio-firmware.files"
 
@@ -61,6 +73,8 @@ c98052bca14a9677abe86b63567d4f4529a436a83c5fc71a9b26cce05e18f68a4a12e4dbbb82b563
 71558da78915dc8c581ecb797f1f03b8572727f153aa7db95425b57668a167f31d5f54be5ef05a204c4a7e4114af8ad8a39c246c8cdaba510da99200c58f830e  0003-adsp-cdsp-firmware.files
 4786d53b66f3c2da49264e0f8fcd9461cbd2592b683e9899e29a4812176a94da433304ded5ac9a342961f5cbb08fefe5a08c0f1a6f0d68b67cb45526591754ce  0004-wifi-firmware.files
 490995949837e26686351b4aff061aa24b3b756b14356712caa54e23169f539c8bcc7bb523b009e0ccbe05e211321329bf8f83ce4b3974887bcef2b0315c7c47  caihong-bdwlan.elf
-a2909dda800e837ca4d52a30acab9397447154ae1a85ed093c8149b456d16e149bf28b19c712f4556c0d3bddc3000e3360c2e918a8a508fff359e340a6423fdc  0005-audio-firmware.files
+e55224c432f44688c9f6fe2e4748b9bcb09aaf8b38a2938cb9c8588ffa1a13532b06ab7b3ea2cc9bdf76a1c1d288fcae997506a35f1ecdc2beaedae3d715fcaf  0005-audio-firmware.files
 4bd75f4f1d0e77c202d9a56ffe9851453198ca745f2496aff037c0140877f1cb73da0d8e2657434b423e1e4b5d60003f08c5fd1615b85cc6c0e181b5ad6940d5  caihong-aw882xx_acf.bin
+62bf1682b66ed2c75c6bc15cae2eea2f1df271ad2619af33cfa308cd6d4a99cfe53e9417d4c213ba5715dfaa2b638ef6db85f1bc1750478a969e76b4a2a5a0fb  caihong-topology.tar.gz
+fd2239aca400cf7ede7e840aa7e3a9f936ec0c61c619d8a925eb2994149b39f635b7e21431409b5d6940af84e553d2470c300533308890488d033284f478a37f  caihong-topology.txt
 "
