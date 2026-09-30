@@ -50,7 +50,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  &{/sound} {
 --- a/sound/soc/codecs/aw88261.c
 +++ b/sound/soc/codecs/aw88261.c
-@@ -680,6 +680,91 @@
+@@ -680,6 +680,102 @@
  	return ret;
  }
  
@@ -66,6 +66,11 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	mutex_lock(&amp->lock);
 +	if (!amp->monitor_managed) {
 +		ret = -EINVAL;
++		goto out;
++	}
++	/* The board trigger runs before the CPU DAI starts the TDM graph. */
++	if (!amp->playback_started) {
++		ret = -EINPROGRESS;
 +		goto out;
 +	}
 +	if (amp->start_result) {
@@ -96,7 +101,8 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	if (attenuation > AW88261_MUTE_VOL || (ipeak & ~AW88261_IPEAK_BITS))
 +		return -EINVAL;
 +	mutex_lock(&amp->lock);
-+	if (!amp->monitor_managed || aw_dev->status != AW88261_DEV_PW_ON) {
++	if (!amp->monitor_managed || !amp->playback_started ||
++	    aw_dev->status != AW88261_DEV_PW_ON) {
 +		ret = -EPIPE;
 +		goto out;
 +	}
@@ -130,7 +136,12 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	struct aw88261 *amp = snd_soc_component_get_drvdata(component);
 +	int ret;
 +
++	/* The board holds its monitor lock; startup work takes only the amp lock. */
++	cancel_delayed_work_sync(&amp->start_work);
 +	mutex_lock(&amp->lock);
++	amp->playback_started = false;
++	if (amp->start_result == -EINPROGRESS)
++		amp->start_result = -ECANCELED;
 +	ret = aw88261_dev_mute(amp->aw_pa, true);
 +	amp->monitor_audible = false;
 +	amp->aw_pa->volume_desc.ctl_volume = AW88261_MUTE_VOL;
@@ -142,7 +153,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  static int aw88261_reg_update(struct aw88261 *aw88261, bool force)
  {
  	struct aw_device *aw_dev = aw88261->aw_pa;
-@@ -728,6 +813,7 @@
+@@ -728,6 +824,7 @@
  			break;
  		}
  	}
@@ -150,7 +161,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  }
  
  static void aw88261_startup_work(struct work_struct *work)
-@@ -742,12 +828,17 @@
+@@ -742,12 +839,17 @@
  
  static void aw88261_start(struct aw88261 *aw88261, bool sync_start)
  {
@@ -172,19 +183,67 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  	if (sync_start == AW88261_SYNC_START)
  		aw88261_start_pa(aw88261);
  	else
-@@ -1035,9 +1126,11 @@
+@@ -756,9 +858,42 @@
+ 			AW88261_START_WORK_DELAY_MS);
+ }
+ 
++static int aw88261_trigger(struct snd_pcm_substream *substream, int cmd,
++			   struct snd_soc_dai *dai)
++{
++	struct aw88261 *amp = snd_soc_component_get_drvdata(dai->component);
++
++	if (!amp->monitor_managed || substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
++		return 0;
++
++	switch (cmd) {
++	case SNDRV_PCM_TRIGGER_START:
++	case SNDRV_PCM_TRIGGER_RESUME:
++	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		/* ASoC triggers CPU DAIs first, so the TDM graph is running now. */
++		mutex_lock(&amp->lock);
++		amp->playback_started = true;
++		aw88261_start(amp, AW88261_ASYNC_START);
++		mutex_unlock(&amp->lock);
++		return 0;
++	case SNDRV_PCM_TRIGGER_STOP:
++	case SNDRV_PCM_TRIGGER_SUSPEND:
++	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
++		/* The board cancels startup and mutes under its monitor lock. */
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const struct snd_soc_dai_ops aw88261_dai_ops = {
++	.trigger = aw88261_trigger,
++};
++
+ static struct snd_soc_dai_driver aw88261_dai[] = {
+ 	{
+ 		.name = "aw88261-aif",
++		.ops = &aw88261_dai_ops,
+ 		.id = 1,
+ 		.playback = {
+ 			.stream_name = "Speaker_Playback",
+@@ -1035,9 +1170,15 @@
  	mutex_lock(&aw88261->lock);
  	switch (event) {
  	case SND_SOC_DAPM_PRE_PMU:
+-		aw88261_start(aw88261, AW88261_ASYNC_START);
 +		aw88261->monitor_audible = false;
- 		aw88261_start(aw88261, AW88261_ASYNC_START);
++		if (aw88261->monitor_managed)
++			aw88261->playback_started = false;
++		else
++			aw88261_start(aw88261, AW88261_ASYNC_START);
  		break;
  	case SND_SOC_DAPM_POST_PMD:
++		aw88261->playback_started = false;
 +		aw88261->start_result = -EPIPE;
  		ret = aw88261_dev_stop(aw88261->aw_pa);
  		break;
  	default:
-@@ -1186,6 +1279,12 @@
+@@ -1186,6 +1327,12 @@
  	int ret;
  
  	INIT_DELAYED_WORK(&aw88261->start_work, aw88261_startup_work);
@@ -197,7 +256,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  
  	ret = aw88261_request_firmware_file(aw88261);
  	if (ret)
-@@ -1203,6 +1302,9 @@
+@@ -1203,6 +1350,9 @@
  							ARRAY_SIZE(aw88261_audio_map));
  	if (ret)
  		return ret;
@@ -209,13 +268,14 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  							ARRAY_SIZE(aw88261_controls));
 --- a/sound/soc/codecs/aw88261.h
 +++ b/sound/soc/codecs/aw88261.h
-@@ -460,6 +460,18 @@
+@@ -460,6 +460,19 @@
  	unsigned int dither_st;
  
  	bool phase_sync;
 -};
 +	bool monitor_managed;
 +	bool monitor_audible;
++	bool playback_started;
 +	/* Protected by lock; -EINPROGRESS only while startup is pending. */
 +	int start_result;
 +};
