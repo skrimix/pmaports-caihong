@@ -1,15 +1,36 @@
-Subject: [PATCH] ASoC: qcom: serialize topology control links and bound graph edges
+Subject: [PATCH] ASoC: qcom: serialize topology control links
 
-Keep linked feedback subgraphs in one graph lifecycle. Fix the module-list
-header size for multiple containers and walk stored data edges, not port maxima.
+Send the RX/feedback control link with the graph so both subgraphs share
+one lifetime. Size the module list with a single header and walk stored
+connections, not port maxima.
 
+--- a/include/uapi/sound/snd_ar_tokens.h
++++ b/include/uapi/sound/snd_ar_tokens.h
+@@ -240,6 +240,13 @@ enum ar_event_types {
+ #define AR_TKN_U32_MODULE_LOG_TAP_POINT_ID	260
+ #define AR_TKN_U32_MODULE_LOG_MODE		261
+ 
++/* Control link to a peer module in the same graph, declared on one peer. */
++#define AR_TKN_U32_MODULE_CTRL_PORT_ID       270
++#define AR_TKN_U32_MODULE_CTRL_PEER_ID       271
++#define AR_TKN_U32_MODULE_CTRL_PEER_PORT_ID  272
++#define AR_TKN_U32_MODULE_CTRL_INTENT_ID     273
++#define AR_TKN_U32_MODULE_CTRL_HEAP_ID       274
++
+ #define SND_SOC_AR_TPLG_MODULE_CFG_TYPE 0x01001006
+ struct audioreach_module_priv_data {
+ 	__le32 size;	/* size in bytes of the array, including all elements */
 --- a/sound/soc/qcom/qdsp6/audioreach.c
 +++ b/sound/soc/qcom/qdsp6/audioreach.c
-@@ -110,6 +110,21 @@
+@@ -109,6 +109,25 @@ struct apm_mod_conn_list_params {
  
  #define APM_MOD_CONN_PSIZE(p, n) ALIGN(struct_size(p, conn_obj, n), 8)
  
-+/* One intent and an explicit heap property, as used by the OEM feedback link. */
++#define APM_PARAM_ID_MODULE_CTRL_LINK_CFG	0x08001061
++#define APM_MODULE_PROP_ID_CTRL_LINK_INTENT_LIST 0x08001062
++#define APM_MODULE_PROP_ID_CTRL_LINK_HEAP_ID	0x0800136F
++
++/* One intent and a heap ID, as used by the OEM feedback link. */
 +struct apm_ctrl_link_obj {
 +	u32 peer1_id, peer1_port, peer2_id, peer2_port, num_props;
 +	struct apm_prop_data intent;
@@ -27,7 +48,7 @@ header size for multiple containers and walk stored data edges, not port maxima.
  struct apm_graph_open_params {
  	struct apm_cmd_header *cmd_header;
  	struct apm_sub_graph_params *sg_data;
-@@ -117,6 +132,7 @@
+@@ -116,6 +135,7 @@ struct apm_graph_open_params {
  	struct apm_module_list_params *mod_list_data;
  	struct apm_prop_list_params *mod_prop_data;
  	struct apm_mod_conn_list_params *mod_conn_list_data;
@@ -35,7 +56,7 @@ header size for multiple containers and walk stored data edges, not port maxima.
  } __packed;
  
  struct apm_pcm_module_media_fmt_cmd {
-@@ -404,7 +420,7 @@
+@@ -401,7 +421,7 @@ static void audioreach_populate_graph(struct q6apm *apm,
  	struct apm_prop_list_params *mp_data = open->mod_prop_data;
  	struct apm_container_params *c_data = open->cont_data;
  	struct apm_sub_graph_params *sg_data = open->sg_data;
@@ -44,20 +65,12 @@ header size for multiple containers and walk stored data edges, not port maxima.
  	struct apm_mod_prop_obj *module_prop_obj;
  	struct audioreach_container *container;
  	struct apm_module_conn_obj *conn_obj;
-@@ -438,15 +454,29 @@
- 			apm_populate_module_list_obj(mlobj, container, sg->sub_graph_id);
- 
- 			list_for_each_entry(module, &container->modules_list, node) {
--				int pn;
-+				unsigned int pn;
- 
+@@ -440,10 +460,24 @@ static void audioreach_populate_graph(struct q6apm *apm,
  				module_prop_obj = &mp_data->mod_prop_obj[nmodule++];
  				apm_populate_module_prop_obj(module_prop_obj, module);
  
 -				if (!module->max_op_port)
 -					continue;
--
--				for (pn = 0; pn < module->max_op_port; pn++) {
 +				if (module->ctrl_peer_id) {
 +					struct apm_ctrl_link_obj *ctrl = &open->ctrl_data->links[nctrl++];
 +
@@ -66,20 +79,21 @@ header size for multiple containers and walk stored data edges, not port maxima.
 +					ctrl->peer2_id = module->ctrl_peer_id;
 +					ctrl->peer2_port = module->ctrl_peer_port_id;
 +					ctrl->num_props = 2;
-+					ctrl->intent.prop_id = 0x08001062;
++					ctrl->intent.prop_id = APM_MODULE_PROP_ID_CTRL_LINK_INTENT_LIST;
 +					ctrl->intent.prop_size = 8;
 +					ctrl->num_intents = 1;
 +					ctrl->intent_id = module->ctrl_intent_id;
-+					ctrl->heap.prop_id = 0x0800136f;
++					ctrl->heap.prop_id = APM_MODULE_PROP_ID_CTRL_LINK_HEAP_ID;
 +					ctrl->heap.prop_size = 4;
 +					ctrl->heap_id = module->ctrl_heap_id;
 +				}
-+
+ 
+-				for (pn = 0; pn < module->max_op_port; pn++) {
 +				for (pn = 0; pn < module->num_connections; pn++) {
  					if (module->dst_mod_inst_id[pn]) {
  						conn_obj = &mc_data->conn_obj[nconn];
  						conn_obj->src_mod_inst_id = module->instance_id;
-@@ -471,19 +501,19 @@
+@@ -468,7 +502,7 @@ static void audioreach_populate_graph(struct q6apm *apm,
  void *audioreach_alloc_graph_pkt(struct q6apm *apm,
  				 const struct audioreach_graph_info *info)
  {
@@ -88,12 +102,7 @@ header size for multiple containers and walk stored data edges, not port maxima.
  	struct apm_module_param_data  *param_data;
  	struct apm_container_params *cont_params;
  	struct audioreach_container *container;
- 	struct apm_sub_graph_params *sg_params;
- 	struct apm_mod_conn_list_params *mcon;
--	struct apm_graph_open_params params;
-+	struct apm_graph_open_params params = { 0 };
- 	struct apm_prop_list_params *mprop;
- 	struct audioreach_module *module;
+@@ -480,7 +514,7 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
  	struct audioreach_sub_graph *sgs;
  	struct apm_mod_list_obj *mlobj;
  	const struct list_head *sg_list;
@@ -102,7 +111,7 @@ header size for multiple containers and walk stored data edges, not port maxima.
  	int num_containers = 0;
  	int num_sub_graphs = 0;
  	int num_modules = 0;
-@@ -492,7 +522,7 @@
+@@ -489,7 +523,7 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
  	void *p;
  
  	sg_list = &info->sg_list;
@@ -111,7 +120,7 @@ header size for multiple containers and walk stored data edges, not port maxima.
  
  	/* add FE-BE connections */
  	if (info->dst_mod_inst_id && info->src_mod_inst_id)
-@@ -503,11 +533,15 @@
+@@ -500,11 +534,13 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
  		list_for_each_entry(container, &sgs->container_list, node) {
  			num_containers++;
  			num_modules += container->num_modules;
@@ -120,15 +129,13 @@ header size for multiple containers and walk stored data edges, not port maxima.
  				APM_MOD_LIST_OBJ_PSIZE(mlobj, container->num_modules);
  
  			list_for_each_entry(module, &container->modules_list, node) {
-+				if (module->num_connections > AR_MAX_MOD_LINKS)
-+					return ERR_PTR(-EINVAL);
  				num_connections += module->num_connections;
 +				if (module->ctrl_peer_id)
 +					num_ctrl_links++;
  			}
  		}
  	}
-@@ -521,7 +555,9 @@
+@@ -518,7 +554,9 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
  	mp_sz = APM_MOD_PROP_PSIZE(mprop, num_modules);
  	mc_sz =	APM_MOD_CONN_PSIZE(mcon, num_connections);
  
@@ -139,29 +146,29 @@ header size for multiple containers and walk stored data edges, not port maxima.
  	pkt = audioreach_alloc_apm_cmd_pkt(payload_size, APM_CMD_GRAPH_OPEN, 0);
  	if (IS_ERR(pkt))
  		return pkt;
-@@ -572,6 +608,15 @@
- 	param_data->param_size = mc_sz - APM_MODULE_PARAM_DATA_SIZE;
+@@ -570,6 +608,15 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
  	params.mod_conn_list_data->num_connections = num_connections;
  	p += mc_sz;
-+
+ 
 +	if (num_ctrl_links) {
 +		params.ctrl_data = p;
 +		param_data = &params.ctrl_data->param_data;
 +		param_data->module_instance_id = APM_MODULE_INSTANCE_ID;
-+		param_data->param_id = 0x08001061;
++		param_data->param_id = APM_PARAM_ID_MODULE_CTRL_LINK_CFG;
 +		param_data->param_size = sizeof(u32) + num_ctrl_links * sizeof(struct apm_ctrl_link_obj);
 +		params.ctrl_data->num_links = num_ctrl_links;
 +	}
- 
++
  	audioreach_populate_graph(apm, info, &params, sg_list, num_sub_graphs);
  
+ 	return pkt;
 --- a/sound/soc/qcom/qdsp6/audioreach.h
 +++ b/sound/soc/qcom/qdsp6/audioreach.h
-@@ -789,6 +789,13 @@
+@@ -773,6 +773,13 @@ struct audioreach_module {
  	uint32_t dst_mod_inst_id[AR_MAX_MOD_LINKS];
  	uint32_t dst_mod_ip_port_id[AR_MAX_MOD_LINKS];
  
-+	/* one single-intent control link per module; extend when needed. */
++	/* At most one single-intent control link per module */
 +	u32 ctrl_port_id;
 +	u32 ctrl_peer_id;
 +	u32 ctrl_peer_port_id;
@@ -173,7 +180,7 @@ header size for multiple containers and walk stored data edges, not port maxima.
  	uint32_t rate;
 --- a/sound/soc/qcom/qdsp6/topology.c
 +++ b/sound/soc/qcom/qdsp6/topology.c
-@@ -462,6 +462,7 @@
+@@ -443,6 +443,7 @@ static struct audioreach_module *audioreach_parse_common_tokens(struct q6apm *ap
  	uint32_t dst_mod_inst_id[AR_MAX_MOD_LINKS] = { 0, };
  	uint32_t dst_mod_ip_port_id[AR_MAX_MOD_LINKS] = { 0, };
  	uint32_t src_mod_inst_id = 0;
@@ -181,7 +188,7 @@ header size for multiple containers and walk stored data edges, not port maxima.
  
  	int module_id = 0, instance_id = 0, tkn_count = 0;
  	const struct snd_soc_tplg_vendor_value_elem *mod_elem;
-@@ -477,6 +478,9 @@
+@@ -458,6 +459,9 @@ static struct audioreach_module *audioreach_parse_common_tokens(struct q6apm *ap
  	while (tkn_count <= (max_tokens - 1)) {
  		token = le32_to_cpu(mod_elem->token);
  		switch (token) {
@@ -191,7 +198,7 @@ header size for multiple containers and walk stored data edges, not port maxima.
  		/* common module info */
  		case AR_TKN_U32_MODULE_ID:
  			module_id = le32_to_cpu(mod_elem->value);
-@@ -590,6 +594,11 @@
+@@ -571,6 +575,11 @@ static struct audioreach_module *audioreach_parse_common_tokens(struct q6apm *ap
  		mod->max_ip_port = max_ip_port;
  		mod->max_op_port = max_op_port;
  		mod->src_mod_inst_id = src_mod_inst_id;
@@ -200,49 +207,6 @@ header size for multiple containers and walk stored data edges, not port maxima.
 +		mod->ctrl_peer_port_id = ctrl[2];
 +		mod->ctrl_intent_id = ctrl[3];
 +		mod->ctrl_heap_id = ctrl[4];
+ 		/* Splitters can have more output ports than stored links. */
  		for (pn = 0; pn < AR_MAX_MOD_LINKS && pn < mod->max_op_port; pn++) {
  			if (src_mod_op_port_id[pn] && dst_mod_inst_id[pn] &&
- 			    dst_mod_ip_port_id[pn]) {
-@@ -1108,7 +1117,23 @@
- 
- static int audioreach_tplg_complete(struct snd_soc_component *component)
- {
--	/* TBD */
-+	struct q6apm *apm = dev_get_drvdata(component->dev);
-+	struct audioreach_module *mod, *peer;
-+	int id;
-+
-+	idr_for_each_entry(&apm->modules_idr, mod, id) {
-+		if (!(mod->ctrl_port_id || mod->ctrl_peer_id || mod->ctrl_peer_port_id ||
-+		      mod->ctrl_intent_id || mod->ctrl_heap_id))
-+			continue;
-+		peer = idr_find(&apm->modules_idr, mod->ctrl_peer_id);
-+		if (!mod->ctrl_port_id || !mod->ctrl_peer_port_id || !mod->ctrl_intent_id ||
-+		    mod->ctrl_heap_id < 1 || mod->ctrl_heap_id > 3 || !peer || peer == mod ||
-+		    peer->container->sub_graph->info != mod->container->sub_graph->info ||
-+		    peer->ctrl_port_id == mod->ctrl_peer_port_id) {
-+			dev_err(apm->dev, "Invalid control link on module %#x\n", mod->instance_id);
-+			return -EINVAL;
-+		}
-+	}
- 	return 0;
- }
- 
---- a/include/uapi/sound/snd_ar_tokens.h
-+++ b/include/uapi/sound/snd_ar_tokens.h
-@@ -240,6 +240,15 @@
- #define AR_TKN_U32_MODULE_LOG_TAP_POINT_ID	260
- #define AR_TKN_U32_MODULE_LOG_MODE		261
- 
-+/* Declare a control link once, on its first peer. All five tokens are required.
-+ * Both peers must belong to the same Linux graph. Heap IDs are 1, 2 or 3.
-+ */
-+#define AR_TKN_U32_MODULE_CTRL_PORT_ID       270
-+#define AR_TKN_U32_MODULE_CTRL_PEER_ID       271
-+#define AR_TKN_U32_MODULE_CTRL_PEER_PORT_ID  272
-+#define AR_TKN_U32_MODULE_CTRL_INTENT_ID     273
-+#define AR_TKN_U32_MODULE_CTRL_HEAP_ID       274
-+
- #define SND_SOC_AR_TPLG_MODULE_CFG_TYPE 0x01001006
- struct audioreach_module_priv_data {
- 	__le32 size;	/* size in bytes of the array, including all elements */

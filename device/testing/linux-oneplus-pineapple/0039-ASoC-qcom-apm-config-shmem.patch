@@ -1,8 +1,9 @@
-Subject: [PATCH] ASoC: qcom: send large APM configurations in shared memory
+Subject: [PATCH] ASoC: qcom: send large APM configurations through shared memory
 
-Use the PCM DMA device and APM map/config/unmap protocol for configuration
-payloads exceeding the service's 4 KiB receive buffers. Keep uncertain DMA
-ownership pinned until reboot and propagate unmap errors.
+SET_CFG payloads above the APM's 4 KiB in-band buffers are copied to a
+DMA buffer of the PCM DAI device and sent with map/config/unmap. A buffer
+the DSP has not unmapped is leaked rather than freed. Unmap replies now
+report their own opcode, so their waiters no longer time out.
 
 --- a/sound/soc/qcom/qdsp6/q6apm.c
 +++ b/sound/soc/qcom/qdsp6/q6apm.c
@@ -14,85 +15,50 @@ ownership pinned until reboot and propagate unmap errors.
  #include <linux/jiffies.h>
  #include <linux/kernel.h>
  #include <linux/module.h>
-@@ -33,13 +34,178 @@
+@@ -33,8 +34,12 @@ struct apm_graph_mgmt_cmd {
  
  static struct q6apm *g_apm;
  
+-int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
+-			uint32_t rsp_opcode)
 +/* The APM service has 4 KiB in-band receive buffers. */
-+#define APM_INBAND_MAX 4096
-+#define APM_CONFIG_TOKEN U32_MAX
++#define APM_INBAND_MAX		4096
++#define APM_CONFIG_TOKEN	U32_MAX
 +
-+enum q6apm_command_state {
-+	Q6APM_NOT_SENT,
-+	Q6APM_SENT,
-+	Q6APM_REPLIED,
-+};
-+
-+static int q6apm_send_packet(struct q6apm *apm, const struct gpr_pkt *pkt,
-+			   u32 rsp_opcode, enum q6apm_command_state *state)
++static int __q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
++				 uint32_t rsp_opcode)
+ {
+ 	gpr_device_t *gdev = apm->gdev;
+ 
+@@ -42,6 +47,119 @@ int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
+ 					NULL, &apm->wait, pkt, rsp_opcode);
+ }
+ 
++/* Send an oversized SET_CFG payload through shared memory: map, configure, unmap. */
++static int q6apm_send_config_shmem(struct q6apm *apm, const struct gpr_pkt *cfg)
 +{
-+	int ret;
-+
-+	mutex_lock(&apm->lock);
-+	apm->result.opcode = 0;
-+	apm->result.status = 0;
-+	*state = Q6APM_NOT_SENT;
-+	ret = gpr_send_pkt(apm->gdev, pkt);
-+	if (ret < 0)
-+		goto out;
-+	*state = Q6APM_SENT;
-+	if (ret != pkt->hdr.pkt_size) {
-+		ret = -EIO;
-+		goto out;
-+	}
-+	ret = wait_event_timeout(apm->wait,
-+		apm->result.opcode == pkt->hdr.opcode ||
-+		(rsp_opcode && apm->result.opcode == rsp_opcode), 5 * HZ);
-+	if (!ret) {
-+		ret = -ETIMEDOUT;
-+	} else {
-+		*state = Q6APM_REPLIED;
-+		ret = apm->result.status ? -EREMOTEIO : 0;
-+	}
-+out:
-+	if (ret < 0)
-+		dev_err(apm->dev, "APM command %#x failed: %d (state %u)\n",
-+			pkt->hdr.opcode, ret, *state);
-+	mutex_unlock(&apm->lock);
-+	return ret < 0 ? ret : 0;
-+}
-+
-+static int q6apm_send_config_shmem(struct q6apm *apm, const struct gpr_pkt *input)
-+{
-+	const struct apm_cmd_header *header = (const void *)input + GPR_HDR_SIZE;
-+	struct apm_cmd_shared_mem_map_regions *map;
++	u32 size = cfg->hdr.pkt_size - GPR_HDR_SIZE - APM_CMD_HDR_SIZE;
++	size_t buf_size = ALIGN(size, 4096);
 +	struct apm_shared_map_region_payload *region;
 +	struct apm_cmd_shared_mem_unmap_regions *unmap;
-+	struct apm_cmd_header *config;
++	struct apm_cmd_shared_mem_map_regions *map;
++	struct apm_cmd_header *cmd;
 +	struct platform_device *pdev;
-+	struct device_node *node;
 +	struct of_phandle_args args;
++	struct device_node *node;
 +	struct gpr_pkt *pkt;
++	bool leak = false;
 +	dma_addr_t dma;
-+	u64 address;
-+	void *buffer;
-+	u32 size = header->payload_size;
-+	size_t alloc_size = ALIGN(size, 4096);
-+	int ret, unmap_ret;
-+	enum q6apm_command_state state;
++	int ret, err;
++	void *buf;
++	u64 addr;
 +
-+	if (header->mem_map_handle || !size || size % 4 ||
-+	    size != input->hdr.pkt_size - GPR_HDR_SIZE - APM_CMD_HDR_SIZE)
-+		return -EINVAL;
-+	if (apm->config_poisoned)
-+		return -EIO;
-+
-+	/* Use the same IOMMU device and SID encoding as PCM shared memory. */
++	/* Use the PCM DMA device and its IOMMU stream, as the PCM buffers do. */
 +	node = of_get_compatible_child(apm->dev->of_node, "qcom,q6apm-dais");
 +	if (!node)
 +		return -ENODEV;
-+	ret = of_parse_phandle_with_fixed_args(node, "iommus", 1, 0, &args);
 +	pdev = of_find_device_by_node(node);
++	ret = of_parse_phandle_with_fixed_args(node, "iommus", 1, 0, &args);
 +	of_node_put(node);
 +	if (!ret)
 +		of_node_put(args.np);
@@ -101,103 +67,90 @@ ownership pinned until reboot and propagate unmap errors.
 +	if (ret)
 +		goto put_device;
 +
-+	/* One packet can hold map, SET_CFG or unmap, all smaller than 4 KiB. */
++	/* One packet is large enough for the map, SET_CFG and unmap commands. */
 +	pkt = audioreach_alloc_apm_pkt(sizeof(*map) + sizeof(*region),
 +			APM_CMD_SHARED_MEM_MAP_REGIONS, APM_CONFIG_TOKEN, GPR_APM_MODULE_IID);
 +	if (IS_ERR(pkt)) {
 +		ret = PTR_ERR(pkt);
 +		goto put_device;
 +	}
-+	buffer = dma_alloc_coherent(&pdev->dev, alloc_size, &dma, GFP_KERNEL);
-+	if (!buffer) {
++	buf = dma_alloc_coherent(&pdev->dev, buf_size, &dma, GFP_KERNEL);
++	if (!buf) {
 +		ret = -ENOMEM;
-+		goto free_packet;
++		goto free_pkt;
 +	}
-+	address = dma | ((u64)(args.args[0] & 0xf) << 32);
-+	memcpy(buffer, (const void *)input + GPR_HDR_SIZE + APM_CMD_HDR_SIZE, size);
-+	/* Publish the coherent payload before notifying the DSP. */
-+	dma_wmb();
++	memcpy(buf, (void *)cfg + GPR_HDR_SIZE + APM_CMD_HDR_SIZE, size);
++	addr = dma | ((u64)(args.args[0] & 0xf) << 32);
 +
 +	map = (void *)pkt + GPR_HDR_SIZE;
 +	map->mem_pool_id = APM_MEMORY_MAP_SHMEM8_4K_POOL;
 +	map->num_regions = 1;
 +	region = (void *)(map + 1);
-+	region->shm_addr_lsw = lower_32_bits(address);
-+	region->shm_addr_msw = upper_32_bits(address);
-+	region->mem_size_bytes = alloc_size;
-+	apm->config_map_handle = 0;
-+	ret = q6apm_send_packet(apm, pkt, APM_CMD_RSP_SHARED_MEM_MAP_REGIONS, &state);
-+	if (ret || !apm->config_map_handle) {
-+		if (state == Q6APM_NOT_SENT ||
-+		    (state == Q6APM_REPLIED && apm->result.opcode == APM_CMD_SHARED_MEM_MAP_REGIONS &&
-+		     apm->result.status))
-+			goto free_buffer;
-+		if (!ret)
-+			ret = -EINVAL;
-+		goto retain_buffer;
++	region->shm_addr_lsw = lower_32_bits(addr);
++	region->shm_addr_msw = upper_32_bits(addr);
++	region->mem_size_bytes = buf_size;
++	ret = __q6apm_send_cmd_sync(apm, pkt, APM_CMD_RSP_SHARED_MEM_MAP_REGIONS);
++	if (ret) {
++		leak = ret == -ETIMEDOUT;
++		goto free_buf;
 +	}
 +
-+	pkt->hdr = input->hdr;
++	pkt->hdr = cfg->hdr;
 +	pkt->hdr.pkt_size = GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
-+	config = (void *)pkt + GPR_HDR_SIZE;
-+	config->payload_address_lsw = lower_32_bits(address);
-+	config->payload_address_msw = upper_32_bits(address);
-+	config->mem_map_handle = apm->config_map_handle;
-+	config->payload_size = size;
-+	ret = q6apm_send_packet(apm, pkt, 0, &state);
-+	if (state == Q6APM_SENT)
-+		goto retain_buffer;
++	cmd = (void *)pkt + GPR_HDR_SIZE;
++	cmd->payload_address_lsw = lower_32_bits(addr);
++	cmd->payload_address_msw = upper_32_bits(addr);
++	cmd->mem_map_handle = apm->config_map_handle;
++	cmd->payload_size = size;
++	ret = __q6apm_send_cmd_sync(apm, pkt, 0);
++	if (ret == -ETIMEDOUT) {
++		leak = true;
++		goto free_buf;
++	}
 +
 +	pkt->hdr.opcode = APM_CMD_SHARED_MEM_UNMAP_REGIONS;
 +	pkt->hdr.token = APM_CONFIG_TOKEN;
 +	pkt->hdr.pkt_size = GPR_HDR_SIZE + sizeof(*unmap);
 +	unmap = (void *)pkt + GPR_HDR_SIZE;
 +	unmap->mem_map_handle = apm->config_map_handle;
-+	unmap_ret = q6apm_send_packet(apm, pkt, 0, &state);
-+	if (unmap_ret || apm->config_map_handle) {
-+		if (!ret)
-+			ret = unmap_ret ? unmap_ret : -EIO;
-+		goto retain_buffer;
-+	}
-+free_buffer:
-+	dma_free_coherent(&pdev->dev, alloc_size, buffer, dma);
-+free_packet:
++	err = __q6apm_send_cmd_sync(apm, pkt, APM_CMD_SHARED_MEM_UNMAP_REGIONS);
++	leak = err;
++	if (!ret)
++		ret = err;
++
++free_buf:
++	/* The DSP may still use a buffer it has not unmapped; never reuse it. */
++	if (leak)
++		dev_err(apm->dev, "APM config buffer leaked: DSP may still use it\n");
++	else
++		dma_free_coherent(&pdev->dev, buf_size, buf, dma);
++free_pkt:
 +	kfree(pkt);
 +put_device:
 +	put_device(&pdev->dev);
 +	return ret;
++}
 +
-+retain_buffer:
-+	/* A submitted request may still own DMA; no DSP reset recovery yet. */
-+	apm->config_poisoned = true;
-+	dev_err(apm->dev, "Config DMA ownership uncertain (%d); retaining buffer, reboot required\n", ret);
-+	kfree(pkt);
-+	/* Retain the DMA allocation and its device reference: DSP may still use it. */
++int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
++			uint32_t rsp_opcode)
++{
++	int ret;
++
++	if (pkt->hdr.opcode != APM_CMD_SET_CFG || pkt->hdr.pkt_size <= APM_INBAND_MAX)
++		return __q6apm_send_cmd_sync(apm, pkt, rsp_opcode);
++
++	/* Serialize users of the config map handle. */
++	mutex_lock(&apm->cmd_lock);
++	ret = q6apm_send_config_shmem(apm, pkt);
++	mutex_unlock(&apm->cmd_lock);
++
 +	return ret;
 +}
 +
- int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
- 			uint32_t rsp_opcode)
- {
--	gpr_device_t *gdev = apm->gdev;
--
--	return audioreach_send_cmd_sync(&gdev->dev, gdev, &apm->result, &apm->lock,
--					NULL, &apm->wait, pkt, rsp_opcode);
-+	enum q6apm_command_state state;
-+	int ret;
-+
-+	/* Keep map/config/unmap together, including their shared reply state. */
-+	mutex_lock(&apm->cmd_lock);
-+	if (pkt->hdr.opcode == APM_CMD_SET_CFG && pkt->hdr.pkt_size > APM_INBAND_MAX)
-+		ret = q6apm_send_config_shmem(apm, pkt);
-+	else
-+		ret = q6apm_send_packet(apm, pkt, rsp_opcode, &state);
-+	mutex_unlock(&apm->cmd_lock);
-+	return ret;
- }
- 
  static struct audioreach_graph *q6apm_get_audioreach_graph(struct q6apm *apm, uint32_t graph_id)
-@@ -788,6 +954,7 @@
+ {
+ 	struct audioreach_graph_info *info;
+@@ -788,6 +906,7 @@ static int apm_probe(gpr_device_t *gdev)
  	dev_set_drvdata(dev, apm);
  
  	mutex_init(&apm->lock);
@@ -205,69 +158,42 @@ ownership pinned until reboot and propagate unmap errors.
  	apm->dev = dev;
  	apm->gdev = gdev;
  	init_waitqueue_head(&apm->wait);
-@@ -879,17 +1046,19 @@
+@@ -879,12 +998,14 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
  			wake_up(&apm->wait);
  			break;
  		case APM_CMD_SHARED_MEM_UNMAP_REGIONS:
 -			apm->result.opcode = hdr->opcode;
 -			apm->result.status = 0;
--			rsp = data->payload;
--
--			info = idr_find(&apm->graph_info_idr, hdr->token);
--			if (info)
--				info->mem_map_handle = 0;
--			else
--				dev_err(dev, "Error (%d) Processing 0x%08x cmd\n", result->status,
--					result->opcode);
--
 +			apm->result.opcode = result->opcode;
 +			apm->result.status = result->status;
-+			if (!result->status) {
-+				if (hdr->token == APM_CONFIG_TOKEN) {
-+					apm->config_map_handle = 0;
-+				} else {
-+					info = idr_find(&apm->graph_info_idr, hdr->token);
-+					if (info)
-+						info->mem_map_handle = 0;
-+					else
-+						apm->result.status = 1;
-+				}
-+			}
- 			wake_up(&apm->wait);
- 			break;
- 		default:
-@@ -901,12 +1070,17 @@
- 		apm->result.status = 0;
+ 			rsp = data->payload;
+ 
+ 			info = idr_find(&apm->graph_info_idr, hdr->token);
+-			if (info)
++			if (hdr->token == APM_CONFIG_TOKEN)
++				apm->config_map_handle = 0;
++			else if (info)
+ 				info->mem_map_handle = 0;
+ 			else
+ 				dev_err(dev, "Error (%d) Processing 0x%08x cmd\n", result->status,
+@@ -902,7 +1023,9 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
  		rsp = data->payload;
  
--		info = idr_find(&apm->graph_info_idr, hdr->token);
+ 		info = idr_find(&apm->graph_info_idr, hdr->token);
 -		if (info)
--			info->mem_map_handle = rsp->mem_map_handle;
--		else
--			dev_err(dev, "Error (%d) Processing 0x%08x cmd\n", result->status,
--				result->opcode);
-+		if (hdr->token == APM_CONFIG_TOKEN) {
++		if (hdr->token == APM_CONFIG_TOKEN)
 +			apm->config_map_handle = rsp->mem_map_handle;
-+		} else {
-+			info = idr_find(&apm->graph_info_idr, hdr->token);
-+			if (info)
-+				info->mem_map_handle = rsp->mem_map_handle;
-+			else
-+				apm->result.status = 1;
-+		}
-+		if (!rsp->mem_map_handle)
-+			apm->result.status = 1;
- 
- 		wake_up(&apm->wait);
- 		break;
++		else if (info)
+ 			info->mem_map_handle = rsp->mem_map_handle;
+ 		else
+ 			dev_err(dev, "Error (%d) Processing 0x%08x cmd\n", result->status,
 --- a/sound/soc/qcom/qdsp6/q6apm.h
 +++ b/sound/soc/qcom/qdsp6/q6apm.h
-@@ -60,6 +60,8 @@
+@@ -60,6 +60,7 @@ struct q6apm {
  	struct mutex cmd_lock;
  	struct mutex lock;
  	uint32_t state;
 +	uint32_t config_map_handle;
-+	bool config_poisoned;
  
  	struct list_head widget_list;
  	struct idr graph_idr;

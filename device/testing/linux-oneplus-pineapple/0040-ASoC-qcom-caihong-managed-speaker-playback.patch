@@ -1,56 +1,14 @@
 Subject: [PATCH] ASoC: qcom: manage Caihong speaker playback and supply limits
 
-Provide a separately selected Caihong machine driver with board volume and
-PCM-owned supply monitoring. Poll voltage at the OEM ACF interval, update
-changed DSP limits, and report terminal faults as PCM XRUNs. Codec helpers
-check hardware operations without requiring exact board tuning profiles.
+Add a Caihong machine driver that owns speaker volume and the OEM supply
+monitor. Amplifiers marked awinic,external-monitor start from the codec
+playback trigger and stay muted until the board has applied per-device
+calibration and DSP vmax limits. A fault mutes all six and stops the PCM
+with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
 
-Small runtime parameters use the APM callback with correlated tokens and
-bounded replies. The firmware package supplies the scene-0 graph and tuning.
-
---- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
-+++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
-@@ -1011,31 +1011,37 @@
- &speaker_amp0 {
- 	sound-name-prefix = "Amp0";
- 	firmware-name = "qcom/sm8650/oneplus/caihong/aw882xx_acf.bin";
-+	awinic,external-monitor;
- };
- 
- &speaker_amp1 {
- 	sound-name-prefix = "Amp1";
- 	firmware-name = "qcom/sm8650/oneplus/caihong/aw882xx_acf.bin";
-+	awinic,external-monitor;
- };
- 
- &speaker_amp2 {
- 	sound-name-prefix = "Amp2";
- 	firmware-name = "qcom/sm8650/oneplus/caihong/aw882xx_acf.bin";
-+	awinic,external-monitor;
- };
- 
- &speaker_amp3 {
- 	sound-name-prefix = "Amp3";
- 	firmware-name = "qcom/sm8650/oneplus/caihong/aw882xx_acf.bin";
-+	awinic,external-monitor;
- };
- 
- &speaker_amp5 {
- 	sound-name-prefix = "Amp5";
- 	firmware-name = "qcom/sm8650/oneplus/caihong/aw882xx_acf.bin";
-+	awinic,external-monitor;
- };
- 
- &speaker_amp6 {
- 	sound-name-prefix = "Amp6";
- 	firmware-name = "qcom/sm8650/oneplus/caihong/aw882xx_acf.bin";
-+	awinic,external-monitor;
- };
- 
- &{/sound} {
 --- a/sound/soc/codecs/aw88261.c
 +++ b/sound/soc/codecs/aw88261.c
-@@ -680,6 +680,102 @@
+@@ -680,6 +680,102 @@ static int aw88261_dev_stop(struct aw_device *aw_dev)
  	return ret;
  }
  
@@ -153,7 +111,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  static int aw88261_reg_update(struct aw88261 *aw88261, bool force)
  {
  	struct aw_device *aw_dev = aw88261->aw_pa;
-@@ -728,6 +824,7 @@
+@@ -728,6 +824,7 @@ static void aw88261_start_pa(struct aw88261 *aw88261)
  			break;
  		}
  	}
@@ -161,7 +119,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  }
  
  static void aw88261_startup_work(struct work_struct *work)
-@@ -742,12 +839,17 @@
+@@ -742,12 +839,17 @@ static void aw88261_startup_work(struct work_struct *work)
  
  static void aw88261_start(struct aw88261 *aw88261, bool sync_start)
  {
@@ -169,21 +127,19 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	if (aw88261->aw_pa->fw_status != AW88261_DEV_FW_OK) {
 +		aw88261->start_result = -EINVAL;
  		return;
--
--	if (aw88261->aw_pa->status == AW88261_DEV_PW_ON)
 +	}
-+
+ 
+-	if (aw88261->aw_pa->status == AW88261_DEV_PW_ON)
 +	if (aw88261->aw_pa->status == AW88261_DEV_PW_ON) {
 +		aw88261->start_result = 0;
  		return;
--
 +	}
-+
+ 
 +	aw88261->start_result = -EINPROGRESS;
  	if (sync_start == AW88261_SYNC_START)
  		aw88261_start_pa(aw88261);
  	else
-@@ -756,9 +858,42 @@
+@@ -756,9 +858,42 @@ static void aw88261_start(struct aw88261 *aw88261, bool sync_start)
  			AW88261_START_WORK_DELAY_MS);
  }
  
@@ -226,7 +182,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  		.id = 1,
  		.playback = {
  			.stream_name = "Speaker_Playback",
-@@ -1035,9 +1170,15 @@
+@@ -1035,9 +1170,15 @@ static int aw88261_playback_event(struct snd_soc_dapm_widget *w,
  	mutex_lock(&aw88261->lock);
  	switch (event) {
  	case SND_SOC_DAPM_PRE_PMU:
@@ -243,7 +199,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  		ret = aw88261_dev_stop(aw88261->aw_pa);
  		break;
  	default:
-@@ -1186,6 +1327,12 @@
+@@ -1186,6 +1327,12 @@ static int aw88261_codec_probe(struct snd_soc_component *component)
  	int ret;
  
  	INIT_DELAYED_WORK(&aw88261->start_work, aw88261_startup_work);
@@ -256,30 +212,29 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  
  	ret = aw88261_request_firmware_file(aw88261);
  	if (ret)
-@@ -1203,6 +1350,9 @@
- 							ARRAY_SIZE(aw88261_audio_map));
+@@ -1204,6 +1351,9 @@ static int aw88261_codec_probe(struct snd_soc_component *component)
  	if (ret)
  		return ret;
-+
+ 
 +	if (aw88261->monitor_managed)
 +		return 0;
- 
++
  	ret = snd_soc_add_component_controls(component, aw88261_controls,
  							ARRAY_SIZE(aw88261_controls));
+ 
 --- a/sound/soc/codecs/aw88261.h
 +++ b/sound/soc/codecs/aw88261.h
-@@ -460,6 +460,19 @@
+@@ -460,6 +460,19 @@ struct aw88261 {
  	unsigned int dither_st;
  
  	bool phase_sync;
--};
 +	bool monitor_managed;
 +	bool monitor_audible;
 +	bool playback_started;
 +	/* Protected by lock; -EINPROGRESS only while startup is pending. */
 +	int start_result;
-+};
-+
+ };
+ 
 +#define AW88261_IPEAK_BITS	0xf000
 +
 +struct snd_soc_component;
@@ -287,11 +242,11 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +int aw88261_monitor_apply(struct snd_soc_component *component,
 +			 unsigned int ipeak, unsigned int attenuation);
 +int aw88261_monitor_mute(struct snd_soc_component *component);
- 
++
  #endif
 --- a/sound/soc/qcom/Kconfig
 +++ b/sound/soc/qcom/Kconfig
-@@ -195,6 +195,15 @@
+@@ -195,6 +195,15 @@ config SND_SOC_SM8250
  	  SM8250 SoC-based systems.
  	  Say Y if you want to use audio device on this SoCs.
  
@@ -309,7 +264,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  	depends on QCOM_APR && SOUNDWIRE
 --- a/sound/soc/qcom/Makefile
 +++ b/sound/soc/qcom/Makefile
-@@ -27,6 +27,7 @@
+@@ -27,6 +27,7 @@ snd-soc-sc7280-y := sc7280.o
  snd-soc-sdm845-y := sdm845.o
  snd-soc-sm8250-y := sm8250.o
  snd-soc-sc8280xp-y := sc8280xp.o
@@ -317,7 +272,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  snd-soc-qcom-common-y := common.o
  snd-soc-qcom-sdw-y := sdw.o
  snd-soc-x1e80100-y := x1e80100.o
-@@ -47,3 +48,5 @@
+@@ -47,3 +48,5 @@ obj-$(CONFIG_SND_SOC_QCOM_OFFLOAD_UTILS) += snd-soc-qcom-offload-utils.o
  
  #DSP lib
  obj-$(CONFIG_SND_SOC_QDSP6) += qdsp6/
@@ -325,18 +280,18 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +obj-$(CONFIG_SND_SOC_CAIHONG) += snd-soc-caihong.o
 --- /dev/null
 +++ b/sound/soc/qcom/caihong.c
-@@ -0,0 +1,592 @@
+@@ -0,0 +1,573 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/* Caihong speaker supply limits, using the stock scene-0 RX/feedback graph. */
 +#include <dt-bindings/sound/qcom,q6afe.h>
 +#include <linux/clk.h>
 +#include <linux/firmware.h>
-+#include <linux/module.h>
-+#include <linux/platform_device.h>
-+#include <sound/pcm_params.h>
 +#include <linux/jiffies.h>
++#include <linux/module.h>
 +#include <linux/mutex.h>
++#include <linux/platform_device.h>
 +#include <linux/workqueue.h>
++#include <sound/pcm_params.h>
 +#include <sound/soc.h>
 +#include <sound/tlv.h>
 +#include "../codecs/aw88261.h"
@@ -469,7 +424,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 + * The getter returns tuning baseline + adjustment. Only 0..3 implement this ABI.
 + */
 +static int caihong_vmax(struct caihong_audio *audio, unsigned int channel, u32 value,
-+			 u32 *total, const char **operation)
++			 u32 *total)
 +{
 +	struct device *dev = snd_soc_rtd_to_cpu(audio->rtd, 0)->dev;
 +	u32 id = CAIHONG_PARAM_BANK0 + channel / 2;
@@ -477,20 +432,15 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +		       1, 0, 0, 0, value};
 +	int ret;
 +
-+	*operation = "write vmax";
-+
 +	ret = q6apm_module_param(dev, CAIHONG_RX_IID, id, words, sizeof(words), false);
 +	if (ret)
 +		return ret;
-+	*operation = "select vmax readback";
 +	words[0] = CAIHONG_READ_DATA;
 +	ret = q6apm_module_param(dev, CAIHONG_RX_IID, id, words, 24, false);
 +	if (ret)
 +		return ret;
 +	*total = 0;
-+	*operation = "read vmax";
-+	ret = q6apm_module_param(dev, CAIHONG_RX_IID, id, total, sizeof(*total), true);
-+	return ret;
++	return q6apm_module_param(dev, CAIHONG_RX_IID, id, total, sizeof(*total), true);
 +}
 +
 +/* Called with lock held; attempt every amp even after an I/O failure. */
@@ -551,7 +501,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +		for (i = 0; i < ARRAY_SIZE(audio->baseline); i++) {
 +			operation = "configure DSP vmax";
 +			if (!audio->active) {
-+				ret = caihong_vmax(audio, channels[i], 0, &audio->baseline[i], &operation);
++				ret = caihong_vmax(audio, channels[i], 0, &audio->baseline[i]);
 +				if (ret)
 +					goto fault;
 +				if (!limits[rows[i]].vmax)
@@ -559,7 +509,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +			} else if (limits[rows[i]].vmax == limits[audio->rows[i]].vmax) {
 +				continue;
 +			}
-+			ret = caihong_vmax(audio, channels[i], limits[rows[i]].vmax, &total, &operation);
++			ret = caihong_vmax(audio, channels[i], limits[rows[i]].vmax, &total);
 +			if (ret)
 +				goto fault;
 +			operation = "verify DSP vmax";
@@ -682,8 +632,10 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	mutex_unlock(&audio->lock);
 +}
 +
-+static int caihong_audio_trigger(struct caihong_audio *audio, int cmd)
++static int caihong_tdm_trigger(struct snd_pcm_substream *substream, int cmd)
 +{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct caihong_audio *audio = snd_soc_card_get_drvdata(rtd->card);
 +	int i;
 +
 +	switch (cmd) {
@@ -722,7 +674,6 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +static int caihong_tdm_init(struct snd_soc_pcm_runtime *rtd)
 +{
 +	struct caihong_audio *audio = snd_soc_card_get_drvdata(rtd->card);
-+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 +	struct snd_soc_dai *dai;
 +	struct snd_kcontrol_new controls[] = {
 +		{ .iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = "Speaker Playback Volume",
@@ -742,13 +693,6 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	ret = clk_set_rate(audio->tdm_clk, 48000 * 8 * 32);
 +	if (ret)
 +		return ret;
-+	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_DSP_B |
-+				 SND_SOC_DAIFMT_BP_FP | SND_SOC_DAIFMT_NB_NF);
-+	if (ret)
-+		return ret;
-+	ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0, 0xff, 8, 32);
-+	if (ret)
-+		return ret;
 +	for_each_rtd_codec_dais(rtd, i, dai) {
 +		if (!of_property_read_bool(dai->dev->of_node, "awinic,external-monitor") ||
 +		    of_property_read_u32(dai->dev->of_node, "awinic,audio-channel", &channel))
@@ -762,8 +706,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	}
 +	for (i = 0; i < ARRAY_SIZE(controls); i++)
 +		controls[i].private_value = (unsigned long)audio;
-+	ret = snd_soc_add_card_controls(rtd->card, controls, ARRAY_SIZE(controls));
-+	return ret;
++	return snd_soc_add_card_controls(rtd->card, controls, ARRAY_SIZE(controls));
 +}
 +
 +static int caihong_tdm_startup(struct snd_pcm_substream *substream)
@@ -786,13 +729,6 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +	audio->calibration_applied = false;
 +	mutex_unlock(&audio->lock);
 +	clk_disable_unprepare(audio->tdm_clk);
-+}
-+
-+static int caihong_tdm_trigger(struct snd_pcm_substream *substream, int cmd)
-+{
-+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
-+
-+	return caihong_audio_trigger(snd_soc_card_get_drvdata(rtd->card), cmd);
 +}
 +
 +static int caihong_tdm_fixup(struct snd_soc_pcm_runtime *rtd,
@@ -920,7 +856,7 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
 +MODULE_LICENSE("GPL");
 --- a/sound/soc/qcom/qdsp6/audioreach.h
 +++ b/sound/soc/qcom/qdsp6/audioreach.h
-@@ -57,6 +57,7 @@
+@@ -56,6 +56,7 @@ struct q6apm_graph;
  #define APM_CMD_GRAPH_STOP			0x01001003
  #define APM_CMD_GRAPH_CLOSE			0x01001004
  #define APM_CMD_GRAPH_FLUSH			0x01001005
@@ -930,65 +866,44 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  #define APM_CMD_SHARED_MEM_MAP_REGIONS		0x0100100C
 --- a/sound/soc/qcom/qdsp6/q6apm.c
 +++ b/sound/soc/qcom/qdsp6/q6apm.c
-@@ -208,6 +208,65 @@
+@@ -160,6 +160,44 @@ int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
  	return ret;
  }
  
-+/* dev is an APM DAI device, whose parent owns the APM service. */
++/* Set or get one small module parameter; dev is an APM DAI device. */
 +int q6apm_module_param(struct device *dev, u32 iid, u32 id, void *data,
 +		      size_t size, bool read)
 +{
 +	struct q6apm *apm = dev_get_drvdata(dev->parent);
 +	struct apm_module_param_data *param;
-+	struct gpr_pkt *pkt;
-+	unsigned long flags;
 +	int ret;
 +
-+	if (!apm || !size || size > sizeof(apm->param_reply) || size % 4)
++	if (size > sizeof(apm->get_cfg_reply) || size % 4)
 +		return -EINVAL;
-+	pkt = audioreach_alloc_apm_cmd_pkt(sizeof(*param) + ALIGN(size, 8),
++
++	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(
++			sizeof(*param) + ALIGN(size, 8),
 +			read ? APM_CMD_GET_CFG : APM_CMD_SET_CFG, 0);
 +	if (IS_ERR(pkt))
 +		return PTR_ERR(pkt);
++
 +	param = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
 +	param->module_instance_id = iid;
 +	param->param_id = id;
 +	param->param_size = size;
 +	memcpy(param + 1, data, size);
 +
-+	mutex_lock(&apm->cmd_lock);
-+	reinit_completion(&apm->param_done);
-+	spin_lock_irqsave(&apm->param_lock, flags);
-+	/* High-bit tokens belong to runtime queries, excluding the DMA token. */
-+	apm->param_token = BIT(31) | ((apm->param_token + 1) & 0x3fffffff);
-+	pkt->hdr.token = apm->param_token;
-+	apm->param_opcode = pkt->hdr.opcode;
-+	apm->param_iid = iid;
-+	apm->param_id = id;
-+	apm->param_size = size;
-+	apm->param_error = 0;
-+	apm->param_pending = true;
-+	spin_unlock_irqrestore(&apm->param_lock, flags);
++	if (!read)
++		return q6apm_send_cmd_sync(apm, pkt, 0);
 +
-+	ret = gpr_send_pkt(apm->gdev, pkt);
-+	if (ret >= 0) {
-+		if (ret != pkt->hdr.pkt_size)
-+			ret = -EIO;
-+		else if (!wait_for_completion_timeout(&apm->param_done, 5 * HZ))
-+			ret = -ETIMEDOUT;
-+		else
-+			ret = 0;
-+	}
-+	spin_lock_irqsave(&apm->param_lock, flags);
-+	apm->param_pending = false;
-+	if (!ret) {
-+		ret = apm->param_error;
-+		if (!ret && read)
-+			memcpy(data, apm->param_reply, size);
-+	}
-+	spin_unlock_irqrestore(&apm->param_lock, flags);
++	/* Serialize users of the reply buffer. */
++	mutex_lock(&apm->cmd_lock);
++	memset(apm->get_cfg_reply, 0, sizeof(apm->get_cfg_reply));
++	ret = q6apm_send_cmd_sync(apm, pkt, APM_CMD_RSP_GET_CFG);
++	if (!ret)
++		memcpy(data, apm->get_cfg_reply, size);
 +	mutex_unlock(&apm->cmd_lock);
-+	kfree(pkt);
++
 +	return ret;
 +}
 +EXPORT_SYMBOL_GPL(q6apm_module_param);
@@ -996,78 +911,50 @@ bounded replies. The firmware package supplies the scene-0 graph and tuning.
  static struct audioreach_graph *q6apm_get_audioreach_graph(struct q6apm *apm, uint32_t graph_id)
  {
  	struct audioreach_graph_info *info;
-@@ -955,6 +1014,8 @@
- 
- 	mutex_init(&apm->lock);
- 	mutex_init(&apm->cmd_lock);
-+	spin_lock_init(&apm->param_lock);
-+	init_completion(&apm->param_done);
- 	apm->dev = dev;
- 	apm->gdev = gdev;
- 	init_waitqueue_head(&apm->wait);
-@@ -1011,6 +1072,37 @@
+@@ -963,6 +1001,7 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
  	struct device *dev = &gdev->dev;
  	struct gpr_ibasic_rsp_result_t *result;
  	const struct gpr_hdr *hdr = &data->hdr;
-+
-+	/* Use the service callback; no extra GPR port or callback lifetime. */
-+	if ((hdr->token & BIT(31)) && hdr->token != APM_CONFIG_TOKEN) {
-+		const u32 *words = data->payload;
-+		unsigned long flags;
-+
-+		spin_lock_irqsave(&apm->param_lock, flags);
-+		if (!apm->param_pending || hdr->token != apm->param_token) {
-+			spin_unlock_irqrestore(&apm->param_lock, flags);
-+			return 0;
-+		}
-+		apm->param_error = -EPROTO;
-+		if (hdr->src_port == GPR_APM_MODULE_IID && hdr->src_domain == GPR_DOMAIN_ID_ADSP) {
-+			if (hdr->opcode == GPR_BASIC_RSP_RESULT && data->payload_size == 8 &&
-+			    words[0] == apm->param_opcode) {
-+				apm->param_error = words[1] ? -EREMOTEIO :
-+					(apm->param_opcode == APM_CMD_SET_CFG ? 0 : -EPROTO);
-+			} else if (hdr->opcode == APM_CMD_RSP_GET_CFG && apm->param_opcode == APM_CMD_GET_CFG &&
-+				   data->payload_size >= 20 + apm->param_size &&
-+				   words[1] == apm->param_iid && words[2] == apm->param_id &&
-+				   words[3] == apm->param_size) {
-+				apm->param_error = words[0] || words[4] ? -EREMOTEIO : 0;
-+				if (!apm->param_error)
-+					memcpy(apm->param_reply, words + 5, apm->param_size);
-+			}
-+		}
-+		apm->param_pending = false;
-+		complete(&apm->param_done);
-+		spin_unlock_irqrestore(&apm->param_lock, flags);
-+		return 0;
-+	}
++	const u32 *words;
  
  	result = data->payload;
  
+@@ -990,6 +1029,7 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 		case APM_CMD_GRAPH_FLUSH:
+ 		case APM_CMD_GRAPH_STOP:
+ 		case APM_CMD_SET_CFG:
++		case APM_CMD_GET_CFG:
+ 			apm->result.opcode = result->opcode;
+ 			apm->result.status = result->status;
+ 			if (result->status)
+@@ -1017,6 +1057,16 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 			break;
+ 		}
+ 		break;
++	case APM_CMD_RSP_GET_CFG:
++		/* Status, then module IID, param ID, size, error code and data. */
++		words = data->payload;
++		apm->result.opcode = hdr->opcode;
++		apm->result.status = data->payload_size < 20 ? 1 : words[0] | words[4];
++		if (!apm->result.status)
++			memcpy(apm->get_cfg_reply, words + 5,
++			       min_t(size_t, data->payload_size - 20, sizeof(apm->get_cfg_reply)));
++		wake_up(&apm->wait);
++		break;
+ 	case APM_CMD_RSP_SHARED_MEM_MAP_REGIONS:
+ 		apm->result.opcode = hdr->opcode;
+ 		apm->result.status = 0;
 --- a/sound/soc/qcom/qdsp6/q6apm.h
 +++ b/sound/soc/qcom/qdsp6/q6apm.h
-@@ -2,6 +2,7 @@
- #ifndef __Q6APM_H__
- #define __Q6APM_H__
- #include <linux/types.h>
-+#include <linux/completion.h>
- #include <linux/atomic.h>
- #include <linux/slab.h>
- #include <linux/wait.h>
-@@ -62,6 +63,13 @@
+@@ -61,6 +61,7 @@ struct q6apm {
+ 	struct mutex lock;
  	uint32_t state;
  	uint32_t config_map_handle;
- 	bool config_poisoned;
-+	/* Small runtime parameters share the APM service and command lock. */
-+	spinlock_t param_lock;
-+	struct completion param_done;
-+	u32 param_token, param_opcode, param_iid, param_id, param_size;
-+	bool param_pending;
-+	int param_error;
-+	u8 param_reply[256];
++	u8 get_cfg_reply[64];
  
  	struct list_head widget_list;
  	struct idr graph_idr;
-@@ -146,6 +154,8 @@
+@@ -145,6 +146,8 @@ int q6apm_unmap_memory_fixed_region(struct device *dev, unsigned int graph_id);
  /* Helpers */
  int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
  			uint32_t rsp_opcode);
