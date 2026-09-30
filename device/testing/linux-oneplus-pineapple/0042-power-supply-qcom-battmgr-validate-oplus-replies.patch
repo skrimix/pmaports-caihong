@@ -1,0 +1,554 @@
+From: Pad 2 bring-up <local@localhost>
+Subject: [PATCH] power: supply: qcom_battmgr: validate Oplus property replies
+
+Match replies to the pending opcode/property, validate lengths and report
+firmware errors as negative errno values. Serialize notification enable with
+other requests and protect pending state against timeout/receive races.
+The wire protocol has no transaction ID: a late reply to an identical retried
+request cannot be distinguished. SET reply values are not readback values.
+
+Stop Oplus workers after failed requests and report their errors, preserving
+the successful write sequence. Remove inherited commented-out experiments.
+Drop SM8550 charge thresholds: Oplus property IDs 25/26 are PDO/QC controls,
+and the generic 0x48 setter is unvalidated on this firmware. Reuse the
+read-only SM8350 battery descriptor. X1E80100's separate interface remains.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -16,6 +16,7 @@
+ #include <linux/soc/qcom/pmic_glink.h>
+ #include <linux/math.h>
+ #include <linux/units.h>
++#include <linux/spinlock.h>
+ 
+ #define BATTMGR_CHEMISTRY_LEN	4
+ #define BATTMGR_STRING_LEN	128
+@@ -72,8 +73,6 @@
+ #define BATT_POWER_NOW			22
+ #define BATT_POWER_AVG			23
+ #define BATT_CHG_CTRL_EN		24
+-#define BATT_CHG_CTRL_START_THR		25
+-#define BATT_CHG_CTRL_END_THR		26
+ 
+ #define BATTMGR_USB_PROPERTY_GET	0x32
+ #define BATTMGR_USB_PROPERTY_SET	0x33
+@@ -351,6 +350,11 @@
+ 
+ 	int error;
+ 	struct completion ack;
++	/* Protect the pending request against replies racing with a timeout. */
++	spinlock_t reply_lock;
++	bool request_pending;
++	unsigned int request_opcode;
++	unsigned int request_property;
+ 
+ 	bool service_up;
+ 
+@@ -377,22 +381,39 @@
+ 
+ static int qcom_battmgr_request(struct qcom_battmgr *battmgr, void *data, size_t len)
+ {
+-	unsigned long left;
++	const struct qcom_battmgr_property_request *request = data;
++	const struct pmic_glink_hdr *hdr = data;
++	unsigned long flags, left;
++	unsigned int opcode = le32_to_cpu(hdr->opcode);
+ 	int ret;
+ 
++	lockdep_assert_held(&battmgr->lock);
++	spin_lock_irqsave(&battmgr->reply_lock, flags);
+ 	reinit_completion(&battmgr->ack);
+-
+-	battmgr->error = 0;
++	battmgr->error = -EINPROGRESS;
++	battmgr->request_opcode = opcode;
++	battmgr->request_property = U32_MAX;
++	if (opcode == BATTMGR_BAT_PROPERTY_GET ||
++	    opcode == BATTMGR_USB_PROPERTY_GET ||
++	    opcode == BATTMGR_USB_PROPERTY_SET ||
++	    opcode == BATTMGR_WLS_PROPERTY_GET)
++		battmgr->request_property = le32_to_cpu(request->property);
++	battmgr->request_pending = true;
++	spin_unlock_irqrestore(&battmgr->reply_lock, flags);
+ 
+ 	ret = pmic_glink_send(battmgr->client, data, len);
+ 	if (ret < 0)
+-		return ret;
++		goto out;
+ 
+ 	left = wait_for_completion_timeout(&battmgr->ack, HZ);
+-	if (!left)
+-		return -ETIMEDOUT;
+-
+-	return battmgr->error;
++	ret = left ? 0 : -ETIMEDOUT;
++out:
++	spin_lock_irqsave(&battmgr->reply_lock, flags);
++	battmgr->request_pending = false;
++	if (!ret)
++		ret = battmgr->error;
++	spin_unlock_irqrestore(&battmgr->reply_lock, flags);
++	return ret;
+ }
+ 
+ static int qcom_battmgr_request_property(struct qcom_battmgr *battmgr, int opcode,
+@@ -482,8 +503,6 @@
+ 	[POWER_SUPPLY_PROP_INTERNAL_RESISTANCE] = BATT_RESISTANCE,
+ 	[POWER_SUPPLY_PROP_STATE_OF_HEALTH] = BATT_SOH,
+ 	[POWER_SUPPLY_PROP_POWER_NOW] = BATT_POWER_NOW,
+-	[POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD] = BATT_CHG_CTRL_START_THR,
+-	[POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD] = BATT_CHG_CTRL_END_THR,
+ };
+ 
+ static int qcom_battmgr_bat_sm8350_update(struct qcom_battmgr *battmgr,
+@@ -929,42 +948,6 @@
+ 	.get_property = qcom_battmgr_bat_get_property,
+ };
+ 
+-static const enum power_supply_property sm8550_bat_props[] = {
+-	POWER_SUPPLY_PROP_STATUS,
+-	POWER_SUPPLY_PROP_HEALTH,
+-	POWER_SUPPLY_PROP_PRESENT,
+-	POWER_SUPPLY_PROP_CHARGE_TYPE,
+-	POWER_SUPPLY_PROP_CAPACITY,
+-	POWER_SUPPLY_PROP_VOLTAGE_OCV,
+-	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+-	POWER_SUPPLY_PROP_VOLTAGE_MAX,
+-	POWER_SUPPLY_PROP_CURRENT_NOW,
+-	POWER_SUPPLY_PROP_TEMP,
+-	POWER_SUPPLY_PROP_TECHNOLOGY,
+-	POWER_SUPPLY_PROP_CHARGE_COUNTER,
+-	POWER_SUPPLY_PROP_CYCLE_COUNT,
+-	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+-	POWER_SUPPLY_PROP_CHARGE_FULL,
+-	POWER_SUPPLY_PROP_MODEL_NAME,
+-	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
+-	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
+-	POWER_SUPPLY_PROP_INTERNAL_RESISTANCE,
+-	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
+-	POWER_SUPPLY_PROP_POWER_NOW,
+-	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
+-	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
+-};
+-
+-static const struct power_supply_desc sm8550_bat_psy_desc = {
+-	.name = "qcom-battmgr-bat",
+-	.type = POWER_SUPPLY_TYPE_BATTERY,
+-	.properties = sm8550_bat_props,
+-	.num_properties = ARRAY_SIZE(sm8550_bat_props),
+-	.get_property = qcom_battmgr_bat_get_property,
+-	.set_property = qcom_battmgr_bat_set_property,
+-	.property_is_writeable = qcom_battmgr_bat_is_writeable,
+-};
+-
+ static int qcom_battmgr_ac_get_property(struct power_supply *psy,
+ 					enum power_supply_property psp,
+ 					union power_supply_propval *val)
+@@ -1222,97 +1205,96 @@
+ 	.get_property = qcom_battmgr_wls_get_property,
+ };
+ 
+-// OnePlus specific worker functions
+ static void qcom_battmgr_oplus_init_worker(struct work_struct *work)
+ {
+ 	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr, oplus_init_work.work);
++	int ret;
+ 
+ 	mutex_lock(&battmgr->lock);
+-	dev_info(battmgr->dev, "Initializing OnePlus Type-C Port\n");
+-	
+-	/* 1. Give Application Processor (AP) control over OTG events (MUST BE 1) */
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_AP_ENABLE, 1);
+-	
+-	/* 2. Set Type-C mode to Dual-Role (DRP) to listen for unpowered hubs */
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_TYPEC_MODE, 0);
+-	
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++					    OPLUS_USB_OTG_AP_ENABLE, 1);
++	if (ret)
++		goto out;
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++					    OPLUS_USB_TYPEC_MODE, 0);
++out:
++	if (ret)
++		dev_err(battmgr->dev, "OnePlus Type-C initialization failed: %d\n", ret);
+ 	mutex_unlock(&battmgr->lock);
+ }
+ 
+-static void qcom_battmgr_oplus_otg_worker(struct work_struct* work)
+-{
+-	struct qcom_battmgr* battmgr = container_of(work, struct qcom_battmgr, oplus_otg_work);
++static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
++{
++	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr, oplus_otg_work);
+ 	bool enable = battmgr->oplus_otg_state;
++	int ret;
+ 
+ 	mutex_lock(&battmgr->lock);
+ 	if (enable) {
+-		dev_info(battmgr->dev, "Switching into host mode\n");
+-
+-		/* 1. Turn off ADSP charging logic (VOOCPHY) so it releases D+/D- */
+-		//qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_VOOCPHY_ENABLE, 0);
+-		/* 2. Route D+/D- and SuperSpeed lines to the Snapdragon AP */
+-		//qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_AP_ENABLE, 1);
+-		/* 3. Close the physical OTG switch */
+-		//qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_SWITCH, 1);
+-		/* 4. Enable USB OVP data path */
+-		//qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_SET_OVP_CFG, 1);
+-
+-		/* 5. Set Type-C mode to Host (2) */
+-		// qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_TYPEC_MODE, 2);
+-		/* 6. Turn on 5V VBUS Boost */
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, USB_INPUT_CURR_LIMIT, 0);
+-		qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_VBUS_REG_EN, 1);
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    USB_INPUT_CURR_LIMIT, 0);
++		if (ret)
++			goto out;
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    OPLUS_USB_OTG_VBUS_REG_EN, 1);
+ 	} else {
+-		dev_info(battmgr->dev, "Switching into device mode\n");
+-
+-		/* 1. Safely drop 5V VBUS power */
+-		qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_VBUS_REG_EN, 0);
+-		qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, USB_INPUT_CURR_LIMIT, 500000);
+-	/* 2. Reset Type-C mode back to Dual-Role/None (0) */
+-		qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_TYPEC_MODE, 0);
+-
+-		/* 3. Disconnect data lines from the AP */
+-		//qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_SET_OVP_CFG, 0);
+-		//qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_SWITCH, 0);
+-		//qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_AP_ENABLE, 1);
+-		/* 4. Hand D+/D- control back to the ADSP for wall charging */
+-		//qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_VOOCPHY_ENABLE, 1);
+-	}
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    OPLUS_USB_OTG_VBUS_REG_EN, 0);
++		if (ret)
++			goto out;
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    USB_INPUT_CURR_LIMIT, 500000);
++		if (ret)
++			goto out;
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    OPLUS_USB_TYPEC_MODE, 0);
++	}
++out:
++	if (ret)
++		dev_err(battmgr->dev, "OnePlus OTG %s failed: %d\n",
++			enable ? "enable" : "disable", ret);
+ 	mutex_unlock(&battmgr->lock);
+ }
+ 
+-static void qcom_battmgr_oplus_update_usb_state_worker(struct work_struct* work)
+-{
+-	struct qcom_battmgr* battmgr = container_of(work, struct qcom_battmgr, oplus_update_usb_state_work);
++static void qcom_battmgr_oplus_update_usb_state_worker(struct work_struct *work)
++{
++	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr, oplus_update_usb_state_work);
++	int ret;
+ 
+ 	mutex_lock(&battmgr->lock);
+-
+-	dev_info(battmgr->dev, "[DIAGNOSTIC] 0x57 Fired, logging before: | was_online: %d |online: %d | type: %d | volt: %d | otg_en: %d\n",
+-			 battmgr->oplus_was_online, battmgr->usb.online, battmgr->usb.usb_type, battmgr->usb.voltage_now, battmgr->oplus_otg_state);
+-	/* Ask PMIC if we are currently receiving VBUS power */
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ONLINE, 0);
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ADAP_TYPE, 0);
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_VOLT_NOW, 0);
+-
+-	dev_info(battmgr->dev, "[DIAGNOSTIC] 0x57 Fired, logging after query: | was_online: %d | online: %d | type: %d | volt: %d | otg_en: %d\n",
+-			 battmgr->oplus_was_online, battmgr->usb.online, battmgr->usb.usb_type, battmgr->usb.voltage_now, battmgr->oplus_otg_state);
+-
+-	/* If no power is incoming, and we aren't an active OTG host, force DRP mode */
+-	if (battmgr->oplus_was_online == 1 && battmgr->usb.online == 0 && !battmgr->oplus_otg_state) {
+-		dev_info(battmgr->dev, "USB Disconnected. Resetting Type-C port to DRP\n");
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_AP_ENABLE, 1);
+-		qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_TYPEC_MODE, 0);
+-	battmgr->oplus_otg_state = 1;
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ONLINE, 0);
++	if (ret)
++		goto out;
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ADAP_TYPE, 0);
++	if (ret)
++		goto out;
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_VOLT_NOW, 0);
++	if (ret)
++		goto out;
++
++	if (battmgr->oplus_was_online && !battmgr->usb.online && !battmgr->oplus_otg_state) {
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    OPLUS_USB_OTG_AP_ENABLE, 1);
++		if (ret)
++			goto out;
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    OPLUS_USB_TYPEC_MODE, 0);
++		if (ret)
++			goto out;
++		battmgr->oplus_otg_state = true;
+ 	} else {
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
++						    OPLUS_USB_OTG_AP_ENABLE, 0);
++		if (ret)
++			goto out;
+ 		battmgr->oplus_was_online = battmgr->usb.online;
+-	battmgr->oplus_otg_state = 0;
+-	qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET, OPLUS_USB_OTG_AP_ENABLE, 0);
+-	}
+-
++		battmgr->oplus_otg_state = false;
++	}
++out:
++	if (ret)
++		dev_err(battmgr->dev, "OnePlus USB state update failed: %d\n", ret);
+ 	mutex_unlock(&battmgr->lock);
+ }
+-
+-// End OnePlus specific worker functions
+ 
+ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+ 				      const struct qcom_battmgr_message *msg,
+@@ -1531,6 +1513,7 @@
+ 		break;
+ 	}
+ 
++	battmgr->request_pending = false;
+ 	complete(&battmgr->ack);
+ }
+ 
+@@ -1543,37 +1526,53 @@
+ 	size_t payload_len = len - sizeof(struct pmic_glink_hdr);
+ 	unsigned int val;
+ 
+-	if (payload_len < sizeof(__le32)) {
+-		dev_warn(battmgr->dev, "invalid payload length for %#x: %zd\n",
+-			 opcode, len);
++	if (opcode == BATTMGR_REQUEST_NOTIFICATION) {
++		if (payload_len != sizeof(__le32)) {
++			battmgr->error = -EMSGSIZE;
++			goto out_complete;
++		}
++		battmgr->error = 0;
++		goto out_complete;
++	}
++
++	if (payload_len < sizeof(resp->intval.property)) {
++		dev_warn(battmgr->dev, "short property reply for %#x: %zu\n", opcode, len);
++		battmgr->error = -EMSGSIZE;
++		goto out_complete;
++	}
++	property = le32_to_cpu(resp->intval.property);
++	if (property != battmgr->request_property) {
++		dev_warn(battmgr->dev, "unexpected property %#x for %#x, expected %#x\n",
++			 property, opcode, battmgr->request_property);
+ 		return;
+ 	}
+ 
++	if (opcode == BATTMGR_BAT_PROPERTY_GET && property == BATT_MODEL_NAME) {
++		if (payload_len != sizeof(resp->strval)) {
++			battmgr->error = -EMSGSIZE;
++			goto out_complete;
++		}
++	} else {
++		if (payload_len != sizeof(resp->intval)) {
++			dev_warn(battmgr->dev, "invalid reply length for %#x/%#x: %zu\n",
++				 opcode, property, len);
++			battmgr->error = -EMSGSIZE;
++			goto out_complete;
++		}
++		if (resp->intval.result) {
++			dev_err(battmgr->dev, "firmware rejected %#x/%#x: %#x\n",
++				opcode, property, le32_to_cpu(resp->intval.result));
++			battmgr->error = -EREMOTEIO;
++			goto out_complete;
++		}
++	}
++	battmgr->error = 0;
++
+ 	switch (opcode) {
++	case BATTMGR_USB_PROPERTY_SET:
++		/* The reply value is not a readback of the requested setting. */
++		break;
+ 	case BATTMGR_BAT_PROPERTY_GET:
+-		property = le32_to_cpu(resp->intval.property);
+-		if (property == BATT_MODEL_NAME) {
+-			if (payload_len != sizeof(resp->strval)) {
+-				dev_warn(battmgr->dev,
+-					 "invalid payload length for BATT_MODEL_NAME request: %zd\n",
+-					 payload_len);
+-				battmgr->error = -ENODATA;
+-				return;
+-			}
+-		} else {
+-			if (payload_len != sizeof(resp->intval)) {
+-				dev_warn(battmgr->dev,
+-					 "invalid payload length for %#x request: %zd\n",
+-					 property, payload_len);
+-				battmgr->error = -ENODATA;
+-				return;
+-			}
+-
+-			battmgr->error = le32_to_cpu(resp->intval.result);
+-			if (battmgr->error)
+-				goto out_complete;
+-		}
+-
+ 		switch (property) {
+ 		case BATT_STATUS:
+ 			battmgr->status.status = le32_to_cpu(resp->intval.value);
+@@ -1639,31 +1638,13 @@
+ 		case BATT_POWER_NOW:
+ 			battmgr->status.power_now = le32_to_cpu(resp->intval.value);
+ 			break;
+-		case BATT_CHG_CTRL_START_THR:
+-			battmgr->info.charge_ctrl_start = le32_to_cpu(resp->intval.value);
+-			break;
+-		case BATT_CHG_CTRL_END_THR:
+-			battmgr->info.charge_ctrl_end = le32_to_cpu(resp->intval.value);
+-			break;
+ 		default:
+ 			dev_warn(battmgr->dev, "unknown property %#x\n", property);
++			battmgr->error = -EOPNOTSUPP;
+ 			break;
+ 		}
+ 		break;
+ 	case BATTMGR_USB_PROPERTY_GET:
+-		property = le32_to_cpu(resp->intval.property);
+-		if (payload_len != sizeof(resp->intval)) {
+-			dev_warn(battmgr->dev,
+-				 "invalid payload length for %#x request: %zd\n",
+-				 property, payload_len);
+-			battmgr->error = -ENODATA;
+-			return;
+-		}
+-
+-		battmgr->error = le32_to_cpu(resp->intval.result);
+-		if (battmgr->error)
+-			goto out_complete;
+-
+ 		switch (property) {
+ 		case USB_ONLINE:
+ 			battmgr->usb.online = le32_to_cpu(resp->intval.value);
+@@ -1688,23 +1669,11 @@
+ 			break;
+ 		default:
+ 			dev_warn(battmgr->dev, "unknown property %#x\n", property);
++			battmgr->error = -EOPNOTSUPP;
+ 			break;
+ 		}
+ 		break;
+ 	case BATTMGR_WLS_PROPERTY_GET:
+-		property = le32_to_cpu(resp->intval.property);
+-		if (payload_len != sizeof(resp->intval)) {
+-			dev_warn(battmgr->dev,
+-				 "invalid payload length for %#x request: %zd\n",
+-				 property, payload_len);
+-			battmgr->error = -ENODATA;
+-			return;
+-		}
+-
+-		battmgr->error = le32_to_cpu(resp->intval.result);
+-		if (battmgr->error)
+-			goto out_complete;
+-
+ 		switch (property) {
+ 		case WLS_ONLINE:
+ 			battmgr->wireless.online = le32_to_cpu(resp->intval.value);
+@@ -1723,19 +1692,18 @@
+ 			break;
+ 		default:
+ 			dev_warn(battmgr->dev, "unknown property %#x\n", property);
++			battmgr->error = -EOPNOTSUPP;
+ 			break;
+ 		}
+-		break;
+-	case BATTMGR_REQUEST_NOTIFICATION:
+-	case BATTMGR_CHG_CTRL_LIMIT_EN:
+-		battmgr->error = 0;
+ 		break;
+ 	default:
+ 		dev_warn(battmgr->dev, "unknown message %#x\n", opcode);
++		battmgr->error = -EOPNOTSUPP;
+ 		break;
+ 	}
+ 
+ out_complete:
++	battmgr->request_pending = false;
+ 	complete(&battmgr->ack);
+ }
+ 
+@@ -1743,15 +1711,37 @@
+ {
+ 	const struct pmic_glink_hdr *hdr = data;
+ 	struct qcom_battmgr *battmgr = priv;
+-	unsigned int opcode = le32_to_cpu(hdr->opcode);
+-
+-	if (opcode == BATTMGR_NOTIFICATION)
++	unsigned long flags;
++	unsigned int opcode;
++
++	if (len < sizeof(*hdr)) {
++		dev_warn(battmgr->dev, "short GLINK header: %zu\n", len);
++		return;
++	}
++	opcode = le32_to_cpu(hdr->opcode);
++	if (le32_to_cpu(hdr->owner) != PMIC_GLINK_OWNER_BATTMGR)
++		return;
++	if (opcode == BATTMGR_NOTIFICATION) {
+ 		qcom_battmgr_notification(battmgr, data, len);
+-	else if (battmgr->variant == QCOM_BATTMGR_SC8280XP ||
+-		 battmgr->variant == QCOM_BATTMGR_X1E80100)
++		return;
++	}
++	if (le32_to_cpu(hdr->type) != PMIC_GLINK_REQ_RESP) {
++		dev_warn(battmgr->dev, "unexpected reply type: %#x\n", le32_to_cpu(hdr->type));
++		return;
++	}
++
++	spin_lock_irqsave(&battmgr->reply_lock, flags);
++	if (!battmgr->request_pending || opcode != battmgr->request_opcode) {
++		dev_warn(battmgr->dev, "unexpected reply opcode %#x\n", opcode);
++		goto out;
++	}
++	if (battmgr->variant == QCOM_BATTMGR_SC8280XP ||
++	    battmgr->variant == QCOM_BATTMGR_X1E80100)
+ 		qcom_battmgr_sc8280xp_callback(battmgr, data, len);
+ 	else
+ 		qcom_battmgr_sm8350_callback(battmgr, data, len);
++out:
++	spin_unlock_irqrestore(&battmgr->reply_lock, flags);
+ }
+ 
+ static void qcom_battmgr_enable_worker(struct work_struct *work)
+@@ -1764,7 +1754,9 @@
+ 	};
+ 	int ret;
+ 
++	mutex_lock(&battmgr->lock);
+ 	ret = qcom_battmgr_request(battmgr, &req, sizeof(req));
++	mutex_unlock(&battmgr->lock);
+ 	if (ret)
+ 		dev_err(battmgr->dev, "failed to request power notifications\n");
+ }
+@@ -1828,6 +1820,7 @@
+ 
+ 	mutex_init(&battmgr->lock);
+ 	init_completion(&battmgr->ack);
++	spin_lock_init(&battmgr->reply_lock);
+ 
+ 	match = of_match_device(qcom_battmgr_of_variants, dev->parent);
+ 	if (match)
+@@ -1867,10 +1860,7 @@
+ 			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+ 					     "failed to register wireless charing power supply\n");
+ 	} else {
+-		if (battmgr->variant == QCOM_BATTMGR_SM8550)
+-			psy_desc = &sm8550_bat_psy_desc;
+-		else
+-			psy_desc = &sm8350_bat_psy_desc;
++		psy_desc = &sm8350_bat_psy_desc;
+ 
+ 		battmgr->bat_psy = devm_power_supply_register(dev, psy_desc, &psy_cfg);
+ 		if (IS_ERR(battmgr->bat_psy))

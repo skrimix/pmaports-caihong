@@ -1,0 +1,192 @@
+From: Pad 2 bring-up <local@localhost>
+Subject: [PATCH] power: supply: qcom_battmgr: add read-only PPS diagnostics
+
+Expose two root-readable debugfs files on SM8650: the OEM source-capability
+buffer (opcode 0x10004) and raw PPS status (USB GET property 33). Reading
+these files makes only the corresponding read request, under the existing
+request lock. No diagnostic requests run automatically in the driver.
+
+The pinned OEM layout uses a fixed 128-word array followed by its byte count.
+Validate the full packet before reading that trailing count, and require
+aligned data containing at least the two initial words and seven PDO slots.
+Preserve raw words; buffer freshness and firmware semantics need measurement.
+This is diagnostic access, not a PPS charging controller.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -5,6 +5,8 @@
+  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+  */
+ #include <linux/auxiliary_bus.h>
++#include <linux/debugfs.h>
++#include <linux/of.h>
+ #include <linux/jiffies.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+@@ -124,6 +126,10 @@
+ #define NOTIF_OPLUS_PD_SOURCECAP_DONE 0x79
+ 
+ #define OPLUS_USB_VOOCPHY_ENABLE 16
++#define OPLUS_PPS_READ_BUFFER 0x10004
++#define OPLUS_PPS_BUFFER_WORDS 128
++#define OPLUS_USB_PPS_STATUS 33
++
+ #define OPLUS_USB_OTG_AP_ENABLE 17
+ #define OPLUS_USB_OTG_SWITCH 18
+ #define OPLUS_USB_TYPEC_MODE 22
+@@ -145,6 +151,18 @@
+ 	__le32 battery;
+ 	__le32 property;
+ 	__le32 value;
++};
++
++/* OEM source-capability buffer: two header words, then seven PDOs. */
++struct qcom_battmgr_pps_request {
++	struct pmic_glink_hdr hdr;
++	__le32 data_size;
++};
++
++struct qcom_battmgr_pps_response {
++	struct pmic_glink_hdr hdr;
++	__le32 data[OPLUS_PPS_BUFFER_WORDS];
++	__le32 data_size;
+ };
+ 
+ struct qcom_battmgr_update_request {
+@@ -355,6 +373,9 @@
+ 	bool request_pending;
+ 	unsigned int request_opcode;
+ 	unsigned int request_property;
++	__le32 pps_data[OPLUS_PPS_BUFFER_WORDS];
++	unsigned int pps_data_size;
++	u32 pps_status;
+ 
+ 	bool service_up;
+ 
+@@ -1205,6 +1226,54 @@
+ 	.get_property = qcom_battmgr_wls_get_property,
+ };
+ 
++static int qcom_battmgr_pps_caps_show(struct seq_file *seq, void *unused)
++{
++	struct qcom_battmgr *battmgr = seq->private;
++	struct qcom_battmgr_pps_request req = {
++		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_BATTMGR),
++		.hdr.type = cpu_to_le32(PMIC_GLINK_REQ_RESP),
++		.hdr.opcode = cpu_to_le32(OPLUS_PPS_READ_BUFFER),
++		.data_size = cpu_to_le32(sizeof(battmgr->pps_data)),
++	};
++	unsigned int i;
++	int ret;
++
++	if (!battmgr->service_up)
++		return -EAGAIN;
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_request(battmgr, &req, sizeof(req));
++	if (!ret) {
++		seq_printf(seq, "data_size=%u\n", battmgr->pps_data_size);
++		for (i = 0; i < battmgr->pps_data_size / sizeof(__le32); i++)
++			seq_printf(seq, "word[%u]=%#010x\n", i, le32_to_cpu(battmgr->pps_data[i]));
++	}
++	mutex_unlock(&battmgr->lock);
++	return ret;
++}
++DEFINE_SHOW_ATTRIBUTE(qcom_battmgr_pps_caps);
++
++static int qcom_battmgr_pps_status_show(struct seq_file *seq, void *unused)
++{
++	struct qcom_battmgr *battmgr = seq->private;
++	int ret;
++
++	if (!battmgr->service_up)
++		return -EAGAIN;
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET,
++					    OPLUS_USB_PPS_STATUS, 0);
++	if (!ret)
++		seq_printf(seq, "%#010x\n", battmgr->pps_status);
++	mutex_unlock(&battmgr->lock);
++	return ret;
++}
++DEFINE_SHOW_ATTRIBUTE(qcom_battmgr_pps_status);
++
++static void qcom_battmgr_remove_debugfs(void *data)
++{
++	debugfs_remove_recursive(data);
++}
++
+ static void qcom_battmgr_oplus_init_worker(struct work_struct *work)
+ {
+ 	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr, oplus_init_work.work);
+@@ -1526,6 +1595,29 @@
+ 	size_t payload_len = len - sizeof(struct pmic_glink_hdr);
+ 	unsigned int val;
+ 
++	if (opcode == OPLUS_PPS_READ_BUFFER) {
++		const struct qcom_battmgr_pps_response *pps = (const void *)resp;
++		unsigned int size;
++
++		/* data_size is at the end of the fixed-size wire structure. */
++		if (len != sizeof(*pps)) {
++			dev_err(battmgr->dev, "invalid PPS buffer reply length: %zu\n", len);
++			battmgr->error = -EMSGSIZE;
++			goto out_complete;
++		}
++		size = le32_to_cpu(pps->data_size);
++		if (size < 9 * sizeof(__le32) || size > sizeof(pps->data) ||
++		    size % sizeof(__le32)) {
++			dev_err(battmgr->dev, "invalid PPS buffer data size: %u\n", size);
++			battmgr->error = -EPROTO;
++			goto out_complete;
++		}
++		memcpy(battmgr->pps_data, pps->data, size);
++		battmgr->pps_data_size = size;
++		battmgr->error = 0;
++		goto out_complete;
++	}
++
+ 	if (opcode == BATTMGR_REQUEST_NOTIFICATION) {
+ 		if (payload_len != sizeof(__le32)) {
+ 			battmgr->error = -EMSGSIZE;
+@@ -1667,6 +1759,9 @@
+ 		case USB_ADAP_TYPE:
+ 			battmgr->usb.usb_type = le32_to_cpu(resp->intval.value);
+ 			break;
++		case OPLUS_USB_PPS_STATUS:
++			battmgr->pps_status = le32_to_cpu(resp->intval.value);
++			break;
+ 		default:
+ 			dev_warn(battmgr->dev, "unknown property %#x\n", property);
+ 			battmgr->error = -EOPNOTSUPP;
+@@ -1795,6 +1890,7 @@
+ 	const struct of_device_id *match;
+ 	struct qcom_battmgr *battmgr;
+ 	struct device *dev = &adev->dev;
++	struct dentry *debugfs, *file;
+ 	int ret;
+ 
+ 	battmgr = devm_kzalloc(dev, sizeof(*battmgr), GFP_KERNEL);
+@@ -1887,6 +1983,23 @@
+ 
+ 	pmic_glink_client_register(battmgr->client);
+ 
++	if (of_machine_is_compatible("qcom,sm8650")) {
++		debugfs = debugfs_create_dir("pad2_battmgr", NULL);
++		if (IS_ERR(debugfs))
++			return dev_err_probe(dev, PTR_ERR(debugfs), "failed to create battery debugfs\n");
++		ret = devm_add_action_or_reset(dev, qcom_battmgr_remove_debugfs, debugfs);
++		if (ret)
++			return ret;
++		file = debugfs_create_file("pps_caps", 0400, debugfs, battmgr,
++					   &qcom_battmgr_pps_caps_fops);
++		if (IS_ERR(file))
++			return dev_err_probe(dev, PTR_ERR(file), "failed to create PPS caps diagnostic\n");
++		file = debugfs_create_file("pps_status", 0400, debugfs, battmgr,
++					   &qcom_battmgr_pps_status_fops);
++		if (IS_ERR(file))
++			return dev_err_probe(dev, PTR_ERR(file), "failed to create PPS status diagnostic\n");
++	}
++
+ 	schedule_delayed_work(&battmgr->oplus_init_work, msecs_to_jiffies(2000));
+ 	return 0;
+ }
