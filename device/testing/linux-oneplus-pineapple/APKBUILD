@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=76
+pkgrel=77
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -169,5 +169,5 @@ e38897582a095d19ffe8ac958489e8153c8fc3ff9832271de4c22c3affe9e913ea28f53e8e90b5f5
 4abddac5d4f7bb7d1f5653f16983333d536b6345e19f4c5f07ccb5ab03b6cb15a0f6054eed81149020aebbccaf63e1aa2a15cca192461168d1c8c1d4d92ba740  0042-power-supply-qcom-battmgr-validate-oplus-replies.patch
 4693b644be78418765e1481a70a0b59f2f4089fa9aa1dcba58ad4316ca624fea049e83baa339229aa3ea1f2c204711d49a2f119d7b75f47914754147f4fbb490  0043-power-supply-qcom-battmgr-pps-diagnostics.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
-1a515612599e9ff445410b8ad4a0ba22ae373a7e78a31dd475f5f18c2e9c3210b2e7ed39fea48d4fc25d9ebaece62c090207d9b2887879dc209b5c40e0ef4646  config-oneplus-pineapple.aarch64
+bf1dd96c8a644b7233c952f24fcebda2d707cff9cf0ca6403a146a490eb07f64b9e807ea4444f5f49b9dd6580f4ab4ebd6af7e6d4e2a30aaf8ed44f3df04c0d1  config-oneplus-pineapple.aarch64
 "
