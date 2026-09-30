@@ -1,0 +1,13 @@
+[Unit]
+Description=Copy OnePlus Pad 2 calibration from persist
+Requires=msm-firmware-loader.service
+After=msm-firmware-loader.service local-fs.target
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/caihong-persist-import
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Copy per-device calibration from Android persist once; never write it back.
+# msm-firmware-loader already mounts persist read-only. Delete a copy to re-import it.
+set -eu
+umask 077
+src=${CAIHONG_PERSIST:-/run/msm-firmware-loader/mnt/persist}
+dst=${CAIHONG_STATE:-/var/lib/caihong-persist}
+
+for path in media/aw_cali.bin sensors/registry; do
+	[ -e "$dst/$path" ] && continue
+	mkdir -p "$dst/$(dirname "$path")"
+	rm -rf "$dst/$path.tmp"
+	cp -R "$src/$path" "$dst/$path.tmp"
+	sync
+	mv "$dst/$path.tmp" "$dst/$path"
+	echo "imported $path"
+done
