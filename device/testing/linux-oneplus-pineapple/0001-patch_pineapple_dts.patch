@@ -1,6 +1,6 @@
 --- /dev/null	2026-08-21 07:35:49.106641906 +0200
 +++ fakesrc/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts	2026-08-25 07:52:42.694285821 +0200
-@@ -0,0 +1,924 @@
+@@ -0,0 +1,955 @@
 +/dts-v1/;
 +#include "sm8650-mtp.dts"
 +#include <dt-bindings/input/input.h>
@@ -636,6 +636,13 @@
 +};
 +
 +&pm8550_gpios {
++	svooc_therm_default: svooc-therm-default-state {
++		pins = "gpio12";
++		function = "normal";
++		bias-disable;
++		bias-high-impedance;
++	};
++
 +    vol_down_default: vol-down-default-state {
 +        pins = "gpio6";
 +        function = "normal";
@@ -643,6 +650,11 @@
 +        input-enable;
 +        power-source = <1>; /* 1.8V domain */
 +    };
++};
++
++/* GPIO12 is the SVOOC thermistor, not the MTP SD card detect. */
++&sdhc_2 {
++	status = "disabled";
 +};
 +
 +&remoteproc_mpss {
@@ -754,14 +766,16 @@
 +&pmk8550 {
 +	/* Inject the missing Voltage ADC block */
 +	vadc: adc@9000 {
-+		compatible = "qcom,spmi-adc5-gen3", "qcom,spmi-adc5";
-+		reg = <0x9000>;
++		compatible = "qcom,spmi-adc5-gen3";
++		reg = <0x9000>, <0x9100>;
 +		#address-cells = <1>;
 +		#size-cells = <0>;
 +		#io-channel-cells = <1>;
 +
-+		/* 0x90 0x01 is the End of Conversion (EOC) interrupt on SPMI */
-+		interrupts = <0x0 0x90 0x01 IRQ_TYPE_EDGE_RISING>;
++		interrupts = <0x0 0x90 0x01 IRQ_TYPE_EDGE_RISING>,
++			     <0x0 0x91 0x01 IRQ_TYPE_EDGE_RISING>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&svooc_therm_default>;
 +
 +		/* OnePlus Pad 2 Skin Thermistor */
 +		channel@144 {
@@ -788,6 +802,14 @@
 +			qcom,ratiometric;
 +			label = "wlan_therm";
 +		};
++		/* PA thermistor 1 */
++		channel@147 {
++			reg = <0x147>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "pa_therm_1";
++		};
 +		/* Rear TOF Thermistor */
 +		channel@148 {
 +			reg = <0x148>;
@@ -796,6 +818,15 @@
 +			qcom,ratiometric;
 +			label = "rear_tof_therm";
 +		};
++		/* PA thermistor 2 */
++		channel@14a {
++			reg = <0x14a>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "pa_therm_2";
++		};
++
 +		/* Battery (Real) Thermistor */
 +		channel@14b {
 +			reg = <0x14b>;

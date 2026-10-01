@@ -1,0 +1,139 @@
+From: Pad 2 bring-up <local@localhost>
+Subject: [PATCH] power: supply: qcom_battmgr: derive Pad 2 battery health
+
+The Oplus Android supply computes health from gauge/policy inputs and
+returns zero for standard power. Our generic health reply reports Overheat
+at ordinary gauge temperatures; its power reply disagrees with voltage and
+current by orders of magnitude. Stop requesting those properties.
+
+Derive health from fresh presence, gauge temperature and voltage, with the
+Pad 2 OEM fault limits and hysteresis. Decode signed temperature before
+scaling so cold readings remain negative. This changes reporting only.
+
+Limits: saved Android DT /soc/oplus,comm, batt-them-thr and vbatt-ov-thr-mv.
+Reference: OnePlus modules 3b0ed1b3edbcbffec3fdf43e4e7e54730a7c08a9,
+vendor/oplus/kernel/charger/v2/oplus_chg_comm.c (health, temperature and
+voltage checks), include/oplus_chg_comm.h (BATT_TEMP_HYST), and
+charger_ic/oplus_hal_adsp.c (signed temperature decoding).
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -317,13 +317,16 @@
+ struct qcom_battmgr_status {
+ 	unsigned int status;
+ 	unsigned int health;
++	bool overvoltage;
++	bool hot;
++	bool cold;
+ 	unsigned int capacity;
+ 	unsigned int percent;
+ 	int current_now;
+ 	int power_now;
+ 	unsigned int voltage_now;
+ 	unsigned int voltage_ocv;
+-	unsigned int temperature;
++	int temperature;
+ 	unsigned int resistance;
+ 	unsigned int soh_percent;
+ 
+@@ -504,7 +507,6 @@
+ 
+ static const u8 sm8350_bat_prop_map[] = {
+ 	[POWER_SUPPLY_PROP_STATUS] = BATT_STATUS,
+-	[POWER_SUPPLY_PROP_HEALTH] = BATT_HEALTH,
+ 	[POWER_SUPPLY_PROP_PRESENT] = BATT_PRESENT,
+ 	[POWER_SUPPLY_PROP_CHARGE_TYPE] = BATT_CHG_TYPE,
+ 	[POWER_SUPPLY_PROP_CAPACITY] = BATT_CAPACITY,
+@@ -523,9 +525,53 @@
+ 	[POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG] = BATT_TTE_AVG,
+ 	[POWER_SUPPLY_PROP_INTERNAL_RESISTANCE] = BATT_RESISTANCE,
+ 	[POWER_SUPPLY_PROP_STATE_OF_HEALTH] = BATT_SOH,
+-	[POWER_SUPPLY_PROP_POWER_NOW] = BATT_POWER_NOW,
+ };
+ 
++/*
++ * The Oplus firmware's generic health reply reports Overheat at ordinary
++ * temperatures. Derive health from gauge presence, temperature and voltage.
++ */
++static int qcom_battmgr_bat_health_update(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_status *status = &battmgr->status;
++	int temperature, ret;
++
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_PRESENT, 0);
++	if (ret)
++		return ret;
++	if (!battmgr->info.present) {
++		status->overvoltage = status->hot = status->cold = false;
++		status->health = POWER_SUPPLY_HEALTH_DEAD;
++		return 0;
++	}
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_TEMP, 0);
++	if (ret)
++		return ret;
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_VOLT_NOW, 0);
++	if (ret)
++		return ret;
++	temperature = status->temperature;
++
++	/*
++	 * Pad 2 OEM limits (/soc/oplus,comm): -10/53 C and 4.6 V, with the
++	 * Oplus 2 C and 200 mV hysteresis. Temperatures are in tenths of a
++	 * degree. Fault states change only after every read has succeeded.
++	 */
++	status->overvoltage = status->voltage_now >= (status->overvoltage ? 4400000 : 4600000);
++	status->hot = temperature >= (status->hot ? 510 : 530);
++	status->cold = temperature < (status->cold ? -80 : -100);
++
++	if (status->overvoltage)
++		status->health = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
++	else if (status->hot)
++		status->health = POWER_SUPPLY_HEALTH_OVERHEAT;
++	else if (status->cold)
++		status->health = POWER_SUPPLY_HEALTH_COLD;
++	else
++		status->health = POWER_SUPPLY_HEALTH_GOOD;
++	return 0;
++}
++
+ static int qcom_battmgr_bat_sm8350_update(struct qcom_battmgr *battmgr,
+ 					  enum power_supply_property psp)
+ {
+@@ -538,7 +584,10 @@
+ 	prop = sm8350_bat_prop_map[psp];
+ 
+ 	mutex_lock(&battmgr->lock);
+-	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, prop, 0);
++	if (psp == POWER_SUPPLY_PROP_HEALTH)
++		ret = qcom_battmgr_bat_health_update(battmgr);
++	else
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, prop, 0);
+ 	mutex_unlock(&battmgr->lock);
+ 
+ 	return ret;
+@@ -958,7 +1007,6 @@
+ 	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
+ 	POWER_SUPPLY_PROP_INTERNAL_RESISTANCE,
+ 	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
+-	POWER_SUPPLY_PROP_POWER_NOW,
+ };
+ 
+ static const struct power_supply_desc sm8350_bat_psy_desc = {
+@@ -1593,7 +1641,7 @@
+ 	unsigned int property;
+ 	unsigned int opcode = le32_to_cpu(resp->hdr.opcode);
+ 	size_t payload_len = len - sizeof(struct pmic_glink_hdr);
+-	unsigned int val;
++	int val;
+ 
+ 	if (opcode == OPLUS_PPS_READ_BUFFER) {
+ 		const struct qcom_battmgr_pps_response *pps = (const void *)resp;
+@@ -1697,7 +1745,7 @@
+ 			battmgr->status.current_now = le32_to_cpu(resp->intval.value);
+ 			break;
+ 		case BATT_TEMP:
+-			val = le32_to_cpu(resp->intval.value);
++			val = (s32)le32_to_cpu(resp->intval.value);
+ 			battmgr->status.temperature = DIV_ROUND_CLOSEST(val, 10);
+ 			break;
+ 		case BATT_TECHNOLOGY:

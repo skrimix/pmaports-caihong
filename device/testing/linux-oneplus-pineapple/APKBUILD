@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=77
+pkgrel=82
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -78,6 +78,8 @@ source="
 	0041-power-supply-qcom-battmgr-read-adapter-type.patch
 	0042-power-supply-qcom-battmgr-validate-oplus-replies.patch
 	0043-power-supply-qcom-battmgr-pps-diagnostics.patch
+	0044-power-supply-qcom-battmgr-gauge-health.patch
+	0045-power-supply-qcom-battmgr-shell-back.patch
 
 
 	dummy-dtbo.dtso
@@ -132,7 +134,7 @@ package() {
 
 sha512sums="
 fc738e2efbc2b5b355a3d0ef97f1b0e3aa4b7d9429b0ac4816839e39724ac9100fa6c819fd9484ed04072a29a6bdda8306bb11261d27fcebdc11605bf7e530f3  linux-oneplus-pineapple-7.1-rc5.tar.gz
-8b3ed92426135988b8ded22bc8cad0746e5ade7eae7e739835be541b0c94548cce388008145fbf8837ae041fae0209146a3abacbb79bed9280b54b435e33d0b3  0001-patch_pineapple_dts.patch
+2b27c4b6f483f6491fc870c9366d5bf65b5a722b042392884008fccccdda24173a353fecc684b63d8b8ac4661b4601b43cb715a18397da4a765a73bdc0cf62a7  0001-patch_pineapple_dts.patch
 743ad971933d877ace62cf322cffe6a1926dd93d90dda6c26dad31a1ff4b220f9e94230ddc6c8fc153cc53767a5650698147e59a8d991576f81464ba13cf55f0  0002-patch_pineapple_dts_makefile.patch
 b0c739e1c1ea874a80491d285f7fdc181f76f77a1fa86aaeffc648b44057db2661f318683cf225ce114634d68ffeeacea54bec1df968b085c5ab4d2895e5a107  0003-drm-panel-Add-support-for-novatek_nt36532.patch
 9ac34413200b8bcb4e8d72441fff9161d0966081e817700127dc607ffcea215a689f4a482663d422b06b4e3e40aa0e11a607efad3310a31a3e81299390e83dc3  0005-drm-msm-dsi-support-DSC-configurations-with-slice_pe.patch
@@ -168,6 +170,8 @@ e38897582a095d19ffe8ac958489e8153c8fc3ff9832271de4c22c3affe9e913ea28f53e8e90b5f5
 4b1a9fda2f278b3d71183327972a417f26e2c41e23e54f9b9314cf516b4e52ff6216518bd70b6b6b736787a71dbfd4d63f096b3b035a85ffccc7ece096ec713f  0041-power-supply-qcom-battmgr-read-adapter-type.patch
 4abddac5d4f7bb7d1f5653f16983333d536b6345e19f4c5f07ccb5ab03b6cb15a0f6054eed81149020aebbccaf63e1aa2a15cca192461168d1c8c1d4d92ba740  0042-power-supply-qcom-battmgr-validate-oplus-replies.patch
 4693b644be78418765e1481a70a0b59f2f4089fa9aa1dcba58ad4316ca624fea049e83baa339229aa3ea1f2c204711d49a2f119d7b75f47914754147f4fbb490  0043-power-supply-qcom-battmgr-pps-diagnostics.patch
+f11ad4e73f7d454f1cff4b396bda185c90d207325135afd34f3c5cec2cd638cfa1cefaec879de4045edf2513d85b6286d45809d22360c10d47abb4b4f1ca967c  0044-power-supply-qcom-battmgr-gauge-health.patch
+e13034a2116b007e1f15c2f7092e6720fa9ec219636e21fe06b964c967360544eee72c0b0efc93668cbddaa7a3c11373c43f17d44e76677c10e290914864e03b  0045-power-supply-qcom-battmgr-shell-back.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
 bf1dd96c8a644b7233c952f24fcebda2d707cff9cf0ca6403a146a490eb07f64b9e807ea4444f5f49b9dd6580f4ab4ebd6af7e6d4e2a30aaf8ed44f3df04c0d1  config-oneplus-pineapple.aarch64
 "

@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=17
+pkgrel=20
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -25,6 +25,7 @@ depends="
 	i2c-tools
 	firmware-oneplus-pineapple
 	alsa-ucm-conf
+	python3
 "
 makedepends="devicepkg-dev"
 source="
@@ -39,6 +40,8 @@ source="
 	80-oneplus-pineapple.preset
 	caihong-persist-import
 	caihong-persist-import.service
+	caihong-shell-back
+	caihong-shell-back.service
 "
 
 build() {
@@ -59,6 +62,10 @@ package() {
 		"$pkgdir/usr/libexec/caihong-persist-import"
 	install -Dm644 "$srcdir/caihong-persist-import.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-persist-import.service"
+	install -Dm755 "$srcdir/caihong-shell-back" \
+		"$pkgdir/usr/libexec/caihong-shell-back"
+	install -Dm644 "$srcdir/caihong-shell-back.service" \
+		"$pkgdir/usr/lib/systemd/system/caihong-shell-back.service"
 	install -Dm644 "$srcdir/caihong.conf" \
 		"$pkgdir/usr/share/alsa/ucm2/Qualcomm/caihong/caihong.conf"
 	install -Dm644 "$srcdir/HiFi.conf" \
@@ -86,7 +93,9 @@ df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd55
 0a702af824fd2abd7f173cb70030b88ea352b928b7506c78f6492d66e31fd0163fa43989a66a1b61a0647dba56dc7ec1fba07b2a1d97149dc0c107f6e1a4c033  52-oneplus-pineapple.conf
 d73a2cce5d39958340142d18ba550c32cc1df892d5137b7e87a29792afc1a3bb5d59fe4a78400bb25eb284e265ea93adb41c577e079319469cecbdb929a64bcc  pad2-usb-serial-initfs.sh
 47f4d8386431be7b425ac29af2a97c2b0beae8f5987c165ee4789a3e88cc733f89690cb0b2b24a2e50400cf5d183831e95f5df1be1997784c42929d607fe1caf  pad2-usb-serial-rootfs.service
-c7e6a5fb642072589bd4891bcf34a6d90e50bda5085367e7b7ae6555ec31c3444fe4d8fc1fab0130314bfec9a9df434599b487bd517791a7952ec60484415c65  80-oneplus-pineapple.preset
+0d52a4032c2205fd67515089a1f02d69be2b1802a971ed6fcf2e47ee195a1cdd71636422fb4d6ce864b3aea78b84a4576e7c2b2eaaee1293f1e765d1f7715ee6  80-oneplus-pineapple.preset
 acd3ef4b56378d4195a9cb0af22318c74fb2ffdf1b70316836b4fc22ee51247202e187f88b6bea16ba7da9ea27692482b543bd2044586c682b52c903e2da259a  caihong-persist-import
 4e60222efeaa1e540b42b3201093c6a153cf9dc9c4358a84821ad01aab1f4190ca666be09d3d32077c545c9f6ad50cf197423db254d61b6fabfca90aec0c25c0  caihong-persist-import.service
+0395f27517caaa92dd781a01bcfe659a8a65ef6d9a9dc6971191715fe6e35381b6e63f1194a36fafe466e592188921a8957ffd012c5e32b72470ee95c54f436f  caihong-shell-back
+33a25ad5dd369fafd527626eb7e22e886c104664402d972fad7439609337dfc5ab5e7d7127871eb3a7f50ce5634aa0b3f3395f927baa27452fde1f7c0379c270  caihong-shell-back.service
 "

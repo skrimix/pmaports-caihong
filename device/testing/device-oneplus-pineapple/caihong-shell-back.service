@@ -1,0 +1,11 @@
+[Unit]
+Description=OnePlus Pad 2 shell-back temperature
+
+[Service]
+ExecStart=/usr/libexec/caihong-shell-back
+ExecStopPost=/bin/sh -c 'echo invalid > /sys/class/power_supply/qcom-battmgr-bat/device/shell_temp'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

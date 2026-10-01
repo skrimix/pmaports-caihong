@@ -1,0 +1,112 @@
+#!/usr/bin/python3
+"""Pad 2 shell-back estimate, in millidegrees Celsius.
+
+Model: horae_SM8650.conf v2024061401, projects 23976,23978,23927.
+Filtering: horae 27177bc8b21dc5eeca329a648d95bc95d6a8923b25dbb9999f4d48a517aaaa22.
+The installed Pad 2 charger service has no BMS heating configuration.
+The service invalidates OUTPUT when this exits; the kernel expires it after 15 s.
+"""
+
+from pathlib import Path
+import time
+
+
+COEFFICIENTS = {
+    "skin_msm_therm": 0.953036,
+    "pa_therm_1": -2.57034,
+    "pa_therm_2": -1.40236,
+    "cam_flash_therm": 1.93316,
+    "svooc_therm": -0.40219,
+    "wlan_therm": 1.16839,
+    "rear_tof_therm": 1.25341,
+}
+INTERCEPT = 1834.41564
+INTERVAL = 5
+OUTPUT = Path("/sys/class/power_supply/qcom-battmgr-bat/device/shell_temp")
+
+
+class ShellBack:
+    def __init__(self):
+        self.inputs = None
+        self.previous_time = None
+        self.previous_output = 0
+        self.history = []
+        self.screen_on = False
+        self.screen_on_time = 0
+
+    def screen(self, on, now):
+        if on and not self.screen_on:
+            self.screen_on_time = int(now)
+        self.screen_on = on
+
+    def sample(self, inputs, now):
+        now = int(now)
+        for label, value in inputs.items():
+            if not -40000 < value <= 115000:
+                raise ValueError(f"{label}: temperature outside OEM range: {value}")
+        elapsed = now - self.previous_time if self.previous_time is not None else 0
+        if self.inputs is not None and elapsed:
+            # Slew-limit each input to 2.5 °C/s.
+            limit = 2500 * elapsed
+            inputs = {label: min(self.inputs[label] + limit, max(self.inputs[label] - limit, value))
+                      for label, value in inputs.items()}
+
+        result = int(sum(inputs[label] * c for label, c in COEFFICIENTS.items()) + INTERCEPT)
+        board = inputs["rear_tof_therm"]
+        if result > max(inputs.values()) or result - board >= 20001:
+            result = board
+
+        # Android leaves smoothing history untouched just after screen-on.
+        if now - self.screen_on_time >= 6:
+            rate = int((result - self.previous_output) / max(1, elapsed))
+            if abs(rate) >= 401 and self.history:
+                result = int((result + sum(self.history)) / (1 + len(self.history)))
+                if not -50000 <= result <= 125000:
+                    result = self.history[-1]
+            self.history = (self.history + [result])[-2:]
+        self.inputs = inputs
+        self.previous_time = now
+        self.previous_output = result
+        return result
+
+
+def discover_inputs(root):
+    inputs = {}
+    for attribute in root.glob("iio:device*/in_temp*_label"):
+        label = attribute.read_text().strip()
+        if label not in COEFFICIENTS:
+            continue
+        if label in inputs:
+            raise ValueError(f"duplicate IIO label: {label}")
+        inputs[label] = attribute.with_name(attribute.name.removesuffix("_label") + "_input")
+    if inputs.keys() != COEFFICIENTS.keys():
+        raise ValueError(f"missing IIO labels: {COEFFICIENTS.keys() - inputs.keys()}")
+    return inputs
+
+
+def main():
+    inputs = discover_inputs(Path("/sys/bus/iio/devices"))
+    backlight, = Path("/sys/class/backlight").iterdir()
+    model = ShellBack()
+    published = None
+    next_sample = time.monotonic()
+    print("shell_back: seven thermistors, 5-second sampling", flush=True)
+    while True:
+        now = time.monotonic()
+        on = (int((backlight / "bl_power").read_text()) == 0
+              and int((backlight / "actual_brightness").read_text()) > 0)
+        model.screen(on, now)
+        if now >= next_sample:
+            values = {label: int(path.read_text()) for label, path in inputs.items()}
+            result = model.sample(values, now)
+            # horae publishes only when the truncated tenth changes.
+            if published is None or int(result / 100) != int(published / 100):
+                published = result
+            # Refresh even unchanged values: the kernel expires data after 15 s.
+            OUTPUT.write_text(f"{published}\n")
+            next_sample = now + INTERVAL
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()

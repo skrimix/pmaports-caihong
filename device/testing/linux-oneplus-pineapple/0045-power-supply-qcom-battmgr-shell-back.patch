@@ -1,0 +1,183 @@
+From: Pad 2 bring-up <local@localhost>
+Subject: [PATCH] power: supply: qcom_battmgr: consume a fresh shell-back estimate
+
+Accept the project-23978 userspace shell estimate through device/shell_temp
+(m°C, or "invalid") and expose it as the shell_back thermal zone. Select it
+for health under the OEM wired-temperature guards, as
+oplus_comm_check_shell_temp does; battery temp stays the gauge value.
+Samples expire after 15 seconds of boottime, so suspend also invalidates them.
+
+Only reporting changes; this does not control the charger or PPS.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -8,6 +8,8 @@
+ #include <linux/debugfs.h>
+ #include <linux/of.h>
+ #include <linux/jiffies.h>
++#include <linux/ktime.h>
++#include <linux/thermal.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/nvmem-consumer.h>
+@@ -388,6 +390,12 @@
+ 	struct qcom_battmgr_usb usb;
+ 	struct qcom_battmgr_wireless wireless;
+ 
++	/* Userspace shell-back estimate in m°C, protected by lock */
++	struct thermal_zone_device *shell_zone;
++	bool shell_valid;
++	int shell_temperature;
++	u64 shell_updated;
++
+ 	struct work_struct enable_work;
+ 	// OnePlus specific work functions
+ 	bool oplus_otg_state;
+@@ -527,6 +535,16 @@
+ 	[POWER_SUPPLY_PROP_STATE_OF_HEALTH] = BATT_SOH,
+ };
+ 
++/* The service refreshes every 5 s; expire after three missed samples or suspend. */
++#define SHELL_TEMP_LIFETIME_NS (15 * NSEC_PER_SEC)
++
++static bool qcom_battmgr_shell_fresh(struct qcom_battmgr *battmgr)
++{
++	lockdep_assert_held(&battmgr->lock);
++	return battmgr->shell_valid &&
++		ktime_get_boottime_ns() - battmgr->shell_updated < SHELL_TEMP_LIFETIME_NS;
++}
++
+ /*
+  * The Oplus firmware's generic health reply reports Overheat at ordinary
+  * temperatures. Derive health from gauge presence, temperature and voltage.
+@@ -552,6 +570,28 @@
+ 		return ret;
+ 	temperature = status->temperature;
+ 
++	/*
++	 * OEM wired policy (oplus_comm_check_shell_temp): use the shell estimate
++	 * above 32 C up to the WARM limit (below 53 C, at most 51 C while hot),
++	 * within 15 C of the gauge and with only wired power online. Project
++	 * 23978 has no BMS heating compensation configured.
++	 */
++	if (qcom_battmgr_shell_fresh(battmgr) && temperature > 320 &&
++	    temperature <= (status->hot ? 510 : 529) &&
++	    abs(battmgr->shell_temperature / 100 - temperature) < 150) {
++		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ONLINE, 0);
++		if (ret)
++			return ret;
++		if (battmgr->usb.online) {
++			ret = qcom_battmgr_request_property(battmgr, BATTMGR_WLS_PROPERTY_GET,
++							    WLS_ONLINE, 0);
++			if (ret)
++				return ret;
++			if (!battmgr->wireless.online)
++				temperature = battmgr->shell_temperature / 100;
++		}
++	}
++
+ 	/*
+ 	 * Pad 2 OEM limits (/soc/oplus,comm): -10/53 C and 4.6 V, with the
+ 	 * Oplus 2 C and 200 mV hysteresis. Temperatures are in tenths of a
+@@ -593,6 +633,75 @@
+ 	return ret;
+ }
+ 
++static int qcom_battmgr_shell_get_temp(struct thermal_zone_device *zone, int *temp)
++{
++	struct qcom_battmgr *battmgr = thermal_zone_device_priv(zone);
++	int ret = 0;
++
++	mutex_lock(&battmgr->lock);
++	if (qcom_battmgr_shell_fresh(battmgr))
++		*temp = battmgr->shell_temperature;
++	else
++		ret = -ENODATA;
++	mutex_unlock(&battmgr->lock);
++	return ret;
++}
++
++static const struct thermal_zone_device_ops qcom_battmgr_shell_ops = {
++	.get_temp = qcom_battmgr_shell_get_temp,
++};
++
++static ssize_t shell_temp_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct qcom_battmgr *battmgr = dev_get_drvdata(dev);
++	int temp, ret;
++
++	ret = qcom_battmgr_shell_get_temp(battmgr->shell_zone, &temp);
++	return ret ? ret : sysfs_emit(buf, "%d\n", temp);
++}
++
++static ssize_t shell_temp_store(struct device *dev, struct device_attribute *attr,
++				const char *buf, size_t count)
++{
++	struct qcom_battmgr *battmgr = dev_get_drvdata(dev);
++	bool valid = !sysfs_streq(buf, "invalid");
++	bool changed;
++	int temp = 0, ret;
++
++	if (valid) {
++		ret = kstrtoint(buf, 10, &temp);
++		if (ret)
++			return ret;
++		if (temp < -50000 || temp > 125000)
++			return -ERANGE;
++	}
++	mutex_lock(&battmgr->lock);
++	/* Health may select the estimate; skip uevents for unchanged refreshes. */
++	changed = !valid || !qcom_battmgr_shell_fresh(battmgr) ||
++		  temp != battmgr->shell_temperature;
++	battmgr->shell_valid = valid;
++	battmgr->shell_temperature = temp;
++	battmgr->shell_updated = ktime_get_boottime_ns();
++	mutex_unlock(&battmgr->lock);
++	if (changed)
++		power_supply_changed(battmgr->bat_psy);
++	return count;
++}
++static DEVICE_ATTR_RW(shell_temp);
++
++static struct attribute *qcom_battmgr_shell_attrs[] = {
++	&dev_attr_shell_temp.attr,
++	NULL,
++};
++static const struct attribute_group qcom_battmgr_shell_group = {
++	.attrs = qcom_battmgr_shell_attrs,
++};
++
++static void qcom_battmgr_shell_remove(void *data)
++{
++	thermal_zone_device_unregister(data);
++}
++
+ static int qcom_battmgr_bat_sc8280xp_update(struct qcom_battmgr *battmgr,
+ 					    enum power_supply_property psp)
+ {
+@@ -1946,6 +2055,7 @@
+ 		return -ENOMEM;
+ 
+ 	battmgr->dev = dev;
++	auxiliary_set_drvdata(adev, battmgr);
+ 
+ 	psy_cfg.drv_data = battmgr;
+ 	psy_cfg.fwnode = dev_fwnode(&adev->dev);
+@@ -2032,6 +2142,17 @@
+ 	pmic_glink_client_register(battmgr->client);
+ 
+ 	if (of_machine_is_compatible("qcom,sm8650")) {
++		battmgr->shell_zone = thermal_tripless_zone_device_register("shell_back", battmgr,
++									 &qcom_battmgr_shell_ops, NULL);
++		if (IS_ERR(battmgr->shell_zone))
++			return dev_err_probe(dev, PTR_ERR(battmgr->shell_zone),
++					     "failed to register shell-back thermal zone\n");
++		ret = devm_add_action_or_reset(dev, qcom_battmgr_shell_remove, battmgr->shell_zone);
++		if (ret)
++			return ret;
++		ret = devm_device_add_group(dev, &qcom_battmgr_shell_group);
++		if (ret)
++			return ret;
+ 		debugfs = debugfs_create_dir("pad2_battmgr", NULL);
+ 		if (IS_ERR(debugfs))
+ 			return dev_err_probe(dev, PTR_ERR(debugfs), "failed to create battery debugfs\n");

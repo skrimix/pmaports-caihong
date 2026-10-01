@@ -1,2 +1,3 @@
 enable pad2-usb-serial-rootfs.service
 enable caihong-persist-import.service
+enable caihong-shell-back.service
