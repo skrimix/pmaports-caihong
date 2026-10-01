@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=20
+pkgrel=21
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -18,12 +18,15 @@ depends="
 	lz4
 	msm-firmware-loader
 	soc-qcom
+	soc-qcom-vulkan
+	soc-qcom-gstreamer-systemd
 	soc-qcom-qbootctl
 	unl0kr-fbforcerefresh
 	make-dynpart-mappings
 	hexagonrpcd
 	i2c-tools
 	firmware-oneplus-pineapple
+	qrtr
 	alsa-ucm-conf
 	python3
 "
@@ -85,7 +88,7 @@ package() {
 }
 
 sha512sums="
-b66a8371d2403c78870b947c3fa4c39f4abefcfb5438158ad6c2187a63fc3c66a83167182d3337bfc125ab9a7f47feb919d60680a675b10c3fb660d5876e3506  deviceinfo
+29df1c87932495a4daf14bc2e57fd206a9edd4bee164da7ad47f8f4c80b4edf8f7c520a633da9f9acbd11bc402532f2e784e8c99debb5ebc2185298ff112c118  deviceinfo
 95260daa5bc5c6a1075fa7f704670dadf906f1740f969a9b5d233db8209bfeffc53f9a0e43bbec968c132ce386ce3aff4e52e2516f9aedf041b9afdf4d06435b  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
 6b759413a42924fdd3a8b93b8f720ddb0b9f60b4811087b04ae9acec05c7a4e05ae4d659c388bfd41c7823e4c2060f02f689629ca6d5ef57e114630ccda8197e  caihong.conf
