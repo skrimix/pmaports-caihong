@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=21
+pkgrel=22
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -45,6 +45,7 @@ source="
 	caihong-persist-import.service
 	caihong-shell-back
 	caihong-shell-back.service
+	90-dev-nopasswd
 "
 
 build() {
@@ -69,6 +70,9 @@ package() {
 		"$pkgdir/usr/libexec/caihong-shell-back"
 	install -Dm644 "$srcdir/caihong-shell-back.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-shell-back.service"
+	# DEBUG: passwordless sudo for development; remove before release.
+	install -Dm440 "$srcdir/90-dev-nopasswd" \
+		"$pkgdir/etc/sudoers.d/90-dev-nopasswd"
 	install -Dm644 "$srcdir/caihong.conf" \
 		"$pkgdir/usr/share/alsa/ucm2/Qualcomm/caihong/caihong.conf"
 	install -Dm644 "$srcdir/HiFi.conf" \
@@ -101,4 +105,5 @@ acd3ef4b56378d4195a9cb0af22318c74fb2ffdf1b70316836b4fc22ee51247202e187f88b6bea16
 4e60222efeaa1e540b42b3201093c6a153cf9dc9c4358a84821ad01aab1f4190ca666be09d3d32077c545c9f6ad50cf197423db254d61b6fabfca90aec0c25c0  caihong-persist-import.service
 0395f27517caaa92dd781a01bcfe659a8a65ef6d9a9dc6971191715fe6e35381b6e63f1194a36fafe466e592188921a8957ffd012c5e32b72470ee95c54f436f  caihong-shell-back
 33a25ad5dd369fafd527626eb7e22e886c104664402d972fad7439609337dfc5ab5e7d7127871eb3a7f50ce5634aa0b3f3395f927baa27452fde1f7c0379c270  caihong-shell-back.service
+d757e155c598ba8894e1f27d511bbb9504578503596d581ead84ac4c38318643fdb3cfa7164f77d361021af47022a4f3eaab20423784f54494e28aade1faffc0  90-dev-nopasswd
 "

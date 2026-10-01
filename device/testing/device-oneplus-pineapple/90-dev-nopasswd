@@ -1,0 +1,2 @@
+# DEBUG: passwordless sudo for bring-up development; remove before release.
+%wheel ALL=(ALL:ALL) NOPASSWD: ALL
