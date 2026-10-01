@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=85
+pkgrel=86
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -54,13 +54,9 @@ source="
 	0011-drivers-gpu-msm-adjust_mode_clk_for_opd2403.patch
 	0013-ktz8866-patched-slave.patch
 	0014-drivers-gpu-msm-quad-pipe_patch4.patch
-	0015-drivers-gpu-msm-bonded_dsi_timing.patch
 	0017-drivers-gpu-drm-msm-dsi-fix-dsc-pic_width.patch
 	0018-drivers-input-touchscreen-add-nt36532.patch
 	0019-drivers-power-supply-battmgr.patch
-	0046-drm-panel-nt36532-refresh_rate_change.patch
-	0047-drm-panel-nt36532-drop-vrr-capable-property.patch
-	0048-backlight-ktz8866-keep-default-output.patch
 	0020-libbpf-fix-strset-use-after-free.patch
 	0021-input-novatek-nt36532-watchdog-recovery.patch
 	0022-arm64-dts-qcom-caihong-disable-splash-handoff.patch
@@ -83,19 +79,13 @@ source="
 	0043-power-supply-qcom-battmgr-pps-diagnostics.patch
 	0044-power-supply-qcom-battmgr-gauge-health.patch
 	0045-power-supply-qcom-battmgr-shell-back.patch
-
-
+	0046-drm-panel-nt36532-refresh_rate_change.patch
+	0047-drm-panel-nt36532-drop-vrr-capable-property.patch
+	0048-backlight-ktz8866-keep-default-output.patch
 	dummy-dtbo.dtso
 	$_config
 "
 
-#	0012-drivers-gpu-msm-patch-dsc-hdisplay.patch
-#	0004-drm-msm-dsi-change-sync-mode-to-sync-on-DSI0-rather-.patch
-#::https://marc.info/?l=linux-kernel&m=175932723017605&q=mbox
-#::https://marc.info/?l=linux-kernel&m=174401935324137&q=mbox
-#	novatek_nt36532_exp.patch::https://marc.info/?l=linux-kernel&m=175932723017605&q=mbox
-#	dsi_slice_per_pkt_exp.patch::https://lore.kernel.org/all/20250220-dual-dsi-v2-3-6c0038d5a2ef@linaro.org/raw
-#	vendor.zip::https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_v_15.0.0_pad2.zip
 builddir="$srcdir/linux-$_tag"
 
 prepare() {
@@ -149,20 +139,16 @@ c965e01ccf7e2ebc05b29a3e9b89a6eb44afe2470e277717a7310879ba8be49452706d618d54bc1b
 693517b5ba97d0e64888fb209e13534c1cda486925c767bb027f6e1308fbb14dad2d0c65aa2fdd70bdda6f2d8513b762b8e6f39837b0cebaa44f2c793acbaef9  0011-drivers-gpu-msm-adjust_mode_clk_for_opd2403.patch
 f42a313b3ad69e24041e99590186ba9a7a15f7b50c26208a7aa154e736050445194ff6054433cab20912f0917b6c359b02725f66a90ad905b2529600ae37489d  0013-ktz8866-patched-slave.patch
 312a08ea40c1ce82a6202321915fe03902131d82ae26579a40e013ce233f6a65a19b908451c9230e3d50cdcf0a0973669efed6e53a5bf6ecc04929644c5e3416  0014-drivers-gpu-msm-quad-pipe_patch4.patch
-2c473a33916f264229af5a67334cfe2b44777a87f87d5b01fd4cff52d06b95b04d4fac15b43f2c1f86360300a5f6563ed7e661d609d901b1e8115524795b63df  0015-drivers-gpu-msm-bonded_dsi_timing.patch
 3b66eb49dd0e2294546af1a2ad7d7bd32de8e775dbe62d12c43b320b021e10bf291cefa97733dc6ae5779262df01fe2215e51efae084a41278e7a978291555cd  0017-drivers-gpu-drm-msm-dsi-fix-dsc-pic_width.patch
 dbc240fa00893e89c2c8c02213bfee76f52557762fc472f5b1534c1f50a6aabfea78d51024c73d7dc5749c1d737c2b5f57302c963892836a6307888632c258fd  0018-drivers-input-touchscreen-add-nt36532.patch
-97adb7d76dcdbe62a3632633c5cfdbb478625b54fcd189f0c5df45263006cf3722d20ba466a27f02e9b73e15b672e91abbec14ad2157d311e725f8506f09f07a  0019-drivers-power-supply-battmgr.patch
-079b5a72aa35f3a6a60d70a995efad41442d0191818718080100f2be145f1437bbf8c37df0c58625732c2d879ddbb7cad521e736f76a9ed89eeb51e49a935909  0046-drm-panel-nt36532-refresh_rate_change.patch
-0a228e8fa249ff6eeb777d0298867883d3d8603fb2a3ada7d0f4f47091c47136992b8534533453eb0ef94ef31c752f9d2f6c783b76f0377f193804ff5ee3e804  0047-drm-panel-nt36532-drop-vrr-capable-property.patch
-c943d974d028763607e0b74d8d62f4da558acd07d153b5641b6f954f3109f7b0990686be1a9e82bcdd5353544c20ad1355ccfdda5f81bb31349cd5baa0df0459  0048-backlight-ktz8866-keep-default-output.patch
+8f29bb41d491457701936747ad37d0d94e64979eae98b066ae6f75f9d377766632d49cde96493a45cbd2365d4c9f6317c4e9c0583212acebf0922633f2a66131  0019-drivers-power-supply-battmgr.patch
 e2555390d48cbbdc32a7d3f0c27599ff88f2fe3e786d1d0086caaa5b092cc3edcb6e95e2fb07034edb3793f6dc954da0662c723202eb7e2c4956c99b50919b12  0020-libbpf-fix-strset-use-after-free.patch
 f193c9fcb2533eb97aabf296435177b03c8477a7a6e73e9ad1c193f7485787507754dc470b0ab8052b8865d6cac94a37248c96c38b2fb84a074293b98d66b348  0021-input-novatek-nt36532-watchdog-recovery.patch
 6e81749dd68fbfe9ee4b51b44a2fcc53ef6367e0e2a3ccf501f919c41ce639f9ff5474538edb89a57665d7ffbc6576d160826d2eceb603d601192e00a8957f91  0022-arm64-dts-qcom-caihong-disable-splash-handoff.patch
 63772da59d1c692431dd685fec8bfdf3606691f82ac55aa0330902850134e51fbdfaa4104ec6df3e2ea3d5ca843887e0f773b8d20e0aa364d67f4e66c137d375  0024-iommu-arm-smmu-qcom-sm8650-display-identity.patch
 5a9520284aa68a9ad183d24f821d91a547f025cebba7f5a93ff0a4563b91d0fe640064b5d42d6064e542dee18bbb423437c52ec2d35ae901e344509d66866c97  0025-arm64-dts-qcom-caihong-wifi-power.patch
 d38fcb4fdbc990239d292e7720bc59d1de53dcaeddc283082c80945c410fb27e54fb48ebd4a363448f45f0676a527ea6853da9e7b704ce741c592e83034d1c07  0026-ath12k-capture-wmi-startup-crash.patch
-38e4af1b9b388900256e6709e62454fbceafe736410fe3bc40505b8f76dc378585d3411d3bf9525cc2056217a2c09dbb5235919c98a70f0d0657517b393b0e57  0027-ath12k-wcn7850-oem-mlo-caps.patch
+dd72f7dafc47b56d15ebaa8887f638cb65b0c225b7d1666f6519d034e4823ddcc20a314da9d9e96eb07b2412e4548cba16906e002542aefec1afd8141f50d57c  0027-ath12k-wcn7850-oem-mlo-caps.patch
 5a16866fc98d3518e20512d24c697a336f3c12fbdd602e78944f5c7b40947e83b790c15d18b74ae3a6a1fbb614e7879dd6675cd6288d9477cbffe7035eba1523  0028-soc-qcom-apr-enable-gpr-replies-during-probe.patch
 895de6228d7900c31e64e8549a3f75c1e4479a6cec7114379c98fef5de1982324e398ee17f4c7d8ffd8f25cb3f8d948d8fb310aec2f5ae9ed7f1ea5d4b4da7cc  0029-arm64-dts-qcom-caihong-six-speaker-card.patch
 60a53b885a38de8d54c23eef48e03c59a63fde255650843f43d70c60882369c0b7de6d71f8c3a90a9ffb4ffe1e57d4a6a11c4a1206541fd1fd230cfc47fdb030  0030-ASoC-qcom-q6apm-poll-for-firmware-readiness.patch
@@ -178,6 +164,9 @@ e38897582a095d19ffe8ac958489e8153c8fc3ff9832271de4c22c3affe9e913ea28f53e8e90b5f5
 4693b644be78418765e1481a70a0b59f2f4089fa9aa1dcba58ad4316ca624fea049e83baa339229aa3ea1f2c204711d49a2f119d7b75f47914754147f4fbb490  0043-power-supply-qcom-battmgr-pps-diagnostics.patch
 f11ad4e73f7d454f1cff4b396bda185c90d207325135afd34f3c5cec2cd638cfa1cefaec879de4045edf2513d85b6286d45809d22360c10d47abb4b4f1ca967c  0044-power-supply-qcom-battmgr-gauge-health.patch
 e13034a2116b007e1f15c2f7092e6720fa9ec219636e21fe06b964c967360544eee72c0b0efc93668cbddaa7a3c11373c43f17d44e76677c10e290914864e03b  0045-power-supply-qcom-battmgr-shell-back.patch
+079b5a72aa35f3a6a60d70a995efad41442d0191818718080100f2be145f1437bbf8c37df0c58625732c2d879ddbb7cad521e736f76a9ed89eeb51e49a935909  0046-drm-panel-nt36532-refresh_rate_change.patch
+0a228e8fa249ff6eeb777d0298867883d3d8603fb2a3ada7d0f4f47091c47136992b8534533453eb0ef94ef31c752f9d2f6c783b76f0377f193804ff5ee3e804  0047-drm-panel-nt36532-drop-vrr-capable-property.patch
+c943d974d028763607e0b74d8d62f4da558acd07d153b5641b6f954f3109f7b0990686be1a9e82bcdd5353544c20ad1355ccfdda5f81bb31349cd5baa0df0459  0048-backlight-ktz8866-keep-default-output.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
 bf1dd96c8a644b7233c952f24fcebda2d707cff9cf0ca6403a146a490eb07f64b9e807ea4444f5f49b9dd6580f4ab4ebd6af7e6d4e2a30aaf8ed44f3df04c0d1  config-oneplus-pineapple.aarch64
 "

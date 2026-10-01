@@ -155,16 +155,7 @@
  static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  				      const struct qcom_battmgr_message *msg,
  				      int len)
-@@ -1201,6 +1328,8 @@
- 
- 	notification = le32_to_cpu(msg->notification);
- 	notification &= 0xff;
-+
-+	dev_info(battmgr->dev, "DEBUG BATTMGR: notification %#x arrived, handling\n", notification);
- 	switch (notification) {
- 	case NOTIF_BAT_INFO:
- 		battmgr->info.valid = false;
-@@ -1216,6 +1345,48 @@
+@@ -1216,6 +1343,48 @@
  	case NOTIF_WLS_PROPERTY:
  		power_supply_changed(battmgr->wls_psy);
  		break;
@@ -213,7 +204,7 @@
  	default:
  		dev_err(battmgr->dev, "unknown notification: %#x\n", notification);
  		break;
-@@ -1649,6 +1820,12 @@
+@@ -1649,6 +1818,12 @@
  	psy_cfg_supply.num_supplicants = 1;
  
  	INIT_WORK(&battmgr->enable_work, qcom_battmgr_enable_worker);
@@ -226,7 +217,7 @@
  	mutex_init(&battmgr->lock);
  	init_completion(&battmgr->ack);
  
-@@ -1720,6 +1897,7 @@
+@@ -1720,6 +1895,7 @@
  
  	pmic_glink_client_register(battmgr->client);
  
