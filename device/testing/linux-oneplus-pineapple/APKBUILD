@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=86
+pkgrel=87
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -168,5 +168,5 @@ e13034a2116b007e1f15c2f7092e6720fa9ec219636e21fe06b964c967360544eee72c0b0efc9366
 0a228e8fa249ff6eeb777d0298867883d3d8603fb2a3ada7d0f4f47091c47136992b8534533453eb0ef94ef31c752f9d2f6c783b76f0377f193804ff5ee3e804  0047-drm-panel-nt36532-drop-vrr-capable-property.patch
 c943d974d028763607e0b74d8d62f4da558acd07d153b5641b6f954f3109f7b0990686be1a9e82bcdd5353544c20ad1355ccfdda5f81bb31349cd5baa0df0459  0048-backlight-ktz8866-keep-default-output.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
-bf1dd96c8a644b7233c952f24fcebda2d707cff9cf0ca6403a146a490eb07f64b9e807ea4444f5f49b9dd6580f4ab4ebd6af7e6d4e2a30aaf8ed44f3df04c0d1  config-oneplus-pineapple.aarch64
+817a6c660b89becfcaa635bb7da3aabac2d708c3d20fe7148a4987239e133d3e715f399ae585670af7f31b3fb9d68299be77db26683e2a38f053bb352aaadd9f  config-oneplus-pineapple.aarch64
 "
