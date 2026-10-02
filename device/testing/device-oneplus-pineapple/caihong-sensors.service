@@ -1,0 +1,22 @@
+[Unit]
+Description=OnePlus Pad 2 Qualcomm sensor listener
+Requires=caihong-persist-import.service
+After=caihong-persist-import.service hexagonrpcd-adsp-rootpd.service
+Conflicts=hexagonrpcd-adsp-sensorspd.service
+
+[Service]
+Type=exec
+TimeoutStopSec=5
+PrivateMounts=yes
+TemporaryFileSystem=/mnt/vendor/persist:ro
+BindReadOnlyPaths=/usr/share/qcom/caihong/sensors/vendor:/vendor
+BindReadOnlyPaths=/usr/share/qcom/caihong/sensors/odm:/odm
+BindPaths=/var/lib/caihong-persist/sensors:/mnt/vendor/persist/sensors
+Environment="ADSP_LIBRARY_PATH=;/vendor/dsp"
+ExecStartPre=/usr/bin/test -s /mnt/vendor/persist/sensors/registry/sns_reg_version
+ExecStartPre=/usr/bin/test -s /mnt/vendor/persist/sensors/registry/parsed_file_list.csv
+ExecStartPre=/usr/bin/test -d /mnt/vendor/persist/sensors/registry/registry
+ExecStart=/usr/libexec/caihong-sensors
+
+[Install]
+WantedBy=multi-user.target

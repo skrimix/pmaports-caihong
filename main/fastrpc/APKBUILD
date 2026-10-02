@@ -1,0 +1,41 @@
+maintainer=""
+pkgname=fastrpc
+pkgver=0_git20260911
+pkgrel=0
+_commit=d247519650fe5cb16de6c78edaa95bcc4be25073
+pkgdesc="Qualcomm FastRPC ADSP userspace libraries"
+url="https://github.com/qualcomm/fastrpc"
+arch="aarch64"
+license="BSD-3-Clause"
+makedepends="autoconf automake libtool yaml-dev libbsd-dev linux-headers"
+subpackages="$pkgname-dev"
+# Upstream tests require a Qualcomm DSP.
+options="!check"
+source="$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz"
+builddir="$srcdir/$pkgname-$_commit"
+
+prepare() {
+	default_prepare
+	autoreconf -vif
+}
+
+build() {
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--disable-static
+	make -C src libadsprpc.la libadsp_default_listener.la
+}
+
+package() {
+	# ADSP libraries and headers only: the upstream daemons retry internally and
+	# their udev rules start every PD. Device packages start their own listener.
+	make -C src DESTDIR="$pkgdir" \
+		lib_LTLIBRARIES="libadsprpc.la libadsp_default_listener.la" install-libLTLIBRARIES
+	make -C inc DESTDIR="$pkgdir" install
+	install -Dm644 LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/LICENSE.txt"
+}
+sha512sums="
+dd0621a9f70cc25e8c5168cdc05b2404c0312c2c6be4292827b02f9c7f944cb32d1247892068eda3805f4afbf177612a9bba25d46f1fe7cf84b0694df416f2a0  fastrpc-d247519650fe5cb16de6c78edaa95bcc4be25073.tar.gz
+"

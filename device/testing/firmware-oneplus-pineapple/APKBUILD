@@ -1,7 +1,7 @@
 maintainer=""
 pkgname=firmware-oneplus-pineapple
 pkgver=1
-pkgrel=4
+pkgrel=6
 _commit="e5f0b275675db29de8c88972cc5246d89f1c9bce"
 pkgdesc="Firmware files for OnePlus pineapple and pineapplep"
 url="https://github.com/RubyLegend/firmware-oneplus-pineapple"
@@ -9,6 +9,7 @@ arch="aarch64"
 depends="linux-firmware-ath12k linux-firmware-qcom wireless-regdb"
 license="proprietary"
 makedepends="alsa-utils"
+subpackages="$pkgname-sensors"
 source="
 	$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz 
 	0001-gpu-firmware.files
@@ -20,6 +21,8 @@ source="
 	caihong-aw882xx_acf.bin
 	caihong-topology.tar.gz
 	caihong-topology.txt
+	caihong-sensors.tar.gz
+	caihong-sensors.txt
 	"
 options="!check !strip !archcheck !spdx !tracedeps pmb:cross-native"
 builddir="$srcdir/firmware-oneplus-pineapple-$_commit"
@@ -66,6 +69,20 @@ package() {
 	install -Dm644 "$srcdir/0004-wifi-firmware.files" "$pkgdir/usr/share/mkinitfs/files/0004-wifi-firmware.files"
 }
 
+sensors() {
+	pkgdesc="OnePlus Pad 2 OEM sensor configuration and DSP library"
+	depends=""
+	mkdir -p "$subpkgdir/usr/share/qcom/caihong/sensors"
+	cp -a "$srcdir/caihong-sensors/"* "$subpkgdir/usr/share/qcom/caihong/sensors/"
+	# Mainline exposes soc_id/revision, but not these four OEM board fields.
+	for field in hw_platform platform_subtype platform_subtype_id platform_version; do
+		sed -i "s|/sys/devices/soc0/$field\$|/vendor/etc/sensors/socinfo/$field|" \
+			"$subpkgdir/usr/share/qcom/caihong/sensors/vendor/etc/sensors/sns_reg_config"
+	done
+	install -Dm644 "$srcdir/caihong-sensors.txt" \
+		"$subpkgdir/usr/share/doc/$subpkgname/caihong-sensors.txt"
+}
+
 sha512sums="
 e6d46ca82dc9de1119af35cfdcde14ae139c34fa31e727deee352a93adaa0fea6e6af96ad5c58e008990184ecb067b80c9452df4a67620a00e4d7a8b929089ba  firmware-oneplus-pineapple-e5f0b275675db29de8c88972cc5246d89f1c9bce.tar.gz
 dd22390e0ef5053fe19785db48ea7d2e7e580b4e753a01b727badee1d6b37f5e0c9d0a5297f44836e9881e546956f5a86d37ae42a0b706c70c03b805289b3bd0  0001-gpu-firmware.files
@@ -77,4 +94,6 @@ e55224c432f44688c9f6fe2e4748b9bcb09aaf8b38a2938cb9c8588ffa1a13532b06ab7b3ea2cc9b
 4bd75f4f1d0e77c202d9a56ffe9851453198ca745f2496aff037c0140877f1cb73da0d8e2657434b423e1e4b5d60003f08c5fd1615b85cc6c0e181b5ad6940d5  caihong-aw882xx_acf.bin
 62bf1682b66ed2c75c6bc15cae2eea2f1df271ad2619af33cfa308cd6d4a99cfe53e9417d4c213ba5715dfaa2b638ef6db85f1bc1750478a969e76b4a2a5a0fb  caihong-topology.tar.gz
 fd2239aca400cf7ede7e840aa7e3a9f936ec0c61c619d8a925eb2994149b39f635b7e21431409b5d6940af84e553d2470c300533308890488d033284f478a37f  caihong-topology.txt
+f1f7c3180065eace4996f59333dc947cd14a4581b82e00d8fad0366b19e7e3d3ef2ab84639576cb8dfa95913b44e10b470baa36064e99d96e328934367d116f3  caihong-sensors.tar.gz
+99210dce6cd231ce32534a8b7d4973a078543336eb7c437a80420c4801fa984f82cd6cf21d09b4470ecb5d0b7f5d63432a58c497e30201f674781a1704202aed  caihong-sensors.txt
 "
