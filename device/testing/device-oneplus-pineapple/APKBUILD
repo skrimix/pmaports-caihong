@@ -14,7 +14,7 @@ depends="
 	android-tools
 	agetty
 	postmarketos-base
-	postmarketos-initramfs>=3.12.3-r2
+	postmarketos-initramfs
 	lz4
 	msm-firmware-loader
 	soc-qcom
