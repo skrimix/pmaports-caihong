@@ -1,0 +1,54 @@
+maintainer=""
+pkgname=ssc-monitor
+pkgver=0.1.0
+pkgrel=7
+pkgdesc="Discover and monitor Qualcomm Snapdragon Sensor Core streams"
+url="https://codeberg.org/DylanVanAssche/libssc"
+arch="all"
+license="GPL-3.0-or-later"
+_libssc_version=0.4.4
+makedepends="glib-dev libqmi-dev linux-headers protobuf-c-dev"
+subpackages="$pkgname-dbg"
+source="
+	$pkgname-libssc-$_libssc_version.tar.gz::$url/archive/v$_libssc_version.tar.gz
+	ssc-monitor.c
+	monitor.proto
+	test-monitor.c
+	README.md
+"
+builddir="$srcdir/libssc"
+
+build() {
+	protoc-c -I data --c_out=. data/ssc-common.proto data/ssc-sensor-suid.proto
+	protoc-c -I "$srcdir" --c_out=. "$srcdir/monitor.proto"
+	# libssc keeps its client API private, so build its sources in.
+	for program in ssc-monitor test-monitor; do
+		$CC $CFLAGS $CPPFLAGS -Wall -Wextra -Werror -Wno-unused-parameter \
+			-I. -Isrc -I"$srcdir" "$srcdir/$program.c" \
+			src/libssc-client.c src/libssc-common.c src/libssc-sensor.c \
+			ssc-common.pb-c.c ssc-sensor-suid.pb-c.c monitor.pb-c.c \
+			$(pkg-config --cflags --libs qmi-glib gio-2.0 libprotobuf-c) \
+			$LDFLAGS -lm -o "$program"
+	done
+}
+
+check() {
+	./test-monitor
+	./ssc-monitor --help > /dev/null
+	if ./ssc-monitor --all gyro 2>/dev/null; then return 1; fi
+	if ./ssc-monitor --rate nan gyro 2>/dev/null; then return 1; fi
+	if ./ssc-monitor --probe gyro 2>/dev/null; then return 1; fi
+}
+
+package() {
+	install -Dm755 ssc-monitor "$pkgdir/usr/bin/ssc-monitor"
+	install -Dm644 "$srcdir/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+sha512sums="
+9240970f6a70f4900ef2d8fad337dac815ea2602b3b395943326fb086f59d24dcf59b76bdbc6014ebd3c450eaad5393465ca038c165845ffe99bf8e282a5c170  ssc-monitor-libssc-0.4.4.tar.gz
+caf77a45d28d6872e30f27e4b5415e64a6230a68e4beca7fc8f23312d5ef3524885aabbb010922dfc4bf57f2af0501151f9c5f15d206f48028d86ef360a53b63  ssc-monitor.c
+02a33e91177d8887ffa7238ac9ee7da1a27db33cf8001861baecf7ef6a9173158a9060ddbfb91f9b8fdd4c33c0b8a40615ad1971ec1f465df8f7ce237c66ed13  monitor.proto
+d8a71063bb48bc0b9c67179048517e10655d4a0ec510a9b659d95f4bc65d529f7fad08fa02001b640d42b0fc93f928ea950d64f3a56eeaff5eaaf24a38320026  test-monitor.c
+fab4fe025e42327a909062016c5e7af847df19bbcc2cdbc6848d59fdb4054e82e74806e472c93fd6125903fea437dc7a93a1fd4a947c0ce1b39f12f8aec47ef9  README.md
+"

@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Wire layouts from Qualcomm sensinghub's sns_std_sensor, sns_hall, sns_amd,
+// sns_pedometer and sns_std APIs. Unknown vendor events stay in hexadecimal.
+syntax = "proto2";
+
+message MonitorSample {
+  repeated float data = 1;
+  required int32 status = 2;
+}
+
+message MonitorState {
+  required uint32 value = 1;
+  optional int32 status = 2;
+}

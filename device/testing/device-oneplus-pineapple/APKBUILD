@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=26
+pkgrel=27
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -29,6 +29,7 @@ depends="
 	firmware-oneplus-pineapple-sensors
 	fastrpc
 	qrtr
+	ssc-monitor
 	alsa-ucm-conf
 	python3
 "
