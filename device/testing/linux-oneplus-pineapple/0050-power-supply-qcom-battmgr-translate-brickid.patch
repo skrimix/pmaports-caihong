@@ -1,0 +1,33 @@
+From: Pad 2 bring-up <local@localhost>
+Subject: [PATCH] power: supply: qcom_battmgr: translate firmware BrickID type
+
+The SM8350-style firmware ABI encodes Apple/BrickID as 9. Adding the SPR
+AVS types to enum power_supply_usb_type moved the kernel's BrickID value
+to 11, so copying the wire value now reports an unsupported SPR AVS type.
+On this tablet a reconnect can return 9 and every USB supply uevent then
+fails with "driver reporting unavailable enum value 9", flooding the log.
+
+Translate this fixed wire value to the kernel enum. The other firmware
+USB types (0 through 8) still match. This changes reporting only.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -90,6 +90,9 @@
+ #define USB_ADAP_TYPE			7
+ #define USB_MOISTURE_DET_EN		8
+ #define USB_MOISTURE_DET_STS		9
++
++/* Fixed firmware ABI, independent of enum power_supply_usb_type. */
++#define BATTMGR_USB_TYPE_APPLE_BRICK_ID	9
+ 
+ #define BATTMGR_WLS_PROPERTY_GET	0x34
+ #define BATTMGR_WLS_PROPERTY_SET	0x35
+@@ -1913,6 +1916,8 @@
+ 			break;
+ 		case USB_ADAP_TYPE:
+ 			battmgr->usb.usb_type = le32_to_cpu(resp->intval.value);
++			if (battmgr->usb.usb_type == BATTMGR_USB_TYPE_APPLE_BRICK_ID)
++				battmgr->usb.usb_type = POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID;
+ 			break;
+ 		case OPLUS_USB_PPS_STATUS:
+ 			battmgr->pps_status = le32_to_cpu(resp->intval.value);

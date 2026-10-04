@@ -1,9 +1,9 @@
 [Unit]
 Description=OnePlus Pad 2 USB root debug shell
 DefaultDependencies=no
-Requires=dev-ttyGS0.device
+BindsTo=dev-ttyGS0.device
 After=dev-ttyGS0.device
-Before=sysinit.target shutdown.target
+Before=shutdown.target
 Conflicts=shutdown.target
 IgnoreOnIsolate=yes
 
@@ -23,4 +23,4 @@ Environment=TERM=vt100 HOME=/root USER=root LOGNAME=root
 WorkingDirectory=/
 
 [Install]
-WantedBy=sysinit.target
+WantedBy=dev-ttyGS0.device

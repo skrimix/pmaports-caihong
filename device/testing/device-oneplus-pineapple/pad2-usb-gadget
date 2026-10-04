@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+udc=a600000.usb
+gadget=/sys/kernel/config/usb_gadget/g1
+test -d "/sys/class/udc/$udc"
+
+# Initramfs may have skipped gadget setup while a peripheral owned the port.
+if [ ! -d "$gadget" ]; then
+	mkdir "$gadget"
+	printf '0x18d1\n' > "$gadget/idVendor"
+	printf '0xd001\n' > "$gadget/idProduct"
+	mkdir "$gadget/strings/0x409"
+	printf 'OnePlus\n' > "$gadget/strings/0x409/manufacturer"
+	printf 'OnePlus Pad 2\n' > "$gadget/strings/0x409/product"
+	printf 'postmarketOS\n' > "$gadget/strings/0x409/serialnumber"
+	mkdir "$gadget/configs/c.1"
+	mkdir "$gadget/configs/c.1/strings/0x409"
+	printf 'USB network\n' > "$gadget/configs/c.1/strings/0x409/configuration"
+fi
+cd "$gadget"
+
+# Preserve a complete gadget inherited from initramfs or rebound by the kernel.
+bound_udc=$(cat UDC)
+if [ -n "$bound_udc" ]; then
+	test "$bound_udc" = "$udc"
+	if [ -L configs/c.1/ncm.usb0 ] && [ -L configs/c.1/acm.usb0 ]; then
+		echo 'USB network and serial already attached'
+		exit 0
+	fi
+	printf '\n' > UDC
+fi
+
+for function in ncm.usb0 acm.usb0; do
+	mkdir -p "functions/$function"
+	if [ ! -L "configs/c.1/$function" ]; then
+		ln -s "$gadget/functions/$function" "configs/c.1/$function"
+	fi
+done
+test "$(cat functions/acm.usb0/port_num)" = 0
+# NCM creates usb0 only once the gadget binds to the controller.
+printf '%s\n' "$udc" > UDC
+ip address replace 172.16.42.1/16 dev usb0
+ip link set usb0 up
+echo 'USB network and serial attached'

@@ -1,0 +1,2 @@
+# The controller disappears in host mode and returns when acting as a USB device.
+ACTION=="add", SUBSYSTEM=="udc", KERNEL=="a600000.usb", TAG+="systemd", ENV{SYSTEMD_WANTS}+="pad2-usb-gadget.service"

@@ -1,0 +1,35 @@
+From: Pad 2 bring-up <local@localhost>
+Subject: [PATCH] power: supply: qcom_battmgr: retain OTG control after unplug
+
+A captured PC-to-keyboard transition enables OTG AP control after USB goes
+offline, then disables it 14 ms later on a second offline notification.
+The first update incorrectly marks OTG active, so the second falls into the
+catch-all disable branch. No host notification or keyboard enumeration follows.
+
+Disable AP control only while USB power is online, track the online state
+after every successful update, and leave OTG host state to the OTG
+enable/disable notifications. Repeated offline notifications then preserve
+the restored DRP/AP setup.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -1510,15 +1510,14 @@
+ 						    OPLUS_USB_TYPEC_MODE, 0);
+ 		if (ret)
+ 			goto out;
+-		battmgr->oplus_otg_state = true;
+-	} else {
++	} else if (battmgr->usb.online) {
+ 		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
+ 						    OPLUS_USB_OTG_AP_ENABLE, 0);
+ 		if (ret)
+ 			goto out;
+-		battmgr->oplus_was_online = battmgr->usb.online;
+-		battmgr->oplus_otg_state = false;
+-	}
++	}
++	/* OTG notifications own oplus_otg_state; AP control is not host state. */
++	battmgr->oplus_was_online = battmgr->usb.online;
+ out:
+ 	if (ret)
+ 		dev_err(battmgr->dev, "OnePlus USB state update failed: %d\n", ret);
