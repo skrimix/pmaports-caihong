@@ -1,0 +1,49 @@
+From: Jan-Michael Brummer <jan.brummer@tabos.org>
+Subject: [PATCH] power: supply: qcom_battmgr: expose CHARGE_NOW on SM8350-class firmware
+
+The SM8350-class firmware does not implement a dedicated 'charge now'
+property. It does however report BATT_CHG_COUNTER, and on this class of
+firmware that value is the remaining charge in uAh rather than a
+monotonic counter.
+
+Map POWER_SUPPLY_PROP_CHARGE_NOW onto the same firmware property and
+store the value in status.capacity, which the CHARGE_NOW/ENERGY_NOW case
+of qcom_battmgr_bat_get_property() already reads.
+
+Link: https://lore.kernel.org/all/20260829054546.86210-3-jan.brummer@tabos.org/
+Signed-off-by: Jan-Michael Brummer <jan.brummer@tabos.org>
+
+[Local backport: refresh context and omit the SM8550 property-list hunk,
+since 0042 removes that list. Oplus's fg_sm8350_get_batt_remaining_capacity
+also interprets BATT_CHG_COUNTER as remaining charge and converts uAh to mAh.]
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -528,6 +528,7 @@
+ 	[POWER_SUPPLY_PROP_CYCLE_COUNT] = BATT_CYCLE_COUNT,
+ 	[POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN] =  BATT_CHG_FULL_DESIGN,
+ 	[POWER_SUPPLY_PROP_CHARGE_FULL] = BATT_CHG_FULL,
++	[POWER_SUPPLY_PROP_CHARGE_NOW] = BATT_CHG_COUNTER,
+ 	[POWER_SUPPLY_PROP_MODEL_NAME] = BATT_MODEL_NAME,
+ 	[POWER_SUPPLY_PROP_TIME_TO_FULL_AVG] = BATT_TTF_AVG,
+ 	[POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG] = BATT_TTE_AVG,
+@@ -1111,6 +1112,7 @@
+ 	POWER_SUPPLY_PROP_CYCLE_COUNT,
+ 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+ 	POWER_SUPPLY_PROP_CHARGE_FULL,
++	POWER_SUPPLY_PROP_CHARGE_NOW,
+ 	POWER_SUPPLY_PROP_MODEL_NAME,
+ 	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
+ 	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
+@@ -1858,7 +1860,10 @@
+ 			battmgr->info.technology = le32_to_cpu(resp->intval.value);
+ 			break;
+ 		case BATT_CHG_COUNTER:
+-			battmgr->info.charge_count = le32_to_cpu(resp->intval.value);
++			val = le32_to_cpu(resp->intval.value);
++			battmgr->info.charge_count = val;
++			/* the firmware reports the remaining charge here */
++			battmgr->status.capacity = val;
+ 			break;
+ 		case BATT_CYCLE_COUNT:
+ 			battmgr->info.cycle_count = le32_to_cpu(resp->intval.value);

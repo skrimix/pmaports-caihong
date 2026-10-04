@@ -1,0 +1,56 @@
+From: Jan-Michael Brummer <jan.brummer@tabos.org>
+Subject: [PATCH] power: supply: qcom_battmgr: fix CHARGE_FULL* on SM8350-class firmware
+
+battmgr->unit is only ever assigned in the BATTMGR_BAT_INFO handler of
+the SC8280XP callback. The SM8350-class firmware does not implement that
+request - every property is fetched individually via
+BATTMGR_BAT_PROPERTY_GET - so unit keeps its zero-initialised value,
+QCOM_BATTMGR_UNIT_mWh.
+
+POWER_SUPPLY_PROP_CHARGE_FULL and POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN
+are guarded by 'if (unit != QCOM_BATTMGR_UNIT_mAh) return -ENODATA;',
+hence both properties always fail on these platforms, even though the
+values are requested from the firmware and stored in
+info.last_full_capacity and info.design_capacity on every access:
+
+  $ cat /sys/class/power_supply/qcom-battmgr-bat/charge_full
+  cat: read error: No data available
+
+Without a full charge value userspace cannot derive an absolute energy
+level, so UPower reports a zero energy level and never computes a
+time-to-empty/time-to-full estimate:
+
+    energy:              0 Wh
+    energy-full:         0 Wh
+    energy-rate:         12.4713 W
+    percentage:          59%
+
+The firmware of this class reports charge domain values, so set the unit
+statically when registering the SM8350/SM8550 power supplies. With this
+patch the properties read back consistently on a Fairphone 5:
+
+  charge_full         4116000
+  charge_full_design  4260000
+  capacity            85
+
+Fixes: 29e8142b5623 ("power: supply: Introduce Qualcomm PMIC GLINK power supply")
+Link: https://lore.kernel.org/all/20260829054546.86210-2-jan.brummer@tabos.org/
+Signed-off-by: Jan-Michael Brummer <jan.brummer@tabos.org>
+
+[Local backport: refresh context for the property-list selection from 0042
+and shorten the comment. The selected SM8350 list does not expose CHARGE_EMPTY.
+On Caihong, battery GETs 16 and 17 returned 9492000 uAh successfully while
+both sysfs reads failed with ENODATA.]
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -2111,6 +2111,9 @@
+ 			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+ 					     "failed to register wireless charing power supply\n");
+ 	} else {
++		/* SM8350-class firmware reports charge and has no BATTMGR_BAT_INFO. */
++		battmgr->unit = QCOM_BATTMGR_UNIT_mAh;
++
+ 		psy_desc = &sm8350_bat_psy_desc;
+ 
+ 		battmgr->bat_psy = devm_power_supply_register(dev, psy_desc, &psy_cfg);
