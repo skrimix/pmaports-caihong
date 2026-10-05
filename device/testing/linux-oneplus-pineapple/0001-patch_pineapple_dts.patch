@@ -701,7 +701,7 @@
 +		enable-gpios = <&tlmm 89 GPIO_ACTIVE_HIGH>;
 +		// vddpos-supply = <&bl_vddpos_5p5>;
 +		// vddneg-supply = <&bl_vddneg_5p5>;
-+		current-num-sinks = <5>;
++		current-num-sinks = <4>;
 +		kinetic,current-ramp-delay-ms = <128>;
 +		kinetic,led-enable-ramp-delay-ms = <1>;
 +		kinetic,enable-lcd-bias;
