@@ -1,0 +1,11 @@
+[Unit]
+Description=Save a crash minidump from the rawdump partition
+Requires=dev-disk-by\x2dpartlabel-rawdump.device
+After=dev-disk-by\x2dpartlabel-rawdump.device local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/caihong-minidump --save
+
+[Install]
+WantedBy=multi-user.target

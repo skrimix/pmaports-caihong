@@ -1,0 +1,195 @@
+diff --git a/drivers/soc/qcom/Makefile b/drivers/soc/qcom/Makefile
+index b7f1d2a..e43a350 100644
+--- a/drivers/soc/qcom/Makefile
++++ b/drivers/soc/qcom/Makefile
+@@ -24,6 +24,7 @@ qcom_rpmh-y			+= rpmh-rsc.o
+ qcom_rpmh-y			+= rpmh.o
+ obj-$(CONFIG_QCOM_SMD_RPM)	+= rpm-proc.o smd-rpm.o
+ obj-$(CONFIG_QCOM_SMEM) +=	smem.o
++obj-$(CONFIG_QCOM_SMEM) +=	pad2_minidump.o
+ obj-$(CONFIG_QCOM_SMEM_STATE) += smem_state.o
+ CFLAGS_smp2p.o := -I$(src)
+ obj-$(CONFIG_QCOM_SMP2P)	+= smp2p.o
+diff --git a/drivers/soc/qcom/pad2_minidump.c b/drivers/soc/qcom/pad2_minidump.c
+new file mode 100644
+index 0000000..917fa74
+--- /dev/null
++++ b/drivers/soc/qcom/pad2_minidump.c
+@@ -0,0 +1,177 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Minimal APSS minidump support for OnePlus Pad 2 crash logs.
++ *
++ * Mirrors what Android's qcom-dload-mode, minidump_smem and qcom_wdt_core
++ * drivers do so that a panic with qcom_scm.download_mode=mini makes the boot
++ * firmware write a Raw_Dmp! image to the rawdump partition:
++ *  - IMEM dload type = 2 (dump to storage instead of USB/Sahara)
++ *  - the HLOS entry of the SMEM minidump table lists the printk text ring
++ *    and the ramoops region
++ *  - on panic, bite the Gunyah virtual watchdog; the firmware dumps on a
++ *    bite, not on a PSCI SYSTEM_RESET.
++ */
++
++#define pr_fmt(fmt) "pad2-minidump: " fmt
++
++#include <linux/arm-smccc.h>
++#include <linux/console.h>
++#include <linux/delay.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/limits.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/panic_notifier.h>
++#include <linux/printk.h>
++#include <linux/slab.h>
++#include <linux/soc/qcom/smem.h>
++#include <linux/workqueue.h>
++
++#define SBL_MINIDUMP_SMEM_ID	602
++#define MD_REGION_VALID		('V' << 24 | 'A' << 16 | 'L' << 8 | 'I' << 0)
++#define MD_SS_ENCR_NOTREQ	(0 << 24 | 0 << 16 | 'N' << 8 | 'R' << 0)
++#define MD_SS_ENCR_DONE		('D' << 24 | 'O' << 16 | 'N' << 8 | 'E' << 0)
++#define MD_SS_ENABLED		('E' << 24 | 'N' << 16 | 'B' << 8 | 'L' << 0)
++
++/* pineapple.dtsi: qcom,msm-imem@14680000 dload_type@1c; 2 = EMMC/UFS */
++#define IMEM_DLOAD_TYPE		0x1468001c
++#define DLOAD_DEST_STORAGE	2
++
++/* gh_virt_wdt.c */
++#define GH_WDT_CALL(fn)		ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_32, \
++					   ARM_SMCCC_OWNER_VENDOR_HYP, (fn))
++#define GH_WDT_CONTROL		GH_WDT_CALL(0x5)
++#define GH_WDT_PET		GH_WDT_CALL(0x7)
++#define GH_WDT_SET_TIME		GH_WDT_CALL(0x8)
++#define GH_WDT_NO_CHANGE	0xffff
++
++struct md_ss_region {
++	char	name[16];
++	u32	seq_num;
++	u32	md_valid;
++	u64	region_base_address;
++	u64	region_size;
++};
++
++struct md_ss_toc {
++	u32	md_ss_toc_init;
++	u32	md_ss_enable_status;
++	u32	encryption_status;
++	u32	encryption_required;
++	u32	ss_region_count;
++	u64	md_ss_smem_regions_baseptr;
++};
++
++struct md_global_toc {
++	u32		md_toc_init;
++	u32		md_revision;
++	u32		md_enable_status;
++	struct md_ss_toc md_ss_toc[];
++};
++
++static void md_set_region(struct md_ss_region *r, const char *name,
++			  phys_addr_t base, size_t size)
++{
++	strscpy(r->name, name, sizeof(r->name));
++	r->md_valid = MD_REGION_VALID;
++	r->region_base_address = base;
++	r->region_size = size;
++}
++
++static void pad2_minidump_register(struct work_struct *work);
++static DECLARE_DELAYED_WORK(pad2_minidump_work, pad2_minidump_register);
++static int pad2_minidump_tries;
++
++static void pad2_minidump_register(struct work_struct *work)
++{
++	struct md_global_toc *gtoc;
++	struct md_ss_region *regions;
++	struct md_ss_toc *toc;
++	struct device_node *np;
++	struct resource res;
++	int n = 0;
++
++	/* SMEM probes after late_initcall */
++	gtoc = qcom_smem_get(QCOM_SMEM_HOST_ANY, SBL_MINIDUMP_SMEM_ID, NULL);
++	if (PTR_ERR(gtoc) == -EPROBE_DEFER && ++pad2_minidump_tries < 60) {
++		schedule_delayed_work(&pad2_minidump_work, HZ / 2);
++		return;
++	}
++	if (IS_ERR(gtoc)) {
++		pr_err("smem item %d: %ld\n", SBL_MINIDUMP_SMEM_ID, PTR_ERR(gtoc));
++		return;
++	}
++	if (!gtoc->md_toc_init) {
++		pr_err("minidump table not initialized by firmware\n");
++		return;
++	}
++
++	/* the firmware reads this array by physical address */
++	regions = kcalloc(2, sizeof(*regions), GFP_KERNEL);
++	if (!regions)
++		return;
++
++	md_set_region(&regions[n++], "KLOGBUF", virt_to_phys(log_buf_addr_get()),
++		      log_buf_len_get());
++	np = of_find_compatible_node(NULL, NULL, "ramoops");
++	if (np && !of_address_to_resource(np, 0, &res))
++		md_set_region(&regions[n++], "KRAMOOPS", res.start,
++			      resource_size(&res));
++	of_node_put(np);
++
++	toc = &gtoc->md_ss_toc[0];
++	toc->encryption_status = MD_SS_ENCR_DONE;
++	toc->encryption_required = MD_SS_ENCR_NOTREQ;
++	toc->md_ss_smem_regions_baseptr = virt_to_phys(regions);
++	toc->ss_region_count = n;
++	toc->md_ss_toc_init = 1;
++	toc->md_ss_enable_status = MD_SS_ENABLED;
++	pr_info("registered %d regions\n", n);
++}
++
++/*
++ * Run first among panic notifiers: the backtrace is already printed, and
++ * later notifiers (ath12k) may hang before panic_timeout is reached.
++ */
++static int pad2_minidump_panic(struct notifier_block *nb, unsigned long action,
++			       void *data)
++{
++	struct arm_smccc_res res;
++
++	pr_emerg("watchdog bite for minidump\n");
++	console_flush_on_panic(CONSOLE_FLUSH_PENDING);
++
++	arm_smccc_1_1_smc(GH_WDT_CONTROL, 3, &res);
++	arm_smccc_1_1_smc(GH_WDT_SET_TIME, GH_WDT_NO_CHANGE, 1, &res);
++	arm_smccc_1_1_smc(GH_WDT_PET, 0, &res);
++	mdelay(1000);
++
++	pr_emerg("watchdog bite did not reset\n");
++	return NOTIFY_DONE;
++}
++
++static struct notifier_block pad2_minidump_panic_nb = {
++	.notifier_call = pad2_minidump_panic,
++	.priority = INT_MAX,
++};
++
++static int __init pad2_minidump_init(void)
++{
++	void __iomem *imem;
++
++	if (!of_machine_is_compatible("qcom,sm8650"))
++		return 0;
++
++	imem = ioremap(IMEM_DLOAD_TYPE, 4);
++	if (!imem)
++		return -ENOMEM;
++	writel(DLOAD_DEST_STORAGE, imem);
++	iounmap(imem);
++
++	schedule_delayed_work(&pad2_minidump_work, 0);
++	atomic_notifier_chain_register(&panic_notifier_list,
++				       &pad2_minidump_panic_nb);
++	return 0;
++}
++late_initcall(pad2_minidump_init);

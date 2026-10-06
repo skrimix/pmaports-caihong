@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=29
+pkgrel=32
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -54,6 +54,8 @@ source="
 	caihong-sensors.service
 	caihong-shell-back
 	caihong-shell-back.service
+	caihong-minidump
+	caihong-minidump-save.service
 	90-dev-nopasswd
 "
 
@@ -91,6 +93,9 @@ package() {
 		"$pkgdir/usr/libexec/caihong-shell-back"
 	install -Dm644 "$srcdir/caihong-shell-back.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-shell-back.service"
+	install -Dm755 "$srcdir/caihong-minidump" "$pkgdir/usr/bin/caihong-minidump"
+	install -Dm644 "$srcdir/caihong-minidump-save.service" \
+		"$pkgdir/usr/lib/systemd/system/caihong-minidump-save.service"
 	# DEBUG: passwordless sudo for development; remove before release.
 	install -Dm440 "$srcdir/90-dev-nopasswd" \
 		"$pkgdir/etc/sudoers.d/90-dev-nopasswd"
@@ -113,7 +118,7 @@ package() {
 }
 
 sha512sums="
-29df1c87932495a4daf14bc2e57fd206a9edd4bee164da7ad47f8f4c80b4edf8f7c520a633da9f9acbd11bc402532f2e784e8c99debb5ebc2185298ff112c118  deviceinfo
+ed55391dbdf98200a300151df421abeee9ea97c4ae4d20c28cac48d19e6cb79133e76fe1091dd55fc997a6e145cffdd66310c34fe6a534e76cf21eedba73e215  deviceinfo
 95260daa5bc5c6a1075fa7f704670dadf906f1740f969a9b5d233db8209bfeffc53f9a0e43bbec968c132ce386ce3aff4e52e2516f9aedf041b9afdf4d06435b  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
 6b759413a42924fdd3a8b93b8f720ddb0b9f60b4811087b04ae9acec05c7a4e05ae4d659c388bfd41c7823e4c2060f02f689629ca6d5ef57e114630ccda8197e  caihong.conf
@@ -124,7 +129,7 @@ d73a2cce5d39958340142d18ba550c32cc1df892d5137b7e87a29792afc1a3bb5d59fe4a78400bb2
 bfc345bc0fe41d4a5ce3225e4381beff32a3ac3c547ea76c7a9905c0ae0fa87cb94a5b5206dfc1f14c9861347f6cb105f5c098ac97012f793ec5b64f287d1ce4  pad2-usb-gadget
 a718918458143ed7c21cb5e9db9b49eb3d45c0aea53aa8822c5a05d24405573b8f1d863bf2c6751868215e81e301e1c2425e13c9afe4c92d3e2dff47db24ace5  pad2-usb-gadget.service
 18e9d19a242f6736a238a1458d0200b05452532452ce5c2a1f13bac4f80eefc3088b010a396489b805f6f743a369fbcaee9f8c254af14fab11818882f86ca6d9  81-pad2-usb-gadget.rules
-2ce234406f952ccb033d09fea9edfa41dee0715de2676d9d280788575ab23fa8b72f48c36b3d2d8446fca9acfc41b7833c141c48492c6da9ed5a2b28be5b4add  80-oneplus-pineapple.preset
+f7076fab91e7e823a3ce12fcf4d8da91cb83b16003f0276df8018b86def43849b746604edfa31ac09667e5426d5a829a32891c1fc369bf2065cba337d160bf6a  80-oneplus-pineapple.preset
 18f063a3c6af8fd3ac1abc85c19a492554a42a18517a1b7d63170156e087f8fb6151f3fe89358c04f6e57fd9138edfe0a98de65de543f7dd967dc4a006f35f0d  81-libssc-oneplus-pineapple.rules
 acd3ef4b56378d4195a9cb0af22318c74fb2ffdf1b70316836b4fc22ee51247202e187f88b6bea16ba7da9ea27692482b543bd2044586c682b52c903e2da259a  caihong-persist-import
 4e60222efeaa1e540b42b3201093c6a153cf9dc9c4358a84821ad01aab1f4190ca666be09d3d32077c545c9f6ad50cf197423db254d61b6fabfca90aec0c25c0  caihong-persist-import.service
@@ -132,5 +137,7 @@ f3a1b96f12f2a6f06f2e00d410b01ee7a12cfa19ae0982f97479c8e303a68dfe7af8b14bc5b8ebe5
 1f36e58c28c0e0757fc3a2b53ceb45c8bc2dd3625e314a6bd24fb0bdd78cf20b79b673f9647885634fb6c2989a7b42d87501868fd7f32f9e23baf5a4df2739b4  caihong-sensors.service
 0395f27517caaa92dd781a01bcfe659a8a65ef6d9a9dc6971191715fe6e35381b6e63f1194a36fafe466e592188921a8957ffd012c5e32b72470ee95c54f436f  caihong-shell-back
 33a25ad5dd369fafd527626eb7e22e886c104664402d972fad7439609337dfc5ab5e7d7127871eb3a7f50ce5634aa0b3f3395f927baa27452fde1f7c0379c270  caihong-shell-back.service
+0ebee4e30d51de9fba8786e6fd459ca3faed4015979d7edfdcee9f3b3b9a698a2eac88a8bc49d452ece1cb67d51900e7a45690bd4ff678d17171d8888276dd3a  caihong-minidump
+24dd8892e79efe0cd57add6326b4ab2741ca0298c2ce5674d49bbd63c4b96497046b97387fde9b61c1426feab4d1231e9edc1389f132ecaf0d590b63a8f664c3  caihong-minidump-save.service
 d757e155c598ba8894e1f27d511bbb9504578503596d581ead84ac4c38318643fdb3cfa7164f77d361021af47022a4f3eaab20423784f54494e28aade1faffc0  90-dev-nopasswd
 "

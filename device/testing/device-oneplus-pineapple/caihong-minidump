@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""List, extract or save a Qualcomm Raw_Dmp! image (the rawdump partition).
+
+Usage: caihong-minidump IMAGE              list sections (IMAGE may be gzipped)
+       caihong-minidump IMAGE NAME         write section NAME (e.g. md_KLOGBUF.BIN) to stdout
+       caihong-minidump --console IMAGE    print the ramoops console from md_KRAMOOPS.BIN
+       caihong-minidump --save             boot service: if the partition holds a dump, save
+                                           it to $CAIHONG_CRASH_DIR/<time>/, zero the partition
+                                           and keep only the newest KEEP dumps
+"""
+
+import gzip
+import os
+import shutil
+import struct
+import sys
+import time
+
+HEADER = struct.Struct("<8sII20sQQI")  # magic, version, valid, os data, dump size, total, count
+SECTION = struct.Struct("<IIIQQQ8s20s")  # valid, version, type, offset, size, address, -, name
+CONSOLE_SIZE = 0x40000  # ramoops console-size in the DT; the console zone comes first
+DEV = os.environ.get("CAIHONG_MINIDUMP_DEV", "/dev/disk/by-partlabel/rawdump")
+CRASH_DIR = os.environ.get("CAIHONG_CRASH_DIR", "/var/lib/caihong-crash")
+KEEP = 3  # each gzipped dump can be up to about 45 MB
+
+
+def sections(data):
+    magic, _, valid, _, _, _, count = HEADER.unpack_from(data)
+    if magic != b"Raw_Dmp!":
+        raise ValueError(f"no Raw_Dmp! header (magic {magic!r}, valid {valid})")
+    for i in range(count):
+        valid, _, _, off, size, addr, _, name = SECTION.unpack_from(data, HEADER.size + i * SECTION.size)
+        yield name.split(b"\0")[0].decode(), off, size, addr, valid
+
+
+def section(data, want):
+    for name, off, size, _, _ in sections(data):
+        if name == want:
+            return data[off:off + size]
+    return None
+
+
+def console(data):
+    """Decode the persistent_ram_buffer ring: "DBGC", start, size, then data."""
+    zone = section(data, "md_KRAMOOPS.BIN")
+    if zone is None:
+        return None
+    sig, start, size = struct.unpack_from("<4sII", zone)
+    if sig != b"DBGC":
+        return None
+    ring = zone[12:CONSOLE_SIZE]
+    text = ring[:size] if size < len(ring) else ring[start:] + ring[:start]
+    return text.decode(errors="replace")
+
+
+def save():
+    with open(DEV, "rb") as f:
+        head = f.read(HEADER.size)
+        if not head.startswith(b"Raw_Dmp!"):
+            return 0
+        dump_size = HEADER.unpack(head)[4]
+        f.seek(0)
+        data = f.read(dump_size)
+    out = os.path.join(CRASH_DIR, time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(out, mode=0o700)
+    with gzip.open(os.path.join(out, "rawdump.bin.gz"), "wb", compresslevel=1) as f:
+        f.write(data)
+    text = console(data)
+    if text is not None:
+        with open(os.path.join(out, "console.txt"), "w") as f:
+            f.write(text)
+    os.sync()
+    print(f"saved {len(data)} byte dump to {out}")
+
+    # Like Android's minidumpreader: clear the whole partition once saved.
+    with open(DEV, "r+b") as f:
+        end = f.seek(0, os.SEEK_END)
+        f.seek(0)
+        zero = bytes(1 << 20)
+        while f.tell() < end:
+            f.write(zero[:end - f.tell()])
+        os.fsync(f.fileno())
+
+    # Keep our new dump even if clock rolled back.
+    others = sorted(set(os.listdir(CRASH_DIR)) - {os.path.basename(out)})
+    for old in others[:-(KEEP - 1)]:
+        shutil.rmtree(os.path.join(CRASH_DIR, old))
+    return 0
+
+
+def load(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    return gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data
+
+
+def main(argv):
+    if argv[1:] == ["--save"]:
+        return save()
+    if len(argv) == 3 and argv[1] == "--console":
+        text = console(load(argv[2]))
+        if text is None:
+            print("no ramoops console in dump", file=sys.stderr)
+            return 1
+        sys.stdout.write(text)
+        return 0
+    data = load(argv[1])
+    if len(argv) > 2:
+        blob = section(data, argv[2])
+        if blob is None:
+            return 1
+        sys.stdout.buffer.write(blob)
+        return 0
+    for name, off, size, addr, valid in sections(data):
+        print(f"{name:24} off={off:#x} size={size:#x} addr={addr:#x} valid={valid}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
