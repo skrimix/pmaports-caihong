@@ -1,0 +1,128 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] usb: dwc3: qcom: defer role switch during system sleep
+
+UCSI handles connector changes from non-freezable work, so unplugging the
+cable while the tablet is suspended sets the role to none while the glue is
+system-suspended. pm_runtime_resume_and_get() succeeds without powering
+anything because runtime PM is disabled and the device was active, and the
+QSCRATCH VBUS override access then stalls the bus with clocks and the
+interconnect off. The tablet hangs and is reset by the firmware.
+
+Record the role while system-suspended and apply it on system resume,
+after the DWC3 core has resumed. Gadget resume re-enables the VBUS
+override, which would undo a deferred disconnect applied earlier, and
+runtime PM is only marked active again by dwc3_pm_resume().
+
+---
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -10,6 +10,7 @@
+ #include <linux/irq.h>
+ #include <linux/of_clk.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/kernel.h>
+ #include <linux/interconnect.h>
+ #include <linux/platform_device.h>
+@@ -85,6 +86,9 @@
+ 	struct icc_path		*icc_path_apps;
+ 
+ 	enum usb_role		current_role;
++	/* Protects pm_suspended and pending_role against role notifications. */
++	struct mutex		role_lock;
++	enum usb_role		pending_role;
+ };
+ 
+ #define to_dwc3_qcom(d) container_of((d), struct dwc3_qcom, dwc)
+@@ -558,10 +562,8 @@
+ 	return 0;
+ }
+ 
+-static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_role)
++static void dwc3_qcom_apply_role(struct dwc3_qcom *qcom, enum usb_role next_role)
+ {
+-	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+-
+ 	if (qcom->current_role == next_role)
+ 		return;
+ 
+@@ -585,6 +587,24 @@
+ 	qcom->current_role = next_role;
+ }
+ 
++static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_role)
++{
++	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
++
++	guard(mutex)(&qcom->role_lock);
++	qcom->pending_role = next_role;
++
++	/*
++	 * Role switches can arrive from non-freezable work during system
++	 * sleep. QSCRATCH is unclocked then and runtime PM cannot resume it,
++	 * so leave the update to system resume.
++	 */
++	if (qcom->pm_suspended)
++		return;
++
++	dwc3_qcom_apply_role(qcom, next_role);
++}
++
+ static void dwc3_qcom_run_stop_notifier(struct dwc3 *dwc, bool is_on)
+ {
+ 	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+@@ -697,6 +717,11 @@
+ 		else
+ 			qcom->current_role = USB_ROLE_DEVICE;
+ 	}
++	qcom->pending_role = qcom->current_role;
++
++	ret = devm_mutex_init(dev, &qcom->role_lock);
++	if (ret)
++		goto clk_disable;
+ 
+ 	qcom->dwc.glue_ops = &dwc3_qcom_glue_ops;
+ 
+@@ -756,11 +781,13 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = dwc3_qcom_suspend(qcom, wakeup);
+-	if (ret)
+-		return ret;
++	scoped_guard(mutex, &qcom->role_lock) {
++		ret = dwc3_qcom_suspend(qcom, wakeup);
++		if (ret)
++			return ret;
+ 
+-	qcom->pm_suspended = true;
++		qcom->pm_suspended = true;
++	}
+ 
+ 	return 0;
+ }
+@@ -776,13 +803,19 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	qcom->pm_suspended = false;
+-
+ 	ret = dwc3_pm_resume(&qcom->dwc);
+-	if (ret)
+-		return ret;
+ 
+-	return 0;
++	/*
++	 * Replay a role deferred during sleep only after the core has resumed:
++	 * gadget resume re-enables the VBUS override, and runtime PM is marked
++	 * active again by dwc3_pm_resume().
++	 */
++	guard(mutex)(&qcom->role_lock);
++	qcom->pm_suspended = false;
++	if (!ret)
++		dwc3_qcom_apply_role(qcom, qcom->pending_role);
++
++	return ret;
+ }
+ 
+ static void dwc3_qcom_complete(struct device *dev)
