@@ -88,6 +88,7 @@ source="
 	0053-power-supply-qcom-battmgr-expose-charge-now.patch
 	0054-soc-qcom-pad2-minidump.patch
 	0055-usb-dwc3-qcom-defer-role-switch-during-system-sleep.patch
+	0061-remoteproc-qcom-q6v5-handover-one-shot.patch
 	dummy-dtbo.dtso
 	$_config
 "
@@ -179,6 +180,7 @@ aee41987077fd5e3b631e825d290840c0de75d8b08ea31d03bc84b8aedbe25f75d6508391ad570a3
 317c51b0104a7c96c75c0c7a0572f0ef377f9ce983ed635d7e7a55d700992c683f88259fe79221815ad9a525fde0b0a0e7b181f8aa97c34a1364985c676cf295  0053-power-supply-qcom-battmgr-expose-charge-now.patch
 a6721556d0aed9dc6f11d86b6b7e6c7aa80f18de503bb286cdf2e0d11bd456772f069589cb3d2c65f610a2ba30b8c48b8fee971d132e86841ac0046b09586025  0054-soc-qcom-pad2-minidump.patch
 879c2dfd2ac75f38a586f650ce0dfef78182e1c73a97da9e60aaacc064e09d5511f060f773b99e8a62b2e1626fcedf02db348236be4531c99c10e4467cf3942f  0055-usb-dwc3-qcom-defer-role-switch-during-system-sleep.patch
+72cd3c36fbe532f2c9db50aed345ca31235afffd6600ca49a20e60d9fbe49309c3369d385f5c32b1451f14c31fdc998028a66e7c323f3e4b0b6eb7bc22ac64d4  0061-remoteproc-qcom-q6v5-handover-one-shot.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
 817a6c660b89becfcaa635bb7da3aabac2d708c3d20fe7148a4987239e133d3e715f399ae585670af7f31b3fb9d68299be77db26683e2a38f053bb352aaadd9f  config-oneplus-pineapple.aarch64
 "
