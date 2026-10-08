@@ -1,0 +1,256 @@
+From 06ae11d78a61070b529c2244c72de3ab9a45173f Mon Sep 17 00:00:00 2001
+From: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Date: Wed, 29 Jul 2026 15:18:11 +0800
+Subject: [PATCH 1/4] UPSTREAM: wifi: ath12k: signal regd update completion
+ when reg event is dropped
+
+During driver bring-up, ath12k_mac_hw_register() reinitializes
+ar->regd_update_completed and sends a set current country command to
+firmware. It then relies on the regulatory event from firmware to signal
+that completion via ath12k_reg_chan_list_event().
+
+However, when the country being set is identical to the one already
+applied at boot time, ath12k_reg_validate_reg_info() returns
+ATH12K_REG_STATUS_DROP through the "Avoid multiple overwrites to default
+regd" path. In that case ath12k_reg_chan_list_event() jumps to mem_free
+before assigning pdev_idx, so pdev_idx stays at its initial value of 255,
+'ar' remains NULL and complete_all() is never called.
+
+As a result the reinitialized completion is left unsignalled and the next
+ath12k_regd_update() waits the full timeout, printing:
+
+  Timeout while waiting for regulatory update
+
+Fix this by assigning pdev_idx from the event's phy_id right after it is
+extracted, before validation, so that the drop and fallback paths still
+reach complete_all(). Change the guard at the end to check the index
+against ab->num_radios so that an out-of-range phy_id does not lead to an
+invalid pdevs[] access.
+
+Tested-on: WCN7850 hw2.0 PCI WLAN.HMT.1.1.c7-00108-QCAHMTSWPL_V1.0_V2.0_SILICONZ_UPSTREAM-3
+
+Fixes: 906619a00967 ("wifi: ath12k: handle regulatory hints during mac registration")
+Signed-off-by: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Reviewed-by: Rameshkumar Sundaram <rameshkumar.sundaram@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260729-ath12k-regd-wait-timeout-v1-1-504aa6e7e93c@oss.qualcomm.com
+Signed-off-by: Jeff Johnson <jeff.johnson@oss.qualcomm.com>
+---
+ drivers/net/wireless/ath/ath12k/wmi.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath12k/wmi.c b/drivers/net/wireless/ath/ath12k/wmi.c
+index d5160af60e00d..097ad6befc8f1 100644
+--- a/drivers/net/wireless/ath/ath12k/wmi.c
++++ b/drivers/net/wireless/ath/ath12k/wmi.c
+@@ -6975,6 +6975,14 @@ static int ath12k_reg_chan_list_event(struct ath12k_base *ab, struct sk_buff *sk
+ 		goto mem_free;
+ 	}
+ 
++	/*
++	 * Set the valid pdev_idx before validating so that, even when the
++	 * event is dropped or falls back, the completion the caller in
++	 * ath12k_mac_hw_register() may be waiting on is still signalled at
++	 * the end and it does not time out.
++	 */
++	pdev_idx = reg_info->phy_id;
++
+ 	ret = ath12k_reg_validate_reg_info(ab, reg_info);
+ 	if (ret == ATH12K_REG_STATUS_FALLBACK) {
+ 		ath12k_warn(ab, "failed to validate reg info %d\n", ret);
+@@ -6991,7 +6999,6 @@ static int ath12k_reg_chan_list_event(struct ath12k_base *ab, struct sk_buff *sk
+ 	}
+ 
+ 	/* free old reg_info if it exist */
+-	pdev_idx = reg_info->phy_id;
+ 	if (ab->reg_info[pdev_idx]) {
+ 		ath12k_reg_reset_reg_info(ab->reg_info[pdev_idx]);
+ 		kfree(ab->reg_info[pdev_idx]);
+@@ -7030,7 +7037,7 @@ static int ath12k_reg_chan_list_event(struct ath12k_base *ab, struct sk_buff *sk
+ 
+ out:
+ 	/* In some error cases, even a valid pdev_idx might not be available */
+-	if (pdev_idx != 255)
++	if (pdev_idx < ab->num_radios)
+ 		ar = ab->pdevs[pdev_idx].ar;
+ 
+ 	/* During the boot-time update, 'ar' might not be allocated,
+
+From 495970aa953eb931fc4901d4eba418d8401eaf91 Mon Sep 17 00:00:00 2001
+From: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Date: Wed, 29 Jul 2026 15:18:12 +0800
+Subject: [PATCH 2/4] UPSTREAM: wifi: ath12k: use per-radio ab in
+ ath12k_mac_hw_register()
+
+In ath12k_mac_hw_register() the local 'ab' is fetched once from the first
+radio, i.e. ath12k_ah_to_ar(ah, 0)->ab. When an ath12k_hw spans more than
+one ath12k_base, the radios walked by for_each_ar() may belong to
+different ath12k_base instances. Using the function-scope 'ab' inside
+that loop then refers to the first radio's device, which is stale with
+respect to the ar being processed.
+
+This is not a functional problem currently: the loop only dereferences the
+stale 'ab' under hw_params->current_cc_support, which is set only for
+WCN7850 and QCC2072. Both devices expose a single radio per ath12k_hw, so
+'ab' and ar->ab always point to the same ath12k_base.
+
+Still, relying on that is fragile. Cache ar->ab into a per-iteration
+'this_ab' and use it for the country code programming and the log messages
+so that each radio is handled against its own ath12k_base regardless of how
+many radios an ath12k_hw spans.
+
+Tested-on: WCN7850 hw2.0 PCI WLAN.HMT.1.1.c7-00108-QCAHMTSWPL_V1.0_V2.0_SILICONZ_UPSTREAM-3
+
+Signed-off-by: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Reviewed-by: Rameshkumar Sundaram <rameshkumar.sundaram@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260729-ath12k-regd-wait-timeout-v1-2-504aa6e7e93c@oss.qualcomm.com
+Signed-off-by: Jeff Johnson <jeff.johnson@oss.qualcomm.com>
+---
+ drivers/net/wireless/ath/ath12k/mac.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+index f89dba01c3c8d..657d00e7f4c4e 100644
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -15055,24 +15055,26 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+ 		wiphy->interface_modes &= ~BIT(NL80211_IFTYPE_MONITOR);
+ 
+ 	for_each_ar(ah, ar, i) {
++		struct ath12k_base *this_ab = ar->ab;
++
+ 		/* Apply the regd received during initialization */
+ 		ret = ath12k_regd_update(ar, true);
+ 		if (ret) {
+-			ath12k_err(ar->ab, "ath12k regd update failed: %d\n", ret);
++			ath12k_err(this_ab, "ath12k regd update failed: %d\n", ret);
+ 			goto err_unregister_hw;
+ 		}
+ 
+-		if (ar->ab->hw_params->current_cc_support && ab->new_alpha2[0]) {
++		if (this_ab->hw_params->current_cc_support && this_ab->new_alpha2[0]) {
+ 			struct wmi_set_current_country_arg current_cc = {};
+ 
+-			memcpy(&current_cc.alpha2, ab->new_alpha2, 2);
+-			memcpy(&ar->alpha2, ab->new_alpha2, 2);
++			memcpy(&current_cc.alpha2, this_ab->new_alpha2, 2);
++			memcpy(&ar->alpha2, this_ab->new_alpha2, 2);
+ 
+ 			reinit_completion(&ar->regd_update_completed);
+ 
+ 			ret = ath12k_wmi_send_set_current_country_cmd(ar, &current_cc);
+ 			if (ret)
+-				ath12k_warn(ar->ab,
++				ath12k_warn(this_ab,
+ 					    "failed set cc code for mac register: %d\n",
+ 					    ret);
+ 		}
+
+From 59625c2797fe6641890844edafab226d8a0b9f01 Mon Sep 17 00:00:00 2001
+From: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Date: Wed, 29 Jul 2026 15:18:13 +0800
+Subject: [PATCH 3/4] UPSTREAM: wifi: ath12k: protect new_alpha2 access with
+ base_lock
+
+ab->new_alpha2 is written under ab->base_lock by the 11d new country
+code event handler ath12k_reg_11d_new_cc_event() and by the SMBIOS
+BDF parser, and read under the same lock by ath12k_update_11d().
+
+ath12k_mac_hw_register() however read ab->new_alpha2 without holding
+base_lock, racing with those writers. Take base_lock and copy the
+value into a local wmi_set_current_country_arg, mirroring what
+ath12k_update_11d() already does, and use the local copy afterwards.
+
+Tested-on: WCN7850 hw2.0 PCI WLAN.HMT.1.1.c7-00108-QCAHMTSWPL_V1.0_V2.0_SILICONZ_UPSTREAM-3
+
+Signed-off-by: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Reviewed-by: Rameshkumar Sundaram <rameshkumar.sundaram@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260729-ath12k-regd-wait-timeout-v1-3-504aa6e7e93c@oss.qualcomm.com
+Signed-off-by: Jeff Johnson <jeff.johnson@oss.qualcomm.com>
+---
+ drivers/net/wireless/ath/ath12k/mac.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+index 657d00e7f4c4e..6a0fdc3dc5b42 100644
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -15064,11 +15064,17 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+ 			goto err_unregister_hw;
+ 		}
+ 
+-		if (this_ab->hw_params->current_cc_support && this_ab->new_alpha2[0]) {
++		if (this_ab->hw_params->current_cc_support) {
+ 			struct wmi_set_current_country_arg current_cc = {};
+ 
++			spin_lock_bh(&this_ab->base_lock);
+ 			memcpy(&current_cc.alpha2, this_ab->new_alpha2, 2);
+-			memcpy(&ar->alpha2, this_ab->new_alpha2, 2);
++			spin_unlock_bh(&this_ab->base_lock);
++
++			if (!current_cc.alpha2[0])
++				goto fw_stats_init;
++
++			memcpy(&ar->alpha2, current_cc.alpha2, 2);
+ 
+ 			reinit_completion(&ar->regd_update_completed);
+ 
+@@ -15079,6 +15085,7 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+ 					    ret);
+ 		}
+ 
++fw_stats_init:
+ 		ath12k_fw_stats_init(ar);
+ 		ath12k_debugfs_register(ar);
+ 	}
+
+From 3a44e14396b3277b8f970c58ef8fdb5c4c3e42be Mon Sep 17 00:00:00 2001
+From: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Date: Wed, 29 Jul 2026 15:18:14 +0800
+Subject: [PATCH 4/4] UPSTREAM: wifi: ath12k: skip setting country code during
+ registration when unchanged
+
+Currently ath12k_mac_hw_register() unconditionally sets ab->new_alpha2 to
+firmware. But when ab->new_alpha2 is the same as the country already
+applied at boot time (stored in ab->default_regd), setting it again is
+meaningless. So skip it in that case.
+
+Tested-on: WCN7850 hw2.0 PCI WLAN.HMT.1.1.c7-00108-QCAHMTSWPL_V1.0_V2.0_SILICONZ_UPSTREAM-3
+
+Signed-off-by: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Reviewed-by: Rameshkumar Sundaram <rameshkumar.sundaram@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260729-ath12k-regd-wait-timeout-v1-4-504aa6e7e93c@oss.qualcomm.com
+Signed-off-by: Jeff Johnson <jeff.johnson@oss.qualcomm.com>
+---
+ drivers/net/wireless/ath/ath12k/mac.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+index 6a0fdc3dc5b42..945c3729200c8 100644
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -15066,6 +15066,8 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+ 
+ 		if (this_ab->hw_params->current_cc_support) {
+ 			struct wmi_set_current_country_arg current_cc = {};
++			struct ieee80211_regdomain *default_regd;
++			bool same_cc = false;
+ 
+ 			spin_lock_bh(&this_ab->base_lock);
+ 			memcpy(&current_cc.alpha2, this_ab->new_alpha2, 2);
+@@ -15076,6 +15078,16 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+ 
+ 			memcpy(&ar->alpha2, current_cc.alpha2, 2);
+ 
++			spin_lock_bh(&this_ab->base_lock);
++			default_regd = this_ab->default_regd[ar->pdev_idx];
++			if (default_regd)
++				same_cc = !memcmp(default_regd->alpha2,
++						  current_cc.alpha2, 2);
++			spin_unlock_bh(&this_ab->base_lock);
++
++			if (same_cc)
++				goto fw_stats_init;
++
+ 			reinit_completion(&ar->regd_update_completed);
+ 
+ 			ret = ath12k_wmi_send_set_current_country_cmd(ar, &current_cc);

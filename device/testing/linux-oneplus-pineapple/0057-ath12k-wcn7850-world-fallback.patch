@@ -1,0 +1,29 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] wifi: ath12k: handle WCN7850 OEM world fallback
+
+Caihong's OEM firmware answers an 11d country-00 request with
+CURRENT_ALPHA2_NOT_FOUND, alpha2 00, domain 0x60 and populated rules.
+The OEM regulatory driver continues processing that status as a world
+fallback. Dropping it in ath12k leaves Linux reporting the previous US
+rules after firmware has reported a different domain.
+
+---
+--- a/drivers/net/wireless/ath/ath12k/reg.c
++++ b/drivers/net/wireless/ath/ath12k/reg.c
+@@ -891,8 +891,14 @@
+ 						    struct ath12k_reg_info *reg_info)
+ {
+ 	int pdev_idx = reg_info->phy_id;
+-
+-	if (reg_info->status_code != REG_SET_CC_STATUS_PASS) {
++	bool world_fallback;
++
++	/* caihong WCN7850 returns world rules with this status. */
++	world_fallback = ab->hw_rev == ATH12K_HW_WCN7850_HW20 &&
++		reg_info->status_code == REG_CURRENT_ALPHA2_NOT_FOUND &&
++		!memcmp(reg_info->alpha2, "00", 2);
++
++	if (reg_info->status_code != REG_SET_CC_STATUS_PASS && !world_fallback) {
+ 		/* In case of failure to set the requested country,
+ 		 * firmware retains the current regd. We print a failure info
+ 		 * and return from here.

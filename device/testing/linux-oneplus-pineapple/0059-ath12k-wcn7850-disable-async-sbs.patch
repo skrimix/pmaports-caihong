@@ -1,0 +1,166 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] wifi: ath12k: disable asynchronous SBS on WCN7850
+
+On WCN7850 hw2.0 (OnePlus Pad 2, OEM and mainline firmware), a scan
+containing 5 GHz channels above about 5350 MHz runs on both MACs at once
+(asynchronous SBS), and the MAC covering 5180-5320 MHz receives nothing
+for that scan. Full scans therefore miss APs on the lower 5 GHz channels.
+
+After firmware startup, send WMI_PDEV_SET_MAC_CONFIG with the firmware's
+advertised default configuration minus FW mode bit 26 (ASYNC_SBS, as
+defined in the OEM fw-api wmi_unified.h). 5 GHz channels are then scanned
+on one MAC. Log a rejected configuration.
+
+---
+diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
+index 85f9c9e..255ea47 100644
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -969,6 +969,21 @@ static int ath12k_core_start(struct ath12k_base *ab)
+ 		}
+ 	}
+ 
++	/* WCN7850 firmware with asynchronous SBS splits a scan containing
++	 * 5 GHz channels above about 5350 MHz across both MACs, and the MAC
++	 * covering the lower channels then receives nothing for that scan.
++	 * Keep the firmware's default configuration without asynchronous SBS,
++	 * so 5 GHz channels are scanned on one MAC.
++	 */
++	if (ab->hw_rev == ATH12K_HW_WCN7850_HW20) {
++		ret = ath12k_wmi_set_mac_config(ab,
++						ab->wmi_ab.default_conc_scan_config_bits,
++						ab->wmi_ab.default_fw_config_bits &
++						~WMI_FW_MODE_CFG_ASYNC_SBS);
++		if (ret)
++			ath12k_warn(ab, "failed to disable async sbs: %d\n", ret);
++	}
++
+ 	ret = ath12k_dp_tx_htt_h2t_ver_req_msg(ab);
+ 	if (ret) {
+ 		ath12k_err(ab, "failed to send htt version request message: %d\n",
+diff --git a/drivers/net/wireless/ath/ath12k/wmi.c b/drivers/net/wireless/ath/ath12k/wmi.c
+index b5e904a..a732a00 100644
+--- a/drivers/net/wireless/ath/ath12k/wmi.c
++++ b/drivers/net/wireless/ath/ath12k/wmi.c
+@@ -380,6 +380,9 @@ static int ath12k_pull_svc_ready_ext(struct ath12k_wmi_pdev *wmi_handle,
+ 	arg->default_conc_scan_config_bits =
+ 		le32_to_cpu(ev->default_conc_scan_config_bits);
+ 	arg->default_fw_config_bits = le32_to_cpu(ev->default_fw_config_bits);
++	wmi_handle->wmi_ab->default_conc_scan_config_bits =
++		arg->default_conc_scan_config_bits;
++	wmi_handle->wmi_ab->default_fw_config_bits = arg->default_fw_config_bits;
+ 	arg->he_cap_info = le32_to_cpu(ev->he_cap_info);
+ 	arg->mpdu_density = le32_to_cpu(ev->mpdu_density);
+ 	arg->max_bssid_rx_filters = le32_to_cpu(ev->max_bssid_rx_filters);
+@@ -4267,6 +4270,57 @@ int ath12k_wmi_set_hw_mode(struct ath12k_base *ab,
+ 	return ret;
+ }
+ 
++int ath12k_wmi_set_mac_config(struct ath12k_base *ab, u32 scan_config,
++			      u32 fw_config)
++{
++	struct ath12k_wmi_pdev_set_mac_config_cmd *cmd;
++	struct ath12k_wmi_base *wmi_ab = &ab->wmi_ab;
++	struct sk_buff *skb;
++	int ret;
++
++	skb = ath12k_wmi_alloc_skb(wmi_ab, sizeof(*cmd));
++	if (!skb)
++		return -ENOMEM;
++
++	cmd = (struct ath12k_wmi_pdev_set_mac_config_cmd *)skb->data;
++	cmd->tlv_header = ath12k_wmi_tlv_cmd_hdr(WMI_TAG_PDEV_SET_MAC_CONFIG_CMD,
++						 sizeof(*cmd));
++	cmd->pdev_id = cpu_to_le32(WMI_PDEV_ID_SOC);
++	cmd->concurrent_scan_config_bits = cpu_to_le32(scan_config);
++	cmd->fw_mode_config_bits = cpu_to_le32(fw_config);
++
++	ath12k_dbg(ab, ATH12K_DBG_WMI,
++		   "wmi pdev set mac config scan 0x%x fw 0x%x\n",
++		   scan_config, fw_config);
++
++	ret = ath12k_wmi_cmd_send(&wmi_ab->wmi[0], skb,
++				  WMI_PDEV_SET_MAC_CONFIG_CMDID);
++	if (ret) {
++		ath12k_warn(ab, "failed to send WMI_PDEV_SET_MAC_CONFIG_CMDID\n");
++		dev_kfree_skb(skb);
++	}
++
++	return ret;
++}
++
++static void ath12k_wmi_pdev_set_mac_config_resp_event(struct ath12k_base *ab,
++						      struct sk_buff *skb)
++{
++	const struct ath12k_wmi_pdev_set_mac_config_resp_event *ev;
++
++	if (skb->len < sizeof(*ev)) {
++		ath12k_warn(ab, "invalid set mac config response length\n");
++		return;
++	}
++
++	ev = (const void *)skb->data;
++	if (ev->status)
++		ath12k_warn(ab, "firmware rejected mac config: status %u\n",
++			    le32_to_cpu(ev->status));
++	else
++		ath12k_dbg(ab, ATH12K_DBG_WMI, "wmi pdev set mac config done\n");
++}
++
+ int ath12k_wmi_cmd_init(struct ath12k_base *ab)
+ {
+ 	struct ath12k_dp *dp = ath12k_ab_to_dp(ab);
+@@ -9954,6 +10008,9 @@ static void ath12k_wmi_op_rx(struct ath12k_base *ab, struct sk_buff *skb)
+ 	case WMI_OBSS_COLOR_COLLISION_DETECTION_EVENTID:
+ 		ath12k_wmi_obss_color_collision_event(ab, skb);
+ 		break;
++	case WMI_PDEV_SET_MAC_CONFIG_RESP_EVENTID:
++		ath12k_wmi_pdev_set_mac_config_resp_event(ab, skb);
++		break;
+ 	/* add Unsupported events (rare) here */
+ 	case WMI_TBTTOFFSET_EXT_UPDATE_EVENTID:
+ 	case WMI_PEER_OPER_MODE_CHANGE_EVENTID:
+diff --git a/drivers/net/wireless/ath/ath12k/wmi.h b/drivers/net/wireless/ath/ath12k/wmi.h
+index 5ba9b7d..6f936d1 100644
+--- a/drivers/net/wireless/ath/ath12k/wmi.h
++++ b/drivers/net/wireless/ath/ath12k/wmi.h
+@@ -2518,6 +2518,21 @@ struct ath12k_wmi_pdev_set_hw_mode_cmd {
+ 	__le32 num_band_to_mac;
+ } __packed;
+ 
++#define WMI_FW_MODE_CFG_ASYNC_SBS	BIT(26)
++
++struct ath12k_wmi_pdev_set_mac_config_cmd {
++	__le32 tlv_header;
++	__le32 pdev_id;
++	__le32 concurrent_scan_config_bits;
++	__le32 fw_mode_config_bits;
++} __packed;
++
++struct ath12k_wmi_pdev_set_mac_config_resp_event {
++	__le32 tlv_header;
++	__le32 pdev_id;
++	__le32 status;
++} __packed;
++
+ struct ath12k_wmi_ppe_threshold_params {
+ 	__le32 numss_m1; /** NSS - 1*/
+ 	__le32 ru_info;
+@@ -5258,6 +5273,8 @@ struct ath12k_wmi_base {
+ 	struct ath12k_svc_ext_info svc_ext_info;
+ 	u32 sbs_lower_band_end_freq;
+ 	struct ath12k_hw_mode_info hw_mode_info;
++	u32 default_conc_scan_config_bits;
++	u32 default_fw_config_bits;
+ 
+ 	u8 dp_peer_meta_data_ver;
+ };
+@@ -6501,6 +6518,8 @@ int ath12k_wmi_fils_discovery(struct ath12k *ar, u32 vdev_id, u32 interval,
+ 			      bool unsol_bcast_probe_resp_enabled);
+ int ath12k_wmi_probe_resp_tmpl(struct ath12k *ar, u32 vdev_id,
+ 			       struct sk_buff *tmpl);
++int ath12k_wmi_set_mac_config(struct ath12k_base *ab, u32 scan_config,
++			      u32 fw_config);
+ int ath12k_wmi_set_hw_mode(struct ath12k_base *ab,
+ 			   enum wmi_host_hw_mode_config_type mode);
+ int ath12k_wmi_set_bios_cmd(struct ath12k_base *ab, u32 param_id,
