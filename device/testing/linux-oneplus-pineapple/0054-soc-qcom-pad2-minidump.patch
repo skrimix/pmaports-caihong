@@ -39,7 +39,7 @@ index 0000000..917fa74
 +#include <linux/io.h>
 +#include <linux/limits.h>
 +#include <linux/of.h>
-+#include <linux/of_address.h>
++#include <linux/of_reserved_mem.h>
 +#include <linux/panic_notifier.h>
 +#include <linux/printk.h>
 +#include <linux/slab.h>
@@ -107,7 +107,7 @@ index 0000000..917fa74
 +	struct md_ss_region *regions;
 +	struct md_ss_toc *toc;
 +	struct device_node *np;
-+	struct resource res;
++	struct reserved_mem *rmem;
 +	int n = 0;
 +
 +	/* SMEM probes after late_initcall */
@@ -133,9 +133,9 @@ index 0000000..917fa74
 +	md_set_region(&regions[n++], "KLOGBUF", virt_to_phys(log_buf_addr_get()),
 +		      log_buf_len_get());
 +	np = of_find_compatible_node(NULL, NULL, "ramoops");
-+	if (np && !of_address_to_resource(np, 0, &res))
-+		md_set_region(&regions[n++], "KRAMOOPS", res.start,
-+			      resource_size(&res));
++	rmem = np ? of_reserved_mem_lookup(np) : NULL;
++	if (rmem)
++		md_set_region(&regions[n++], "KRAMOOPS", rmem->base, rmem->size);
 +	of_node_put(np);
 +
 +	toc = &gtoc->md_ss_toc[0];

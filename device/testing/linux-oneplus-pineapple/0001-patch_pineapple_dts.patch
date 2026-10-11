@@ -1,6 +1,6 @@
 --- /dev/null	2026-09-24 15:34:28.681420201 +0200
 +++ fakesrc/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts	2026-09-30 09:27:25.114043410 +0200
-@@ -0,0 +1,957 @@
+@@ -0,0 +1,956 @@
 +/dts-v1/;
 +#include "sm8650-mtp.dts"
 +#include <dt-bindings/input/input.h>
@@ -162,16 +162,15 @@
 +			no-map;
 +		};
 +	
-+		ramoops_region@bfe5c0000 {
-+		    compatible = "ramoops";
-+		    
-+		    // < High_Addr  Low_Addr     High_Size  Low_Size >
-+		    reg = <0x0b     0xfe5c0000   0x00       0x240000>;
-+		    
-+		    no-map;
-+		    record-size = <0x40000>;
-+		    console-size = <0x40000>;
-+		    pmsg-size = <0x200000>;
++		ramoops_region {
++			compatible = "ramoops";
++			// Allocate at boot
++			alloc-ranges = <0x0 0x00000000 0xffffffff 0xffffffff>;
++			size = <0x0 0x240000>;
++			no-map;
++			record-size = <0x40000>;
++			console-size = <0x40000>;
++			pmsg-size = <0x200000>;
 +		};
 +
 +		demura_region_0 {
