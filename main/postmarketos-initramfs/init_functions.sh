@@ -752,7 +752,7 @@ mount_root_partition() {
 		fail_halt_boot
 	fi
 
-	if [ -e /sysroot/.stowaways/pmos/etc/os-release ]; then
+	if [ -e /sysroot/.stowaways/pmos/usr/lib/os-release ]; then
 		umount /sysroot
 
 		mkdir /stowaway
@@ -760,7 +760,7 @@ mount_root_partition() {
 		mount --bind /stowaway/.stowaways/pmos/ /sysroot
 	fi
 
-	if ! [ -e /sysroot/etc/os-release ]; then
+	if ! [ -e /sysroot/usr/lib/os-release ]; then
 		splash_set_error "Root partition does not contain a root filesystem\nhttps://postmarketos.org/troubleshooting"
 		fail_halt_boot
 	fi
