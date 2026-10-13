@@ -1,0 +1,112 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] wifi: ath12k: rate-limit 11d scans to the 11d interval
+
+ath12k arms an 11d scan whenever a station vdev is created, and the
+firmware is asked to repeat it every ATH12K_SCAN_11D_INTERVAL (10 min).
+The 11d scan is bound to its vdev, though, and an unassociated station
+gets a new scan vdev for every scan request, deleted again when the scan
+completes. Every host scan therefore starts a fresh 11d scan. On the
+OnePlus Pad 2 (WCN7850 hw2.0, with both the OEM firmware
+WLAN.HMT.2.0-01788 and linux-firmware WLAN.HMT.1.1.c7-00108), each such
+host scan stalled for about 7 s after its first channels while the 11d
+scan ran, so NetworkManager's scans took about 15.7 s instead of 3-9 s.
+
+Record when the last 11d scan was started and arm a new one only after
+the 11d interval has passed. Forget the record when the radio is stopped
+or the firmware is recovered, so a fresh firmware start still detects the
+country.
+
+---
+diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
+index 255ea47..dbf1933 100644
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -1528,6 +1528,7 @@ static void ath12k_core_pre_reconfigure_recovery(struct ath12k_base *ab)
+ 
+ 			ath12k_mac_drain_tx(ar);
+ 			ar->state_11d = ATH12K_11D_IDLE;
++			ar->last_11d_scan_valid = false;
+ 			complete(&ar->completed_11d_scan);
+ 			complete(&ar->scan.started);
+ 			complete_all(&ar->scan.completed);
+diff --git a/drivers/net/wireless/ath/ath12k/core.h b/drivers/net/wireless/ath/ath12k/core.h
+index 8be4355..4851266 100644
+--- a/drivers/net/wireless/ath/ath12k/core.h
++++ b/drivers/net/wireless/ath/ath12k/core.h
+@@ -746,6 +746,9 @@ struct ath12k {
+ 	u32 vdev_id_11d_scan;
+ 	struct completion completed_11d_scan;
+ 	enum ath12k_11d_state state_11d;
++	/* Start time of the last 11d scan, if last_11d_scan_valid. */
++	unsigned long last_11d_scan;
++	bool last_11d_scan_valid;
+ 	u8 alpha2[REG_ALPHA2_LEN];
+ 	bool regdom_set_by_user;
+ 	struct completion regd_update_completed;
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+index 2cff948..133770b 100644
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -9834,6 +9834,7 @@ static void ath12k_mac_stop(struct ath12k *ar)
+ 	cancel_work_sync(&ar->ab->rfkill_work);
+ 	cancel_work_sync(&ar->ab->update_11d_work);
+ 	ar->state_11d = ATH12K_11D_IDLE;
++	ar->last_11d_scan_valid = false;
+ 	complete(&ar->completed_11d_scan);
+ 
+ 	spin_lock_bh(&dp_pdev->ppdu_list_lock);
+@@ -10089,6 +10090,25 @@ static bool ath12k_mac_vif_ap_active_any(struct ath12k_base *ab)
+ 	return false;
+ }
+ 
++/* The firmware repeats a running 11d scan every ATH12K_SCAN_11D_INTERVAL,
++ * but the scan is bound to its vdev. An unassociated station gets a new scan
++ * vdev for every scan request, so arming 11d for each new vdev runs a full
++ * 11d scan with every host scan and delays it by several seconds. Arm it
++ * again only after the interval has passed.
++ */
++static bool ath12k_mac_11d_scan_due(struct ath12k *ar)
++{
++	if (!ar->last_11d_scan_valid ||
++	    time_after_eq(jiffies, ar->last_11d_scan +
++			  msecs_to_jiffies(ATH12K_SCAN_11D_INTERVAL)))
++		return true;
++
++	ath12k_dbg(ar->ab, ATH12K_DBG_MAC,
++		   "mac skip 11d scan, last started %u ms ago\n",
++		   jiffies_to_msecs(jiffies - ar->last_11d_scan));
++	return false;
++}
++
+ void ath12k_mac_11d_scan_start(struct ath12k *ar, u32 vdev_id)
+ {
+ 	struct wmi_11d_scan_start_arg arg;
+@@ -10121,6 +10141,8 @@ void ath12k_mac_11d_scan_start(struct ath12k *ar, u32 vdev_id)
+ 			    vdev_id, ret);
+ 	} else {
+ 		ar->vdev_id_11d_scan = vdev_id;
++		ar->last_11d_scan = jiffies;
++		ar->last_11d_scan_valid = true;
+ 		if (ar->state_11d == ATH12K_11D_PREPARING)
+ 			ar->state_11d = ATH12K_11D_RUNNING;
+ 	}
+@@ -10396,7 +10418,8 @@ int ath12k_mac_vdev_create(struct ath12k *ar, struct ath12k_link_vif *arvif)
+ 
+ 		if (test_bit(WMI_TLV_SERVICE_11D_OFFLOAD, ab->wmi_ab.svc_map) &&
+ 		    ahvif->vdev_type == WMI_VDEV_TYPE_STA &&
+-		    ahvif->vdev_subtype == WMI_VDEV_SUBTYPE_NONE) {
++		    ahvif->vdev_subtype == WMI_VDEV_SUBTYPE_NONE &&
++		    ath12k_mac_11d_scan_due(ar)) {
+ 			reinit_completion(&ar->completed_11d_scan);
+ 			ar->state_11d = ATH12K_11D_PREPARING;
+ 		}
+@@ -12206,7 +12229,8 @@ ath12k_mac_op_unassign_vif_chanctx(struct ieee80211_hw *hw,
+ 	if (test_bit(WMI_TLV_SERVICE_11D_OFFLOAD, ab->wmi_ab.svc_map) &&
+ 	    ahvif->vdev_type == WMI_VDEV_TYPE_STA &&
+ 	    ahvif->vdev_subtype == WMI_VDEV_SUBTYPE_NONE &&
+-	    ar->state_11d != ATH12K_11D_PREPARING) {
++	    ar->state_11d != ATH12K_11D_PREPARING &&
++	    ath12k_mac_11d_scan_due(ar)) {
+ 		reinit_completion(&ar->completed_11d_scan);
+ 		ar->state_11d = ATH12K_11D_PREPARING;
+ 	}

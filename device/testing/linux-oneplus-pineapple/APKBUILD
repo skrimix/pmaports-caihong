@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=115
+pkgrel=116
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -92,6 +92,7 @@ source="
 	0059-ath12k-wcn7850-disable-async-sbs.patch
 	0061-remoteproc-qcom-q6v5-handover-one-shot.patch
 	0062-pstore-ram-dynamic-reserved-memory.patch
+	0063-ath12k-rate-limit-11d-scans.patch
 	dummy-dtbo.dtso
 	$_config
 "
@@ -187,6 +188,7 @@ f99bab3fbb9f2a12d5de15e669b0e111c11e756f731a1a634931e6f5435fe8834898a2cc534fe1e9
 2ab1aa3cbb0459986e9ded6ab20b75a254e00eaaad1a9cc74d2ffd46441a03151d9626e9f527e0b71b52f84922d462465a3a81d38aaa1d314f6baed08383f8a5  0059-ath12k-wcn7850-disable-async-sbs.patch
 72cd3c36fbe532f2c9db50aed345ca31235afffd6600ca49a20e60d9fbe49309c3369d385f5c32b1451f14c31fdc998028a66e7c323f3e4b0b6eb7bc22ac64d4  0061-remoteproc-qcom-q6v5-handover-one-shot.patch
 d343470c9d1dd0b488aec488b929400d7e61663b75a7325b41fbdc42832fc9a308d73ecca010f05b10949f4894a038e309a0fb8a50ba85d240a16497a97bad5d  0062-pstore-ram-dynamic-reserved-memory.patch
+0e9618d23b7a48315afb638c407ca051a29749a6a176da58093659895bff99349f08ffd087336619dd819ce7f4ea007c1fc9cf9a2eda978531d87d08b5a4615a  0063-ath12k-rate-limit-11d-scans.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
 817a6c660b89becfcaa635bb7da3aabac2d708c3d20fe7148a4987239e133d3e715f399ae585670af7f31b3fb9d68299be77db26683e2a38f053bb352aaadd9f  config-oneplus-pineapple.aarch64
 "
