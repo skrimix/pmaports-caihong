@@ -2,7 +2,7 @@
 /plugin/;
 
 / {
-    model = "OnePlus Pad 2 Overlay";
+    model = "OnePlus Pad 2";
     compatible = "qcom,pineapple-mtp", "qcom,pineapple", "qcom,pineapplep", "qcom,pineapplep-mtp", "qcom,mtp", "qcom,sm8650";
 
     qcom,msm-id = <557 0x20000 577 0x20000>;
