@@ -1,7 +1,7 @@
 maintainer=""
 pkgname=firmware-oneplus-pineapple
 pkgver=1
-pkgrel=6
+pkgrel=8
 _commit="e5f0b275675db29de8c88972cc5246d89f1c9bce"
 pkgdesc="Firmware files for OnePlus pineapple and pineapplep"
 url="https://github.com/RubyLegend/firmware-oneplus-pineapple"
