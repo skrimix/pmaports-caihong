@@ -507,7 +507,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +	pps->prepared = pps->contract = pps->suspended = false;
 +	pps->state = PPS_VERIFY;
 +	pps->next_step = jiffies + HZ;
-+	mod_delayed_work(system_wq, &pps->work, HZ);
++	mod_delayed_work(system_dfl_wq, &pps->work, HZ);
 +	__pm_relax(pps->ws);
 +}
 +
@@ -1103,7 +1103,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +	pps->result = NULL;
 +	pps->result_err = 0;
 +	pps->next_step = jiffies + msecs_to_jiffies(100);
-+	mod_delayed_work(system_wq, &pps->work, msecs_to_jiffies(100));
++	mod_delayed_work(system_dfl_wq, &pps->work, msecs_to_jiffies(100));
 +	return 0;
 +
 +err:
@@ -1133,7 +1133,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +	mutex_unlock(&battmgr->lock);
 +	if (ret) {
 +		dev_err(battmgr->dev, "PPS: failed to read charger state: %d\n", ret);
-+		mod_delayed_work(system_wq, &pps->work, msecs_to_jiffies(PPS_IDLE_POLL_MS));
++		mod_delayed_work(system_dfl_wq, &pps->work, msecs_to_jiffies(PPS_IDLE_POLL_MS));
 +		return;
 +	}
 +
@@ -1141,7 +1141,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +		if (!pps->attached)
 +			return;
 +		if (++pps->absent_count < 2) {
-+			mod_delayed_work(system_wq, &pps->work, HZ);
++			mod_delayed_work(system_dfl_wq, &pps->work, HZ);
 +			return;
 +		}
 +		dev_info(battmgr->dev, "PPS: charger removed\n");
@@ -1155,7 +1155,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +		pps->wait_reason = NULL;
 +	}
 +
-+	mod_delayed_work(system_wq, &pps->work, msecs_to_jiffies(PPS_IDLE_POLL_MS));
++	mod_delayed_work(system_dfl_wq, &pps->work, msecs_to_jiffies(PPS_IDLE_POLL_MS));
 +	if (pps->done || !pps->allowed || battmgr->usb.usb_type != POWER_SUPPLY_USB_TYPE_PD_PPS)
 +		return;
 +	ret = qcom_battmgr_pps_enter(battmgr);
@@ -1189,7 +1189,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +				goto out;
 +			}
 +		}
-+		mod_delayed_work(system_wq, &pps->work, pps->next_step - jiffies);
++		mod_delayed_work(system_dfl_wq, &pps->work, pps->next_step - jiffies);
 +		goto out;
 +	}
 +
@@ -1208,7 +1208,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +				 battmgr->usb.online, battmgr->usb.voltage_now / 1000);
 +		pps->state = PPS_IDLE;
 +		/* Then follow the charger: a removal, or a retry once allowed. */
-+		mod_delayed_work(system_wq, &pps->work, HZ);
++		mod_delayed_work(system_dfl_wq, &pps->work, HZ);
 +		goto out;
 +	}
 +
@@ -1218,7 +1218,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +		goto out;
 +	}
 +	pps->next_step = jiffies + msecs_to_jiffies(ret);
-+	mod_delayed_work(system_wq, &pps->work, msecs_to_jiffies(ret));
++	mod_delayed_work(system_dfl_wq, &pps->work, msecs_to_jiffies(ret));
 +out:
 +	mutex_unlock(&pps->lock);
 +}
@@ -1249,7 +1249,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +	if (block && pps->state != PPS_IDLE && pps->state != PPS_VERIFY)
 +		qcom_battmgr_pps_exit(battmgr, reason, 0, true);
 +	if (!block)
-+		mod_delayed_work(system_wq, &pps->work, 0);
++		mod_delayed_work(system_dfl_wq, &pps->work, 0);
 +	mutex_unlock(&pps->lock);
 +}
 +
@@ -1284,7 +1284,7 @@ index 9d6ea5f0d..7cd03d8c4 100644
 +static void qcom_battmgr_pps_kick(struct qcom_battmgr *battmgr)
 +{
 +	if (battmgr->pps.enabled)
-+		mod_delayed_work(system_wq, &battmgr->pps.work, 0);
++		mod_delayed_work(system_dfl_wq, &battmgr->pps.work, 0);
 +}
 +
 +static ssize_t pps_charging_show(struct device *dev, struct device_attribute *attr, char *buf)

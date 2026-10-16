@@ -1,0 +1,67 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] arm64: dts: qcom: caihong: enable WCN7850 Bluetooth
+
+Bluetooth is on UART14 (QUP2 SE6) with BT_EN on GPIO 17 and SW_CTRL on
+GPIO 18, as in the stock caihong bt-devicetree overlay. Describe it as the
+SM8650 QRD does: the PMU drives BT_EN and the Bluetooth node takes its
+supplies from the PMU outputs.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+index a8a7ba69d..2b7c08052 100644
+--- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
++++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+@@ -797,9 +797,10 @@ wcn7850-pmu {
+ 		compatible = "qcom,wcn7850-pmu";
+ 
+ 		pinctrl-names = "default";
+-		pinctrl-0 = <&wlan_en>;
++		pinctrl-0 = <&wlan_en>, <&bt_default>;
+ 
+ 		wlan-enable-gpios = <&tlmm 16 GPIO_ACTIVE_HIGH>;
++		bt-enable-gpios = <&tlmm 17 GPIO_ACTIVE_HIGH>;
+ 
+ 		vdd-supply = <&vreg_s4i_0p85>;
+ 		vddio-supply = <&vreg_l15b_1p8>;
+@@ -976,3 +977,42 @@ data-out-pins {
+ 		};
+ 	};
+ };
++
++&aliases {
++	serial1 = &uart14;
++};
++
++&tlmm {
++	bt_default: bt-default-state {
++		bt-en-pins {
++			pins = "gpio17";
++			function = "gpio";
++			drive-strength = <16>;
++			bias-disable;
++		};
++
++		sw-ctrl-pins {
++			pins = "gpio18";
++			function = "gpio";
++			bias-pull-down;
++		};
++	};
++};
++
++&uart14 {
++	status = "okay";
++
++	bluetooth {
++		compatible = "qcom,wcn7850-bt";
++
++		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
++		vddaon-supply = <&vreg_pmu_aon_0p59>;
++		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
++		vddwlmx-supply = <&vreg_pmu_wlmx_0p85>;
++		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
++		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
++		vddrfa1p8-supply = <&vreg_pmu_rfa_1p8>;
++
++		max-speed = <3200000>;
++	};
++};

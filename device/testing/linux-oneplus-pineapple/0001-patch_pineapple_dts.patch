@@ -1,6 +1,6 @@
 --- /dev/null	2026-09-24 15:34:28.681420201 +0200
 +++ fakesrc/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts	2026-09-30 09:27:25.114043410 +0200
-@@ -0,0 +1,956 @@
+@@ -0,0 +1,761 @@
 +/dts-v1/;
 +#include "sm8650-mtp.dts"
 +#include <dt-bindings/input/input.h>
@@ -27,24 +27,9 @@
 +		#size-cells = <2>;
 +		ranges;
 +	
-+	        bootloader_log_mem: botloader_mem@0x81CE4000 {
-+	                reg = <0 0x81CE4000 0 0x00010000>;
-+	                label = "bootloader_log_mem";
-+	        };
-+	
 +		dump_device_info_mem: device_info_mem@0xA4F00000 {
 +			reg = <0 0xA4F00000 0 0x00008000>;
 +			label = "dump_device_info_mem";
-+		};
-+	
-+		gunyah_hyp_mem: gunyah_hyp_region@80000000 {
-+			no-map;
-+			reg = <0x0 0x80000000 0x0 0xe00000>;
-+		};
-+
-+		chipinfo_mem: chipinfo_region@81cf4000 {
-+			no-map;
-+			reg = <0x0 0x81cf4000 0x0 0x1000>;
 +		};
 +	
 +		qseecom_mem: qseecom_region {
@@ -173,16 +158,6 @@
 +			pmsg-size = <0x200000>;
 +		};
 +
-+		demura_region_0 {
-+			label = "demura hfc region 0";
-+			reg = <0x00 0x00 0x00 0x00>;
-+		};
-+		
-+		demura_region_1 {
-+			label = "demura hfc region 1";
-+			reg = <0x00 0x00 0x00 0x00>;
-+		};
-+
 +		splash_region {
 +			label = "cont_splash_region";
 +			reg = <0x00 0xd5100000 0x00 0x2b00000>;
@@ -270,180 +245,10 @@
 +		enable-active-high;
 +		regulator-boot-on;
 +	};
-+
-+	thermal-zones {
-+		skin-temp-thermal {
-+			polling-delay-passive = <250>;
-+			polling-delay = <0>;
-+			thermal-sensors = <&vadc 0x144>;
-+
-+			trips {
-+				skin_alert: skin-alert {
-+					temperature = <45000>; /* 45C */
-+					hysteresis = <2000>;
-+					type = "passive";
-+				};
-+				skin_crit: skin-crit {
-+					temperature = <60000>; /* 60C */
-+					hysteresis = <2000>;
-+					type = "critical";
-+				};
-+			};
-+
-+			cooling-maps {
-+				/* Tell the kernel to throttle the CPU if the skin gets too hot */
-+				map0 {
-+					trip = <&skin_alert>;
-+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
-+				};
-+			};
-+		};
-+		cam-flash-thermal {
-+			polling-delay-passive = <250>;
-+			polling-delay = <0>;
-+			thermal-sensors = <&vadc 0x145>;
-+
-+			trips {
-+				flash_alert: flash-alert {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "passive";
-+				};
-+				flash_crit: flash-crit {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "critical";
-+				};
-+			};
-+		};
-+		wlan-thermal {
-+			polling-delay-passive = <250>;
-+			polling-delay = <0>;
-+			thermal-sensors = <&vadc 0x146>;
-+
-+			trips {
-+				wlan_alert: wlan-alert {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "passive";
-+				};
-+				wlan_crit: wlan-crit {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "critical";
-+				};
-+			};
-+		};
-+		rear-tof-thermal {
-+			polling-delay-passive = <250>;
-+			polling-delay = <0>;
-+			thermal-sensors = <&vadc 0x148>;
-+
-+			trips {
-+				rear_tof_alert: rear-tof-alert {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "passive";
-+				};
-+				rear_tof_crit: rear-tof-crit {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "critical";
-+				};
-+			};
-+		};
-+		usb-thermal {
-+			polling-delay-passive = <250>;
-+			polling-delay = <0>;
-+			thermal-sensors = <&vadc 0x747>;
-+
-+			trips {
-+				usb_alert: usb-alert {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "passive";
-+				};
-+				usb_crit: usb-crit {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "critical";
-+				};
-+			};
-+		};
-+		wls-thermal {
-+			polling-delay-passive = <250>;
-+			polling-delay = <0>;
-+			thermal-sensors = <&vadc 0x749>;
-+
-+			trips {
-+				wls_alert: wls-alert {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "passive";
-+				};
-+				wls_crit: wls-crit {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "critical";
-+				};
-+			};
-+		};
-+		svooc-mos-btb-thermal {
-+			polling-delay-passive = <250>;
-+			polling-delay = <0>;
-+			thermal-governor = "user_space";
-+			thermal-sensors = <&vadc 0x14d>;
-+			wake-capable-sensor;
-+
-+			trips {
-+				svooc_mos_btb_alert: svooc-mos-btb-alert {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "passive";
-+				};
-+				svooc_mos_btb_crit: svooc-mos-btb-crit {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "critical";
-+				};
-+			};
-+		};
-+		batt-thermal {
-+			polling-delay-passive = <250>;
-+			polling-delay = <0>;
-+			thermal-sensors = <&vadc 0x744>;
-+
-+			trips {
-+				batt_alert: batt-alert {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "passive";
-+				};
-+				batt_crit: batt-crit {
-+					temperature = <125000>; /* 125C */
-+					hysteresis = <1000>;
-+					type = "critical";
-+				};
-+			};
-+		};
-+
-+	};
-+
 +};
 +
 +
 +&soc {
-+	
-+	bootloader_log {
-+		compatible = "bootloader_log";
-+		linux,contiguous-region = <&bootloader_log_mem>;
-+	};
-+
-+	dump_device_info {
-+		compatible = "dump_device_info";
-+		linux,contiguous-region = <&dump_device_info_mem>;
-+	};
-+
 +	// OPlus customs :)
 +	// Will investigate it someday, maybe it's something useful...
 +

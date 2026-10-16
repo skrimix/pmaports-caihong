@@ -1,7 +1,7 @@
 maintainer=""
 pkgname=firmware-oneplus-pineapple
 pkgver=1
-pkgrel=9
+pkgrel=10
 _commit="e5f0b275675db29de8c88972cc5246d89f1c9bce"
 pkgdesc="Firmware files for OnePlus pineapple and pineapplep"
 url="https://github.com/RubyLegend/firmware-oneplus-pineapple"
@@ -52,6 +52,9 @@ package() {
 	# Stock ODM etc/wifi/kiwi/bdwlan.elf; the modem board file is different.
 	install -Dm644 "$srcdir/caihong-bdwlan.elf" \
 		"$pkgdir/lib/firmware/updates/ath12k/WCN7850/hw2.0/board.bin"
+	# OEM-signed Iris firmware; overrides the linux-firmware-qcom build.
+	install -Dm644 "firmware/vpu33_4v.mbn" \
+		"$pkgdir/lib/firmware/updates/qcom/vpu/vpu33_p4.mbn"
 
 	# Stock ODM AW88261 profiles, selected by the board audio-channel IDs.
 	install -Dm644 "$srcdir/caihong-aw882xx_acf.bin" \

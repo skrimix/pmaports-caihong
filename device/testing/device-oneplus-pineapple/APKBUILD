@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=32
+pkgrel=33
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -57,6 +57,7 @@ source="
 	caihong-minidump
 	caihong-minidump-save.service
 	90-dev-nopasswd
+	99-watchdog.conf
 "
 
 build() {
@@ -96,6 +97,8 @@ package() {
 	install -Dm755 "$srcdir/caihong-minidump" "$pkgdir/usr/bin/caihong-minidump"
 	install -Dm644 "$srcdir/caihong-minidump-save.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-minidump-save.service"
+	install -Dm644 "$srcdir/99-watchdog.conf" \
+		"$pkgdir/usr/lib/systemd/system.conf.d/99-oneplus-pineapple-watchdog.conf"
 	# DEBUG: passwordless sudo for development; remove before release.
 	install -Dm440 "$srcdir/90-dev-nopasswd" \
 		"$pkgdir/etc/sudoers.d/90-dev-nopasswd"
@@ -140,4 +143,5 @@ f3a1b96f12f2a6f06f2e00d410b01ee7a12cfa19ae0982f97479c8e303a68dfe7af8b14bc5b8ebe5
 0ebee4e30d51de9fba8786e6fd459ca3faed4015979d7edfdcee9f3b3b9a698a2eac88a8bc49d452ece1cb67d51900e7a45690bd4ff678d17171d8888276dd3a  caihong-minidump
 24dd8892e79efe0cd57add6326b4ab2741ca0298c2ce5674d49bbd63c4b96497046b97387fde9b61c1426feab4d1231e9edc1389f132ecaf0d590b63a8f664c3  caihong-minidump-save.service
 d757e155c598ba8894e1f27d511bbb9504578503596d581ead84ac4c38318643fdb3cfa7164f77d361021af47022a4f3eaab20423784f54494e28aade1faffc0  90-dev-nopasswd
+39f18b25e12f5387dbbbfe699a59f6500b71eaaa81c3ec02e709e037ca9a89d3e9f3e5c2dc17da148069177994a6161b744918fbb13c4b255cc371009f559c64  99-watchdog.conf
 "
