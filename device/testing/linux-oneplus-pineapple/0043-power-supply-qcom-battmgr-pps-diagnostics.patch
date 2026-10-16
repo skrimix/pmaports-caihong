@@ -11,19 +11,21 @@ Validate the full packet before reading that trailing count, and require
 aligned data containing at least the two initial words and seven PDO slots.
 Preserve raw words; buffer freshness and firmware semantics need measurement.
 This is diagnostic access, not a PPS charging controller.
-
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 38a3fa3cd..f0d3996b8 100644
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
-@@ -5,6 +5,8 @@
+@@ -5,7 +5,9 @@
   * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
   */
  #include <linux/auxiliary_bus.h>
 +#include <linux/debugfs.h>
+ #include <linux/devm-helpers.h>
 +#include <linux/of.h>
  #include <linux/jiffies.h>
  #include <linux/module.h>
  #include <linux/mutex.h>
-@@ -124,6 +126,10 @@
+@@ -125,6 +127,10 @@ enum qcom_battmgr_variant {
  #define NOTIF_OPLUS_PD_SOURCECAP_DONE 0x79
  
  #define OPLUS_USB_VOOCPHY_ENABLE 16
@@ -34,12 +36,10 @@ This is diagnostic access, not a PPS charging controller.
  #define OPLUS_USB_OTG_AP_ENABLE 17
  #define OPLUS_USB_OTG_SWITCH 18
  #define OPLUS_USB_TYPEC_MODE 22
-@@ -145,6 +151,18 @@
- 	__le32 battery;
- 	__le32 property;
+@@ -148,6 +154,18 @@ struct qcom_battmgr_property_request {
  	__le32 value;
-+};
-+
+ };
+ 
 +/* OEM source-capability buffer: two header words, then seven PDOs. */
 +struct qcom_battmgr_pps_request {
 +	struct pmic_glink_hdr hdr;
@@ -50,10 +50,12 @@ This is diagnostic access, not a PPS charging controller.
 +	struct pmic_glink_hdr hdr;
 +	__le32 data[OPLUS_PPS_BUFFER_WORDS];
 +	__le32 data_size;
- };
- 
++};
++
  struct qcom_battmgr_update_request {
-@@ -355,6 +373,9 @@
+ 	struct pmic_glink_hdr hdr;
+ 	__le32 battery_id;
+@@ -356,6 +374,9 @@ struct qcom_battmgr {
  	bool request_pending;
  	unsigned int request_opcode;
  	unsigned int request_property;
@@ -63,7 +65,7 @@ This is diagnostic access, not a PPS charging controller.
  
  	bool service_up;
  
-@@ -1205,6 +1226,54 @@
+@@ -1206,6 +1227,54 @@ static const struct power_supply_desc sm8350_wls_psy_desc = {
  	.get_property = qcom_battmgr_wls_get_property,
  };
  
@@ -118,7 +120,7 @@ This is diagnostic access, not a PPS charging controller.
  static void qcom_battmgr_oplus_init_worker(struct work_struct *work)
  {
  	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr, oplus_init_work.work);
-@@ -1526,6 +1595,29 @@
+@@ -1525,6 +1594,29 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  	size_t payload_len = len - sizeof(struct pmic_glink_hdr);
  	unsigned int val;
  
@@ -148,7 +150,7 @@ This is diagnostic access, not a PPS charging controller.
  	if (opcode == BATTMGR_REQUEST_NOTIFICATION) {
  		if (payload_len != sizeof(__le32)) {
  			battmgr->error = -EMSGSIZE;
-@@ -1667,6 +1759,9 @@
+@@ -1666,6 +1758,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  		case USB_ADAP_TYPE:
  			battmgr->usb.usb_type = le32_to_cpu(resp->intval.value);
  			break;
@@ -158,7 +160,7 @@ This is diagnostic access, not a PPS charging controller.
  		default:
  			dev_warn(battmgr->dev, "unknown property %#x\n", property);
  			battmgr->error = -EOPNOTSUPP;
-@@ -1795,6 +1890,7 @@
+@@ -1794,6 +1889,7 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
  	const struct of_device_id *match;
  	struct qcom_battmgr *battmgr;
  	struct device *dev = &adev->dev;
@@ -166,7 +168,7 @@ This is diagnostic access, not a PPS charging controller.
  	int ret;
  
  	battmgr = devm_kzalloc(dev, sizeof(*battmgr), GFP_KERNEL);
-@@ -1887,6 +1983,23 @@
+@@ -1890,6 +1986,23 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
  
  	pmic_glink_client_register(battmgr->client);
  

@@ -5,10 +5,19 @@ monitor. Amplifiers marked awinic,external-monitor start from the codec
 playback trigger and stay muted until the board has applied per-device
 calibration and DSP vmax limits. A fault mutes all six and stops the PCM
 with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
-
+diff --git a/sound/soc/codecs/aw88261.c b/sound/soc/codecs/aw88261.c
+index db868bd69..f7b4dff59 100644
 --- a/sound/soc/codecs/aw88261.c
 +++ b/sound/soc/codecs/aw88261.c
-@@ -680,6 +680,102 @@ static int aw88261_dev_stop(struct aw_device *aw_dev)
+@@ -9,6 +9,7 @@
+ //
+ 
+ #include <linux/cleanup.h>
++#include <linux/devm-helpers.h>
+ #include <linux/i2c.h>
+ #include <linux/firmware.h>
+ #include <linux/bitops.h>
+@@ -663,6 +664,102 @@ static int aw88261_dev_stop(struct aw_device *aw_dev)
  	return ret;
  }
  
@@ -111,17 +120,14 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  static int aw88261_reg_update(struct aw88261 *aw88261, bool force)
  {
  	struct aw_device *aw_dev = aw88261->aw_pa;
-@@ -728,6 +824,7 @@ static void aw88261_start_pa(struct aw88261 *aw88261)
- 			break;
- 		}
+@@ -715,19 +812,72 @@ static void aw88261_start_pa(struct aw88261 *aw88261)
  	}
+ 	if (ret != 0)
+ 		dev_err(aw88261->aw_pa->dev, "start failure (%d)\n", ret);
 +	aw88261->start_result = ret;
  }
  
- static void aw88261_startup_work(struct work_struct *work)
-@@ -742,12 +839,17 @@ static void aw88261_startup_work(struct work_struct *work)
- 
- static void aw88261_start(struct aw88261 *aw88261, bool sync_start)
+ static void aw88261_start(struct aw88261 *aw88261)
  {
 -	if (aw88261->aw_pa->fw_status != AW88261_DEV_FW_OK)
 +	if (aw88261->aw_pa->fw_status != AW88261_DEV_FW_OK) {
@@ -136,13 +142,19 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
 +	}
  
 +	aw88261->start_result = -EINPROGRESS;
- 	if (sync_start == AW88261_SYNC_START)
- 		aw88261_start_pa(aw88261);
- 	else
-@@ -756,9 +858,42 @@ static void aw88261_start(struct aw88261 *aw88261, bool sync_start)
- 			AW88261_START_WORK_DELAY_MS);
+ 	aw88261_start_pa(aw88261);
  }
  
++static void aw88261_startup_work(struct work_struct *work)
++{
++	struct aw88261 *aw88261 =
++		container_of(work, struct aw88261, start_work.work);
++
++	guard(mutex)(&aw88261->lock);
++	if (aw88261->playback_started && aw88261->start_result == -EINPROGRESS)
++		aw88261_start_pa(aw88261);
++}
++
 +static int aw88261_trigger(struct snd_pcm_substream *substream, int cmd,
 +			   struct snd_soc_dai *dai)
 +{
@@ -158,7 +170,16 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
 +		/* ASoC triggers CPU DAIs first, so the TDM graph is running now. */
 +		mutex_lock(&amp->lock);
 +		amp->playback_started = true;
-+		aw88261_start(amp, AW88261_ASYNC_START);
++		if (amp->aw_pa->fw_status != AW88261_DEV_FW_OK) {
++			amp->start_result = -EINVAL;
++		} else if (amp->aw_pa->status == AW88261_DEV_PW_ON) {
++			amp->start_result = 0;
++		} else {
++			/* Startup polls the PLL and sleeps; keep it out of the trigger. */
++			amp->start_result = -EINPROGRESS;
++			queue_delayed_work(system_dfl_wq, &amp->start_work,
++					   AW88261_START_WORK_DELAY_MS);
++		}
 +		mutex_unlock(&amp->lock);
 +		return 0;
 +	case SNDRV_PCM_TRIGGER_STOP:
@@ -171,48 +192,59 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
 +	}
 +}
 +
-+static const struct snd_soc_dai_ops aw88261_dai_ops = {
+ static int aw88261_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+ {
+ 	struct snd_soc_component *component = dai->component;
+@@ -947,6 +1097,7 @@ static const struct snd_soc_dai_ops aw88261_dai_ops = {
+ 	.set_fmt = aw88261_set_fmt,
+ 	.hw_params = aw88261_hw_params,
+ 	.set_tdm_slot = aw88261_set_tdm_slot,
 +	.trigger = aw88261_trigger,
-+};
-+
+ };
+ 
  static struct snd_soc_dai_driver aw88261_dai[] = {
- 	{
- 		.name = "aw88261-aif",
-+		.ops = &aw88261_dai_ops,
- 		.id = 1,
- 		.playback = {
- 			.stream_name = "Speaker_Playback",
-@@ -1035,9 +1170,15 @@ static int aw88261_playback_event(struct snd_soc_dapm_widget *w,
- 	mutex_lock(&aw88261->lock);
+@@ -1119,12 +1270,21 @@ static int aw88261_playback_event(struct snd_soc_dapm_widget *w,
+ 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+ 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
+ 
++	if (event == SND_SOC_DAPM_POST_PMD)
++		cancel_delayed_work_sync(&aw88261->start_work);
++
+ 	guard(mutex)(&aw88261->lock);
  	switch (event) {
  	case SND_SOC_DAPM_PRE_PMU:
--		aw88261_start(aw88261, AW88261_ASYNC_START);
+-		aw88261_start(aw88261);
 +		aw88261->monitor_audible = false;
 +		if (aw88261->monitor_managed)
 +			aw88261->playback_started = false;
 +		else
-+			aw88261_start(aw88261, AW88261_ASYNC_START);
++			aw88261_start(aw88261);
  		break;
  	case SND_SOC_DAPM_POST_PMD:
 +		aw88261->playback_started = false;
 +		aw88261->start_result = -EPIPE;
- 		ret = aw88261_dev_stop(aw88261->aw_pa);
- 		break;
+ 		return aw88261_dev_stop(aw88261->aw_pa);
  	default:
-@@ -1186,6 +1327,12 @@ static int aw88261_codec_probe(struct snd_soc_component *component)
+ 		break;
+@@ -1269,6 +1429,17 @@ static int aw88261_codec_probe(struct snd_soc_component *component)
+ 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
  	int ret;
  
- 	INIT_DELAYED_WORK(&aw88261->start_work, aw88261_startup_work);
++	ret = devm_delayed_work_autocancel(component->dev, &aw88261->start_work,
++					   aw88261_startup_work);
++	if (ret)
++		return ret;
 +	aw88261->monitor_managed = of_property_read_bool(component->dev->of_node,
 +						      "awinic,external-monitor");
 +	if (aw88261->monitor_managed) {
 +		aw88261->mute_st = 1;
 +		aw88261->aw_pa->volume_desc.ctl_volume = AW88261_MUTE_VOL;
 +	}
- 
++
  	ret = aw88261_request_firmware_file(aw88261);
  	if (ret)
-@@ -1204,6 +1351,9 @@ static int aw88261_codec_probe(struct snd_soc_component *component)
+ 		return dev_err_probe(aw88261->aw_pa->dev, ret,
+@@ -1286,6 +1457,9 @@ static int aw88261_codec_probe(struct snd_soc_component *component)
  	if (ret)
  		return ret;
  
@@ -222,10 +254,12 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  	ret = snd_soc_add_component_controls(component, aw88261_controls,
  							ARRAY_SIZE(aw88261_controls));
  
+diff --git a/sound/soc/codecs/aw88261.h b/sound/soc/codecs/aw88261.h
+index 2e8eab76c..5010481f8 100644
 --- a/sound/soc/codecs/aw88261.h
 +++ b/sound/soc/codecs/aw88261.h
-@@ -460,6 +460,19 @@ struct aw88261 {
- 	unsigned int dither_st;
+@@ -623,6 +623,20 @@ struct aw88261 {
+ 	unsigned int rxr_slotvld_mask;
  
  	bool phase_sync;
 +	bool monitor_managed;
@@ -233,6 +267,7 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
 +	bool playback_started;
 +	/* Protected by lock; -EINPROGRESS only while startup is pending. */
 +	int start_result;
++	struct delayed_work start_work;
  };
  
 +#define AW88261_IPEAK_BITS	0xf000
@@ -244,6 +279,8 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
 +int aw88261_monitor_mute(struct snd_soc_component *component);
 +
  #endif
+diff --git a/sound/soc/qcom/Kconfig b/sound/soc/qcom/Kconfig
+index e6e24f3b9..1ea55e702 100644
 --- a/sound/soc/qcom/Kconfig
 +++ b/sound/soc/qcom/Kconfig
 @@ -195,6 +195,15 @@ config SND_SOC_SM8250
@@ -262,6 +299,8 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  config SND_SOC_SC8280XP
  	tristate "SoC Machine driver for SC8280XP boards"
  	depends on QCOM_APR && SOUNDWIRE
+diff --git a/sound/soc/qcom/Makefile b/sound/soc/qcom/Makefile
+index 985ce2ae2..32842d983 100644
 --- a/sound/soc/qcom/Makefile
 +++ b/sound/soc/qcom/Makefile
 @@ -27,6 +27,7 @@ snd-soc-sc7280-y := sc7280.o
@@ -278,6 +317,9 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  obj-$(CONFIG_SND_SOC_QDSP6) += qdsp6/
 +
 +obj-$(CONFIG_SND_SOC_CAIHONG) += snd-soc-caihong.o
+diff --git a/sound/soc/qcom/caihong.c b/sound/soc/qcom/caihong.c
+new file mode 100644
+index 000000000..674bc2554
 --- /dev/null
 +++ b/sound/soc/qcom/caihong.c
 @@ -0,0 +1,573 @@
@@ -854,9 +896,11 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
 +module_platform_driver(caihong_driver);
 +MODULE_DESCRIPTION("OnePlus Pad 2 ASoC machine driver");
 +MODULE_LICENSE("GPL");
+diff --git a/sound/soc/qcom/qdsp6/audioreach.h b/sound/soc/qcom/qdsp6/audioreach.h
+index c2b466749..db8e7d690 100644
 --- a/sound/soc/qcom/qdsp6/audioreach.h
 +++ b/sound/soc/qcom/qdsp6/audioreach.h
-@@ -56,6 +56,7 @@ struct q6apm_graph;
+@@ -60,6 +60,7 @@ struct q6apm_graph;
  #define APM_CMD_GRAPH_STOP			0x01001003
  #define APM_CMD_GRAPH_CLOSE			0x01001004
  #define APM_CMD_GRAPH_FLUSH			0x01001005
@@ -864,6 +908,8 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  #define APM_CMD_SET_CFG				0x01001006
  #define APM_CMD_GET_CFG				0x01001007
  #define APM_CMD_SHARED_MEM_MAP_REGIONS		0x0100100C
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index f13ce228e..fb43fb659 100644
 --- a/sound/soc/qcom/qdsp6/q6apm.c
 +++ b/sound/soc/qcom/qdsp6/q6apm.c
 @@ -160,6 +160,44 @@ int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
@@ -911,15 +957,15 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  static struct audioreach_graph *q6apm_get_audioreach_graph(struct q6apm *apm, uint32_t graph_id)
  {
  	struct audioreach_graph_info *info;
-@@ -963,6 +1001,7 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+@@ -1081,6 +1119,7 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
  	struct device *dev = &gdev->dev;
  	struct gpr_ibasic_rsp_result_t *result;
  	const struct gpr_hdr *hdr = &data->hdr;
 +	const u32 *words;
+ 	int graph_id, is_pos_buf;
  
  	result = data->payload;
- 
-@@ -990,6 +1029,7 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+@@ -1109,6 +1148,7 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
  		case APM_CMD_GRAPH_FLUSH:
  		case APM_CMD_GRAPH_STOP:
  		case APM_CMD_SET_CFG:
@@ -927,7 +973,7 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  			apm->result.opcode = result->opcode;
  			apm->result.status = result->status;
  			if (result->status)
-@@ -1017,6 +1057,16 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+@@ -1136,6 +1176,16 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
  			break;
  		}
  		break;
@@ -944,9 +990,11 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  	case APM_CMD_RSP_SHARED_MEM_MAP_REGIONS:
  		apm->result.opcode = hdr->opcode;
  		apm->result.status = 0;
+diff --git a/sound/soc/qcom/qdsp6/q6apm.h b/sound/soc/qcom/qdsp6/q6apm.h
+index f985f4b2d..e35f6db63 100644
 --- a/sound/soc/qcom/qdsp6/q6apm.h
 +++ b/sound/soc/qcom/qdsp6/q6apm.h
-@@ -61,6 +61,7 @@ struct q6apm {
+@@ -62,6 +62,7 @@ struct q6apm {
  	struct mutex lock;
  	uint32_t state;
  	uint32_t config_map_handle;
@@ -954,7 +1002,7 @@ with an XRUN. Small runtime module parameters use APM SET_CFG/GET_CFG.
  
  	struct list_head widget_list;
  	struct idr graph_idr;
-@@ -145,6 +146,8 @@ int q6apm_unmap_memory_fixed_region(struct device *dev, unsigned int graph_id);
+@@ -150,6 +151,8 @@ int q6apm_unmap_memory_fixed_region(struct device *dev, unsigned int graph_id);
  /* Helpers */
  int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
  			uint32_t rsp_opcode);

@@ -8,7 +8,8 @@ OEM ACDB SHA256:
 4f7be93ab2744d3f694fb4d4af55919128056a5f60067fa25b42793e89c5ecf1
 
 Scene-0 RX/4322 tuning, defaults for the other modules, tagged TDM framing and
-the RX/feedback control link are unchanged. The appended measured RE and
+the RX/feedback control link are unchanged. The control-link tuple in
+data/42ce.bin uses local tokens 900-904 (Linux 7.3 assigns 270-276 upstream). The appended measured RE and
 rotation records have been removed. The machine driver loads the local
 persist calibration and sends RE for indices 0-3 plus rotation 0 before unmute.
 There are no invented RE records for channels 5/6.

@@ -1,19 +1,9 @@
-Subject: [PATCH] ASoC: qcom: enable secondary TDM playback
+Subject: [PATCH] ASoC: qcom: expose the secondary TDM bit clock
 
-Register the APM LPASS TDM DAIs with the DMA DAI ops and expose the
-secondary TDM bit clock. The Caihong topology supplies the complete TDM
-endpoint configuration.
-
---- a/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
-+++ b/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
-@@ -313,6 +313,7 @@ static int q6apm_lpass_dai_dev_probe(struct platform_device *pdev)
- 
- 	memset(&cfg, 0, sizeof(cfg));
- 	cfg.q6i2s_ops = &q6i2s_ops;
-+	cfg.q6tdm_ops = &q6dma_ops;
- 	cfg.q6dma_ops = &q6dma_ops;
- 	cfg.q6hdmi_ops = &q6hdmi_ops;
- 	dais = q6dsp_audio_ports_set_config(dev, &cfg, &num_dais);
+The Caihong sound card clocks secondary TDM from the internal bit clock.
+The Caihong topology supplies the complete TDM endpoint configuration.
+diff --git a/sound/soc/qcom/qdsp6/q6prm-clocks.c b/sound/soc/qcom/qdsp6/q6prm-clocks.c
+index b4f9abbe0..a907c91b0 100644
 --- a/sound/soc/qcom/qdsp6/q6prm-clocks.c
 +++ b/sound/soc/qcom/qdsp6/q6prm-clocks.c
 @@ -19,6 +19,7 @@
@@ -24,10 +14,12 @@ endpoint configuration.
  	Q6PRM_CLK(LPASS_CLK_ID_PRI_MI2S_IBIT),
  	Q6PRM_CLK(LPASS_CLK_ID_PRI_MI2S_EBIT),
  	Q6PRM_CLK(LPASS_CLK_ID_SEC_MI2S_IBIT),
+diff --git a/sound/soc/qcom/qdsp6/q6prm.h b/sound/soc/qcom/qdsp6/q6prm.h
+index cf619ef65..0bbfeee87 100644
 --- a/sound/soc/qcom/qdsp6/q6prm.h
 +++ b/sound/soc/qcom/qdsp6/q6prm.h
-@@ -84,6 +84,7 @@
- #define Q6PRM_LPASS_CLK_ID_RX_CORE_MCLK2_2X_MCLK 0x318
+@@ -127,6 +127,7 @@
+ #define Q6PRM_LPASS_CLK_ID_VA_QAIF_IF0_EBIT		0x551
  
  #define Q6PRM_LPASS_CLK_SRC_INTERNAL	1
 +#define Q6PRM_LPASS_CLK_ID_SEC_TDM_IBIT	0x202

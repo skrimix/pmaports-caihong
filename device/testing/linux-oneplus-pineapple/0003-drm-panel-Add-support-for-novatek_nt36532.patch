@@ -18,12 +18,11 @@ Signed-off-by: Junjie Cao <caojunjie650@gmail.com>
  drivers/gpu/drm/panel/panel-novatek-nt36532.c | 437 ++++++++++++++++++
  4 files changed, 455 insertions(+)
  create mode 100644 drivers/gpu/drm/panel/panel-novatek-nt36532.c
-
 diff --git a/MAINTAINERS b/MAINTAINERS
-index 0c8281ea4cc6..1394b26269b8 100644
+index f53047aa8..fb0f80747 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -7914,6 +7914,13 @@ T:	git https://gitlab.freedesktop.org/drm/misc/kernel.git
+@@ -8342,6 +8342,13 @@ T:	git https://gitlab.freedesktop.org/drm/misc/kernel.git
  F:	Documentation/devicetree/bindings/display/panel/novatek,nt36523.yaml
  F:	drivers/gpu/drm/panel/panel-novatek-nt36523.c
  
@@ -38,12 +37,12 @@ index 0c8281ea4cc6..1394b26269b8 100644
  M:	Sumit Semwal <sumit.semwal@linaro.org>
  S:	Maintained
 diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
-index 407c5f6a268b..a2ef5be43c96 100644
+index cbdf7b8f7..816063361 100644
 --- a/drivers/gpu/drm/panel/Kconfig
 +++ b/drivers/gpu/drm/panel/Kconfig
-@@ -520,6 +520,16 @@ config DRM_PANEL_NOVATEK_NT36523
- 	  around the Novatek NT36523 display controller, such as some
- 	  Boe panels used in Xiaomi Mi Pad 5 and 5 Pro tablets.
+@@ -675,6 +675,16 @@ config DRM_PANEL_NOVATEK_NT36536
+ 	  display panels, such as the one found in the LENOVO Legion Y700
+ 	  Gen4.
  
 +config DRM_PANEL_NOVATEK_NT36532
 +	tristate "Novatek NT36532-based MIPI-DSI panels"
@@ -57,22 +56,22 @@ index 407c5f6a268b..a2ef5be43c96 100644
 +
  config DRM_PANEL_NOVATEK_NT36672A
  	tristate "Novatek NT36672A DSI panel"
- 	depends on OF
+ 	depends on GPIOLIB
 diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
-index 3615a761b44f..56b4e362890c 100644
+index 3b523cf37..0f920cff7 100644
 --- a/drivers/gpu/drm/panel/Makefile
 +++ b/drivers/gpu/drm/panel/Makefile
-@@ -51,6 +51,7 @@ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT35510) += panel-novatek-nt35510.o
+@@ -64,6 +64,7 @@ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT35532) += panel-novatek-nt35532.o
  obj-$(CONFIG_DRM_PANEL_NOVATEK_NT35560) += panel-novatek-nt35560.o
  obj-$(CONFIG_DRM_PANEL_NOVATEK_NT35950) += panel-novatek-nt35950.o
  obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36523) += panel-novatek-nt36523.o
 +obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36532) += panel-novatek-nt36532.o
+ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36536) += panel-novatek-nt36536.o
  obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36672A) += panel-novatek-nt36672a.o
  obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36672E) += panel-novatek-nt36672e.o
- obj-$(CONFIG_DRM_PANEL_NOVATEK_NT37801) += panel-novatek-nt37801.o
 diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
 new file mode 100644
-index 000000000000..a2f550801f34
+index 000000000..a2f550801
 --- /dev/null
 +++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
 @@ -0,0 +1,437 @@
@@ -513,6 +512,3 @@ index 000000000000..a2f550801f34
 +MODULE_AUTHOR("Junjie Cao <caojunjie650@gmail.com>");
 +MODULE_DESCRIPTION("DRM driver for Novatek NT36532 based MIPI DSI panels");
 +MODULE_LICENSE("GPL");
--- 
-2.48.1
-

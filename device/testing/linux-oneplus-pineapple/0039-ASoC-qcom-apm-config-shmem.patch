@@ -4,7 +4,8 @@ SET_CFG payloads above the APM's 4 KiB in-band buffers are copied to a
 DMA buffer of the PCM DAI device and sent with map/config/unmap. A buffer
 the DSP has not unmapped is leaked rather than freed. Unmap replies now
 report their own opcode, so their waiters no longer time out.
-
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index a83e6bee8..f13ce228e 100644
 --- a/sound/soc/qcom/qdsp6/q6apm.c
 +++ b/sound/soc/qcom/qdsp6/q6apm.c
 @@ -3,6 +3,7 @@
@@ -150,7 +151,7 @@ report their own opcode, so their waiters no longer time out.
  static struct audioreach_graph *q6apm_get_audioreach_graph(struct q6apm *apm, uint32_t graph_id)
  {
  	struct audioreach_graph_info *info;
-@@ -788,6 +906,7 @@ static int apm_probe(gpr_device_t *gdev)
+@@ -906,6 +1024,7 @@ static int apm_probe(gpr_device_t *gdev)
  	dev_set_drvdata(dev, apm);
  
  	mutex_init(&apm->lock);
@@ -158,7 +159,7 @@ report their own opcode, so their waiters no longer time out.
  	apm->dev = dev;
  	apm->gdev = gdev;
  	init_waitqueue_head(&apm->wait);
-@@ -879,12 +998,14 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+@@ -998,12 +1117,14 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
  			wake_up(&apm->wait);
  			break;
  		case APM_CMD_SHARED_MEM_UNMAP_REGIONS:
@@ -176,20 +177,22 @@ report their own opcode, so their waiters no longer time out.
  				info->mem_map_handle = 0;
  			else
  				dev_err(dev, "Error (%d) Processing 0x%08x cmd\n", result->status,
-@@ -902,7 +1023,9 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
- 		rsp = data->payload;
+@@ -1023,7 +1144,9 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 		is_pos_buf = hdr->token & APM_MMAP_TOKEN_MAP_TYPE_POS_BUF;
  
- 		info = idr_find(&apm->graph_info_idr, hdr->token);
--		if (info)
-+		if (hdr->token == APM_CONFIG_TOKEN)
+ 		info = idr_find(&apm->graph_info_idr, graph_id);
+-		if (info) {
++		if (hdr->token == APM_CONFIG_TOKEN) {
 +			apm->config_map_handle = rsp->mem_map_handle;
-+		else if (info)
- 			info->mem_map_handle = rsp->mem_map_handle;
- 		else
- 			dev_err(dev, "Error (%d) Processing 0x%08x cmd\n", result->status,
++		} else if (info) {
+ 			if (is_pos_buf)
+ 				info->pos_buf_mem_map_handle = rsp->mem_map_handle;
+ 			else
+diff --git a/sound/soc/qcom/qdsp6/q6apm.h b/sound/soc/qcom/qdsp6/q6apm.h
+index 5cb51ca49..f985f4b2d 100644
 --- a/sound/soc/qcom/qdsp6/q6apm.h
 +++ b/sound/soc/qcom/qdsp6/q6apm.h
-@@ -60,6 +60,7 @@ struct q6apm {
+@@ -61,6 +61,7 @@ struct q6apm {
  	struct mutex cmd_lock;
  	struct mutex lock;
  	uint32_t state;

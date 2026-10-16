@@ -1,14 +1,16 @@
---- fakesrc/drivers/power/supply/qcom_battmgr.c.orig	2026-08-31 11:58:15.947587577 +0200
-+++ fakesrc/drivers/power/supply/qcom_battmgr.c	2026-08-31 11:57:30.686078794 +0200
-@@ -5,6 +5,7 @@
-  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 7716eb9e1..747fb719c 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -6,6 +6,7 @@
   */
  #include <linux/auxiliary_bus.h>
+ #include <linux/devm-helpers.h>
 +#include <linux/jiffies.h>
  #include <linux/module.h>
  #include <linux/mutex.h>
  #include <linux/nvmem-consumer.h>
-@@ -103,6 +104,34 @@
+@@ -104,6 +105,34 @@ enum qcom_battmgr_variant {
  #define CHARGE_CTRL_END_THR_MIN		55
  #define CHARGE_CTRL_END_THR_MAX		100
  #define CHARGE_CTRL_DELTA_SOC		5
@@ -43,7 +45,7 @@
  
  struct qcom_battmgr_enable_request {
  	struct pmic_glink_hdr hdr;
-@@ -332,6 +361,12 @@
+@@ -333,6 +362,12 @@ struct qcom_battmgr {
  	struct qcom_battmgr_wireless wireless;
  
  	struct work_struct enable_work;
@@ -56,7 +58,7 @@
  
  	/*
  	 * @lock is used to prevent concurrent power supply requests to the
-@@ -1187,6 +1222,98 @@
+@@ -1188,6 +1223,98 @@ static const struct power_supply_desc sm8350_wls_psy_desc = {
  	.get_property = qcom_battmgr_wls_get_property,
  };
  
@@ -155,7 +157,7 @@
  static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  				      const struct qcom_battmgr_message *msg,
  				      int len)
-@@ -1216,6 +1343,48 @@
+@@ -1217,6 +1344,48 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  	case NOTIF_WLS_PROPERTY:
  		power_supply_changed(battmgr->wls_psy);
  		break;
@@ -204,10 +206,10 @@
  	default:
  		dev_err(battmgr->dev, "unknown notification: %#x\n", notification);
  		break;
-@@ -1649,6 +1818,12 @@
+@@ -1649,6 +1818,12 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 	psy_cfg_supply.supplied_to = qcom_battmgr_battery;
  	psy_cfg_supply.num_supplicants = 1;
  
- 	INIT_WORK(&battmgr->enable_work, qcom_battmgr_enable_worker);
 +	// Initialize OnePlus specific worker thread
 +	INIT_WORK(&battmgr->oplus_otg_work, qcom_battmgr_oplus_otg_worker);
 +	INIT_WORK(&battmgr->oplus_update_usb_state_work, qcom_battmgr_oplus_update_usb_state_worker);
@@ -217,7 +219,7 @@
  	mutex_init(&battmgr->lock);
  	init_completion(&battmgr->ack);
  
-@@ -1720,6 +1895,7 @@
+@@ -1725,6 +1900,7 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
  
  	pmic_glink_client_register(battmgr->client);
  

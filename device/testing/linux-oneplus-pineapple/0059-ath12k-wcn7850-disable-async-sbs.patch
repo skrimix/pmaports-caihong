@@ -13,10 +13,10 @@ on one MAC. Log a rejected configuration.
 
 ---
 diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
-index 85f9c9e..255ea47 100644
+index 754e939c7..38335fdb8 100644
 --- a/drivers/net/wireless/ath/ath12k/core.c
 +++ b/drivers/net/wireless/ath/ath12k/core.c
-@@ -969,6 +969,21 @@ static int ath12k_core_start(struct ath12k_base *ab)
+@@ -949,6 +949,21 @@ static int ath12k_core_start(struct ath12k_base *ab)
  		}
  	}
  
@@ -39,10 +39,10 @@ index 85f9c9e..255ea47 100644
  	if (ret) {
  		ath12k_err(ab, "failed to send htt version request message: %d\n",
 diff --git a/drivers/net/wireless/ath/ath12k/wmi.c b/drivers/net/wireless/ath/ath12k/wmi.c
-index b5e904a..a732a00 100644
+index d5160af60..95435dbb3 100644
 --- a/drivers/net/wireless/ath/ath12k/wmi.c
 +++ b/drivers/net/wireless/ath/ath12k/wmi.c
-@@ -380,6 +380,9 @@ static int ath12k_pull_svc_ready_ext(struct ath12k_wmi_pdev *wmi_handle,
+@@ -447,6 +447,9 @@ static int ath12k_pull_svc_ready_ext(struct ath12k_wmi_pdev *wmi_handle,
  	arg->default_conc_scan_config_bits =
  		le32_to_cpu(ev->default_conc_scan_config_bits);
  	arg->default_fw_config_bits = le32_to_cpu(ev->default_fw_config_bits);
@@ -52,7 +52,7 @@ index b5e904a..a732a00 100644
  	arg->he_cap_info = le32_to_cpu(ev->he_cap_info);
  	arg->mpdu_density = le32_to_cpu(ev->mpdu_density);
  	arg->max_bssid_rx_filters = le32_to_cpu(ev->max_bssid_rx_filters);
-@@ -4267,6 +4270,57 @@ int ath12k_wmi_set_hw_mode(struct ath12k_base *ab,
+@@ -4420,6 +4423,57 @@ int ath12k_wmi_set_hw_mode(struct ath12k_base *ab,
  	return ret;
  }
  
@@ -110,9 +110,9 @@ index b5e904a..a732a00 100644
  int ath12k_wmi_cmd_init(struct ath12k_base *ab)
  {
  	struct ath12k_dp *dp = ath12k_ab_to_dp(ab);
-@@ -9954,6 +10008,9 @@ static void ath12k_wmi_op_rx(struct ath12k_base *ab, struct sk_buff *skb)
- 	case WMI_OBSS_COLOR_COLLISION_DETECTION_EVENTID:
- 		ath12k_wmi_obss_color_collision_event(ab, skb);
+@@ -10462,6 +10516,9 @@ static void ath12k_wmi_op_rx(struct ath12k_base *ab, struct sk_buff *skb)
+ 	case WMI_DCS_INTERFERENCE_EVENTID:
+ 		ath12k_wmi_dcs_interference_event(ab, skb);
  		break;
 +	case WMI_PDEV_SET_MAC_CONFIG_RESP_EVENTID:
 +		ath12k_wmi_pdev_set_mac_config_resp_event(ab, skb);
@@ -121,10 +121,10 @@ index b5e904a..a732a00 100644
  	case WMI_TBTTOFFSET_EXT_UPDATE_EVENTID:
  	case WMI_PEER_OPER_MODE_CHANGE_EVENTID:
 diff --git a/drivers/net/wireless/ath/ath12k/wmi.h b/drivers/net/wireless/ath/ath12k/wmi.h
-index 5ba9b7d..6f936d1 100644
+index b508aa759..c6a3d7152 100644
 --- a/drivers/net/wireless/ath/ath12k/wmi.h
 +++ b/drivers/net/wireless/ath/ath12k/wmi.h
-@@ -2518,6 +2518,21 @@ struct ath12k_wmi_pdev_set_hw_mode_cmd {
+@@ -2549,6 +2549,21 @@ struct ath12k_wmi_pdev_set_hw_mode_cmd {
  	__le32 num_band_to_mac;
  } __packed;
  
@@ -146,7 +146,7 @@ index 5ba9b7d..6f936d1 100644
  struct ath12k_wmi_ppe_threshold_params {
  	__le32 numss_m1; /** NSS - 1*/
  	__le32 ru_info;
-@@ -5258,6 +5273,8 @@ struct ath12k_wmi_base {
+@@ -5418,6 +5433,8 @@ struct ath12k_wmi_base {
  	struct ath12k_svc_ext_info svc_ext_info;
  	u32 sbs_lower_band_end_freq;
  	struct ath12k_hw_mode_info hw_mode_info;
@@ -155,7 +155,7 @@ index 5ba9b7d..6f936d1 100644
  
  	u8 dp_peer_meta_data_ver;
  };
-@@ -6501,6 +6518,8 @@ int ath12k_wmi_fils_discovery(struct ath12k *ar, u32 vdev_id, u32 interval,
+@@ -6661,6 +6678,8 @@ int ath12k_wmi_fils_discovery(struct ath12k *ar, u32 vdev_id, u32 interval,
  			      bool unsol_bcast_probe_resp_enabled);
  int ath12k_wmi_probe_resp_tmpl(struct ath12k *ar, u32 vdev_id,
  			       struct sk_buff *tmpl);

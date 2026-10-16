@@ -3,11 +3,12 @@ Subject: [PATCH] Input: novatek-nt36532 - recover firmware watchdog resets
 Recognize the OEM six-byte FD/FE signature before the touch checksum and
 reload cached firmware after four consecutive reports. Clear contacts and
 perform the OEM idle reset for FE reports. Keep IRQ reads, firmware loads,
-panel transitions, the async start worker and sysfs reloads serialized;
-enable the IRQ only with firmware running and drain it before releasing
-the cached firmware on removal. Stop IRQ processing on recovery failure
-instead of reading an unknown page; force_fw_reload restarts it.
-
+panel transitions and the async start worker serialized; enable the IRQ
+only with firmware running and drain it before releasing the cached
+firmware on removal. Stop IRQ processing on recovery failure instead of
+reading an unknown page; the next panel enable restarts it.
+diff --git a/drivers/input/touchscreen/novatek_nt36532_ts.c b/drivers/input/touchscreen/novatek_nt36532_ts.c
+index ce9a71176..b91a7c983 100644
 --- a/drivers/input/touchscreen/novatek_nt36532_ts.c
 +++ b/drivers/input/touchscreen/novatek_nt36532_ts.c
 @@ -14,6 +14,7 @@
@@ -253,29 +254,7 @@ instead of reading an unknown page; force_fw_reload restarts it.
  
      return 0;
  }
-@@ -1855,14 +1937,14 @@ static ssize_t force_fw_reload_store(struct device *dev, struct device_attribute
- 
-     dev_info(dev, "Manual firmware reload triggered via sysfs\n");
- 
--    disable_irq_nosync(ts->spi->irq);
--    novatek_ts_power_on(ts);
--
--    ret = novatek_fw_load(ts);
--    if (ret)
-+    mutex_lock(&ts->lock);
-+    novatek_ts_stop(ts);
-+    ret = novatek_ts_start(ts);
-+    mutex_unlock(&ts->lock);
-+    if (ret) {
-         dev_err(dev, "Manual fw reload failed: %d\n", ret);
--
--    enable_irq(ts->spi->irq);
-+        return ret;
-+    }
- 
-     return count;
- }
-@@ -1887,6 +1969,7 @@ static int novatek_ts_probe(struct spi_device* spi)
+@@ -1864,6 +1946,7 @@ static int novatek_ts_probe(struct spi_device* spi)
      if (!ts)
          return -ENOMEM;
  
@@ -283,8 +262,8 @@ instead of reading an unknown page; force_fw_reload restarts it.
      ts->spi = spi;
      ts->max_touches = NVT_TS_MAX_TOUCHES;
      spi_set_drvdata(spi, ts);
-@@ -1975,10 +2058,11 @@ static void novatek_ts_remove(struct spi_device* spi)
-     device_remove_file(&spi->dev, &dev_attr_force_fw_reload);
+@@ -1947,10 +2030,11 @@ static void novatek_ts_remove(struct spi_device* spi)
+ 
      drm_panel_remove_follower(&ts->panel_follower);
      cancel_work_sync(&ts->fw_load_work);
 -

@@ -4,10 +4,11 @@ Copy module configuration arrays at their byte size, send them without
 the private-data header and let them replace generated defaults. Load
 effect widgets and ignore output ports beyond the stored links; the OEM
 splitter declares 20.
-
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index cce0ad31f..4dafd8215 100644
 --- a/sound/soc/qcom/qdsp6/audioreach.c
 +++ b/sound/soc/qcom/qdsp6/audioreach.c
-@@ -817,7 +817,8 @@ static int audioreach_set_module_config(struct q6apm_graph *graph,
+@@ -837,7 +837,8 @@ static int audioreach_set_module_config(struct q6apm_graph *graph,
  					const struct audioreach_module *module,
  					const struct audioreach_module_config *cfg)
  {
@@ -17,7 +18,7 @@ splitter declares 20.
  	void *p;
  
  	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
-@@ -1318,6 +1319,10 @@ int audioreach_set_media_format(struct q6apm_graph *graph,
+@@ -1470,6 +1471,10 @@ int audioreach_set_media_format(struct q6apm_graph *graph,
  {
  	int rc;
  
@@ -28,6 +29,8 @@ splitter declares 20.
  	switch (module->module_id) {
  	case MODULE_ID_DATA_LOGGING:
  		rc = audioreach_module_enable(graph, module, true);
+diff --git a/sound/soc/qcom/qdsp6/topology.c b/sound/soc/qcom/qdsp6/topology.c
+index faafbc5c0..00acf6d72 100644
 --- a/sound/soc/qcom/qdsp6/topology.c
 +++ b/sound/soc/qcom/qdsp6/topology.c
 @@ -317,13 +317,11 @@ audioreach_get_module_priv_data(const struct snd_soc_tplg_private *private)
@@ -56,8 +59,7 @@ splitter declares 20.
  			if (src_mod_op_port_id[pn] && dst_mod_inst_id[pn] &&
  			    dst_mod_ip_port_id[pn]) {
  				mod->src_mod_op_port_id[id] = src_mod_op_port_id[pn];
-@@ -610,7 +609,14 @@ static int audioreach_widget_load_module_common(struct snd_soc_component *compon
- 	if (IS_ERR_OR_NULL(mod))
+@@ -611,6 +610,13 @@ static int audioreach_widget_load_module_common(struct snd_soc_component *compon
  		return mod ? PTR_ERR(mod) : -ENODEV;
  
  	mod->data = audioreach_get_module_priv_data(&tplg_w->priv);
@@ -71,7 +73,7 @@ splitter declares 20.
  
  	dobj = &w->dobj;
  	dobj->private = mod;
-@@ -929,6 +935,8 @@ static int audioreach_widget_ready(struct snd_soc_component *component,
+@@ -1032,6 +1038,8 @@ static int audioreach_widget_ready(struct snd_soc_component *component,
  	case snd_soc_dapm_buffer:
  		audioreach_widget_load_buffer(component, index, w, tplg_w);
  		break;
