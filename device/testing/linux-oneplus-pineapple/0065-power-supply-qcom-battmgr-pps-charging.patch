@@ -7,14 +7,16 @@ battery is eligible, the observed fixed 5 V / input suspend / voltage ramp
 / staggered pump start sequence, the board's SOC and temperature curves,
 high-temperature ladder, full checks and timeout, and the OEM gauge,
 connector, battery current and input current limits. Sessions stop before
-suspend, reboot and OTG changes.
+suspend, reboot and OTG changes. While a session holds the PMIC charger's
+input suspended, the firmware reports Not charging; report Charging
+instead, as the OEM's own status policy does.
 
 Enabled by oneplus,charge-pumps on the pmic-glink node. sysfs pps_charging
 switches it off and on; debugfs pps_control shows the session and accepts
 "stop", and pps_limit_ma caps the current at 1000-5000 mA.
 
 diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
-index 14be957..97e0b87 100644
+index 14be95799..5b72e76b0 100644
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
 @@ -6,6 +6,8 @@
@@ -144,7 +146,21 @@ index 14be957..97e0b87 100644
  	    opcode == BATTMGR_USB_PROPERTY_GET ||
  	    opcode == BATTMGR_USB_PROPERTY_SET ||
  	    opcode == BATTMGR_WLS_PROPERTY_GET)
-@@ -1433,6 +1505,1330 @@ static int qcom_battmgr_pps_status_show(struct seq_file *seq, void *unused)
+@@ -769,6 +841,13 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_STATUS:
+ 		val->intval = battmgr->status.status;
++		/*
++		 * A PPS session suspends the PMIC charger's input, which then
++		 * reports Not charging while the charge pumps charge the battery.
++		 */
++		if (val->intval == POWER_SUPPLY_STATUS_NOT_CHARGING &&
++		    READ_ONCE(battmgr->pps.suspended))
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
+ 		val->intval = battmgr->info.charge_type;
+@@ -1433,6 +1512,1330 @@ static int qcom_battmgr_pps_status_show(struct seq_file *seq, void *unused)
  }
  DEFINE_SHOW_ATTRIBUTE(qcom_battmgr_pps_status);
  
@@ -1475,7 +1491,7 @@ index 14be957..97e0b87 100644
  static void qcom_battmgr_remove_debugfs(void *data)
  {
  	debugfs_remove_recursive(data);
-@@ -1454,6 +2850,8 @@ out:
+@@ -1454,6 +2857,8 @@ static void qcom_battmgr_oplus_init_worker(struct work_struct *work)
  	if (ret)
  		dev_err(battmgr->dev, "OnePlus Type-C initialization failed: %d\n", ret);
  	mutex_unlock(&battmgr->lock);
@@ -1484,7 +1500,7 @@ index 14be957..97e0b87 100644
  }
  
  static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
-@@ -1462,6 +2860,8 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
+@@ -1462,6 +2867,8 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
  	bool enable = battmgr->oplus_otg_state;
  	int ret;
  
@@ -1493,7 +1509,7 @@ index 14be957..97e0b87 100644
  	mutex_lock(&battmgr->lock);
  	if (enable) {
  		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
-@@ -1552,6 +2952,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+@@ -1552,6 +2959,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  		power_supply_changed(battmgr->bat_psy);
  		break;
  	case NOTIF_USB_PROPERTY:
@@ -1501,7 +1517,7 @@ index 14be957..97e0b87 100644
  		power_supply_changed(battmgr->usb_psy);
  		break;
  	case NOTIF_WLS_PROPERTY:
-@@ -1573,6 +2974,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+@@ -1573,6 +2981,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  	case NOTIF_OPLUS_TYPEC_STATE_CHANGE:
  		dev_info(battmgr->dev, "OnePlus state change notification: %#x, updating usb state\n", notification);
  		schedule_work(&battmgr->oplus_update_usb_state_work);
@@ -1509,7 +1525,7 @@ index 14be957..97e0b87 100644
  		power_supply_changed(battmgr->usb_psy);
  		power_supply_changed(battmgr->bat_psy);
  		break;
-@@ -1822,6 +3224,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+@@ -1822,6 +3231,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  	battmgr->error = 0;
  
  	switch (opcode) {
@@ -1517,7 +1533,7 @@ index 14be957..97e0b87 100644
  	case BATTMGR_USB_PROPERTY_SET:
  		/* The reply value is not a readback of the requested setting. */
  		break;
-@@ -1926,6 +3329,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+@@ -1926,6 +3336,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  		case OPLUS_USB_PPS_STATUS:
  			battmgr->pps_status = le32_to_cpu(resp->intval.value);
  			break;
@@ -1527,7 +1543,7 @@ index 14be957..97e0b87 100644
  		default:
  			dev_warn(battmgr->dev, "unknown property %#x\n", property);
  			battmgr->error = -EOPNOTSUPP;
-@@ -2027,6 +3433,8 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
+@@ -2027,6 +3440,8 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
  	if (state == SERVREG_SERVICE_STATE_UP) {
  		battmgr->service_up = true;
  		schedule_work(&battmgr->enable_work);
@@ -1536,7 +1552,7 @@ index 14be957..97e0b87 100644
  	} else {
  		battmgr->service_up = false;
  	}
-@@ -2177,6 +3585,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+@@ -2177,6 +3592,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
  					   &qcom_battmgr_pps_status_fops);
  		if (IS_ERR(file))
  			return dev_err_probe(dev, PTR_ERR(file), "failed to create PPS status diagnostic\n");

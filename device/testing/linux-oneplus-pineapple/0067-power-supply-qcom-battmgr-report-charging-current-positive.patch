@@ -1,0 +1,28 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] power: supply: qcom_battmgr: report charging current as positive
+
+The Pad 2 battery firmware reports BATT_CURR_NOW as negative while
+charging: under Android, Oplus's battery supply passes the same sign
+through, and negative current accompanies a rising charge counter. The
+power-supply ABI defines current_now as positive while charging, and
+upower treats a negative current on a non-full battery as discharging
+regardless of status, so desktops showed "Discharging" while charging.
+
+Negate the value in the battery property only. The PPS controller keeps
+reading the raw firmware sign.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -870,7 +870,11 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 		val->intval = battmgr->status.voltage_ocv;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_NOW:
+-		val->intval = battmgr->status.current_now;
++		/*
++		 * The firmware reports charging current as negative; the
++		 * power-supply ABI defines it as positive.
++		 */
++		val->intval = -battmgr->status.current_now;
+ 		break;
+ 	case POWER_SUPPLY_PROP_POWER_NOW:
+ 		val->intval = battmgr->status.power_now;

@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.1
-pkgrel=126
+pkgrel=128
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -96,6 +96,7 @@ source="
 	0064-power-supply-sc8547a-charge-pump-driver.patch
 	0065-power-supply-qcom-battmgr-pps-charging.patch
 	0066-arm64-dts-qcom-caihong-pps-charging.patch
+	0067-power-supply-qcom-battmgr-report-charging-current-positive.patch
 	dummy-dtbo.dtso
 	$_config
 "
@@ -193,8 +194,9 @@ f99bab3fbb9f2a12d5de15e669b0e111c11e756f731a1a634931e6f5435fe8834898a2cc534fe1e9
 d343470c9d1dd0b488aec488b929400d7e61663b75a7325b41fbdc42832fc9a308d73ecca010f05b10949f4894a038e309a0fb8a50ba85d240a16497a97bad5d  0062-pstore-ram-dynamic-reserved-memory.patch
 0e9618d23b7a48315afb638c407ca051a29749a6a176da58093659895bff99349f08ffd087336619dd819ce7f4ea007c1fc9cf9a2eda978531d87d08b5a4615a  0063-ath12k-rate-limit-11d-scans.patch
 28d05cb212f8d358c595897bb0734e36399ca60ee2cbb9e0babf828b6034acdcf389fe6344dd42504e66f6d01b1df71e8a5d2ef467ee27184ec0bc7aa959215a  0064-power-supply-sc8547a-charge-pump-driver.patch
-19da0472ed92380a05244a375ddd5bc492c80f919a2df8c776b27a22f79d1334fa5b6eef706674ae041deea7c003854e812edb1c4d8f66ec66ef4c5f3c69032c  0065-power-supply-qcom-battmgr-pps-charging.patch
+c690c9d5fd50454d7c7adc0bcd828b0a46b468b919d0bc37489bc0ed4f21c80b0a40e132228ab9ea119bb62c7bd6d64f28264c7cd1f08326e505f7ce3f988320  0065-power-supply-qcom-battmgr-pps-charging.patch
 236c9a522325030e6d19731e9c8cd63476fb495b9d52989a46ed23650e539e54649c3d8e10aaec819c6da2c16dcc91ddcc57081cf3c28ba32a36d11c0782e2de  0066-arm64-dts-qcom-caihong-pps-charging.patch
+8f27ac78244f2807177e657cb6056d08e20b8f3121d4d28809222a9b31d473df5d877369b77b3ce77c24f250e01f0b5336260a4a3ef17a5e33bccce7a4d1468a  0067-power-supply-qcom-battmgr-report-charging-current-positive.patch
 0ac8756d96b4e84bb0f885c5f68804274844af8f69f08f6e5657905a673bbf3d511893abf705b1ef5e453d8674475afbc9cfb83f4f25f69ae753b1f057c592f0  dummy-dtbo.dtso
 4aabb75b10d3c6a8a09a90668bc2cf37b4d6c8ebc6bed1d3693ccf5c4b8de57510231d21cb1d2925dad2c2a989f68f9afa35d68dc952cf7e7614c4605f8f5d58  config-oneplus-pineapple.aarch64
 "
