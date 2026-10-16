@@ -1,0 +1,696 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] power: supply: add SouthChip SC8547A charge pump driver
+
+Report the ADC of the OnePlus Pad 2's two SC8547A charge pumps through IIO
+and their state through debugfs, and export the register sequences the
+Android OEM driver uses for 2:1 PPS charging (prepare, switch, UCP
+restore, stop, sample and flag reads) to the qcom_battmgr PPS policy.
+Probe only reads the device; nothing switches the pumps on its own.
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index 83392ed..36fc77f 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -839,6 +839,18 @@ config CHARGER_BQ25980
+ 	  Say Y to enable support for the TI BQ25980, BQ25975 and BQ25960
+ 	  series of fast battery chargers.
+ 
++config CHARGER_SC8547A
++	tristate "SouthChip SC8547A charge pump driver"
++	depends on I2C
++	depends on IIO
++	select REGMAP_I2C
++	help
++	  Say Y to report the ADC and status of SouthChip SC8547A charge
++	  pumps, as used on the OnePlus Pad 2, and to let the Qualcomm
++	  battery manager's PPS controller switch them. The controller can
++	  only reach the pumps when this driver is built in or the battery
++	  manager is a module.
++
+ config CHARGER_BQ256XX
+ 	tristate "TI BQ256XX battery charger driver"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 7ee839d..2639057 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -105,6 +105,7 @@ obj-$(CONFIG_CHARGER_BQ2515X)	+= bq2515x_charger.o
+ obj-$(CONFIG_CHARGER_BQ257XX)	+= bq257xx_charger.o
+ obj-$(CONFIG_CHARGER_BQ25890)	+= bq25890_charger.o
+ obj-$(CONFIG_CHARGER_BQ25980)	+= bq25980_charger.o
++obj-$(CONFIG_CHARGER_SC8547A)	+= sc8547a_charger.o
+ obj-$(CONFIG_CHARGER_BQ256XX)	+= bq256xx_charger.o
+ obj-$(CONFIG_CHARGER_RK817)	+= rk817_charger.o
+ obj-$(CONFIG_CHARGER_SMB347)	+= smb347-charger.o
+diff --git a/drivers/power/supply/sc8547a_charger.c b/drivers/power/supply/sc8547a_charger.c
+new file mode 100644
+index 0000000..9b482f9
+--- /dev/null
++++ b/drivers/power/supply/sc8547a_charger.c
+@@ -0,0 +1,589 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * SouthChip SC8547A charge pump.
++ *
++ * Reports the chip's ADC through IIO and its state through debugfs. Probe
++ * only reads the device ID and status; the ADC is switched on or off
++ * through debugfs. Switching is controlled only by the OnePlus Pad 2 PPS
++ * controller in qcom_battmgr, through the functions exported below.
++ *
++ * Register layout and ADC scaling follow the OnePlus/Oplus vendor driver
++ * (oplus_sc8547.h). Reading 0x07 services the chip watchdog, and several
++ * registers hold flag bits that may clear on read; probe logs the first
++ * values it reads.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/debugfs.h>
++#include <linux/i2c.h>
++#include <linux/iio/iio.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/of.h>
++#include <linux/power/sc8547a.h>
++#include <linux/regmap.h>
++#include <linux/seq_file.h>
++
++#define SC8547A_REG_STATUS		0x06
++#define SC8547A_SWITCHING		BIT(2)
++#define SC8547A_REG_CTRL		0x07
++#define SC8547A_CHG_EN			BIT(7)
++#define SC8547A_REG_MODE		0x09
++#define SC8547A_MODE_BYPASS		BIT(7)
++#define SC8547A_WATCHDOG		GENMASK(2, 0)
++#define SC8547A_REG_PROT_STAT		0x0e
++#define SC8547A_REG_PROT_FLAG		0x0f
++#define SC8547A_REG_ADC_CTRL		0x11
++#define SC8547A_ADC_EN			BIT(7)
++#define SC8547A_REG_IBUS		0x13
++#define SC8547A_REG_VBUS		0x15
++#define SC8547A_REG_VAC			0x17
++#define SC8547A_REG_VOUT		0x19
++#define SC8547A_REG_VBAT		0x1b
++#define SC8547A_REG_TDIE		0x1f
++#define SC8547A_REG_DEVICE_ID		0x36
++#define SC8547A_DEVICE_ID		0x67
++
++/* Vendor driver values for 0x11: continuous conversion, or off. */
++#define SC8547A_ADC_CTRL_ON		0x80
++#define SC8547A_ADC_CTRL_OFF		0x00
++
++struct sc8547a {
++	struct i2c_client *client;
++	struct regmap *regmap;
++};
++
++enum sc8547a_adc {
++	SC8547A_ADC_VBUS,
++	SC8547A_ADC_VAC,
++	SC8547A_ADC_VOUT,
++	SC8547A_ADC_VBAT,
++	SC8547A_ADC_IBUS,
++	SC8547A_ADC_TDIE,
++};
++
++static const struct {
++	const char *label;
++	u8 reg;
++	u8 high_mask;
++	int scale;		/* mV, mA or milli-degrees C per LSB */
++	int scale_micro;
++} sc8547a_adc_info[] = {
++	[SC8547A_ADC_VBUS] = { "vbus", SC8547A_REG_VBUS, 0x0f, 3, 750000 },
++	[SC8547A_ADC_VAC]  = { "vac",  SC8547A_REG_VAC,  0x0f, 5, 0 },
++	[SC8547A_ADC_VOUT] = { "vout", SC8547A_REG_VOUT, 0x0f, 1, 250000 },
++	[SC8547A_ADC_VBAT] = { "vbat", SC8547A_REG_VBAT, 0x0f, 1, 250000 },
++	[SC8547A_ADC_IBUS] = { "ibus", SC8547A_REG_IBUS, 0x0f, 1, 875000 },
++	[SC8547A_ADC_TDIE] = { "tdie", SC8547A_REG_TDIE, 0x01, 500, 0 },
++};
++
++#define SC8547A_CHAN(_type, _index, _adc) {				\
++	.type = _type,							\
++	.indexed = 1,							\
++	.channel = _index,						\
++	.address = _adc,						\
++	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |			\
++			      BIT(IIO_CHAN_INFO_SCALE),			\
++}
++
++static const struct iio_chan_spec sc8547a_channels[] = {
++	SC8547A_CHAN(IIO_VOLTAGE, 0, SC8547A_ADC_VBUS),
++	SC8547A_CHAN(IIO_VOLTAGE, 1, SC8547A_ADC_VAC),
++	SC8547A_CHAN(IIO_VOLTAGE, 2, SC8547A_ADC_VOUT),
++	SC8547A_CHAN(IIO_VOLTAGE, 3, SC8547A_ADC_VBAT),
++	SC8547A_CHAN(IIO_CURRENT, 0, SC8547A_ADC_IBUS),
++	SC8547A_CHAN(IIO_TEMP, 0, SC8547A_ADC_TDIE),
++};
++
++static int sc8547a_adc_enabled(struct sc8547a *sc)
++{
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(sc->regmap, SC8547A_REG_ADC_CTRL, &val);
++	if (ret)
++		return ret;
++
++	return !!(val & SC8547A_ADC_EN);
++}
++
++static int sc8547a_read_raw(struct iio_dev *indio_dev,
++			    const struct iio_chan_spec *chan,
++			    int *val, int *val2, long mask)
++{
++	struct sc8547a *sc = iio_priv(indio_dev);
++	unsigned int adc = chan->address;
++	u8 buf[2];
++	int ret;
++
++	switch (mask) {
++	case IIO_CHAN_INFO_RAW:
++		ret = sc8547a_adc_enabled(sc);
++		if (ret < 0)
++			return ret;
++		if (!ret)
++			return -ENODATA;
++
++		ret = regmap_bulk_read(sc->regmap, sc8547a_adc_info[adc].reg,
++				       buf, sizeof(buf));
++		if (ret)
++			return ret;
++
++		*val = (buf[0] & sc8547a_adc_info[adc].high_mask) << 8 | buf[1];
++		return IIO_VAL_INT;
++	case IIO_CHAN_INFO_SCALE:
++		*val = sc8547a_adc_info[adc].scale;
++		*val2 = sc8547a_adc_info[adc].scale_micro;
++		return IIO_VAL_INT_PLUS_MICRO;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int sc8547a_read_label(struct iio_dev *indio_dev,
++			      const struct iio_chan_spec *chan, char *label)
++{
++	return sysfs_emit(label, "%s\n", sc8547a_adc_info[chan->address].label);
++}
++
++static int sc8547a_reg_access(struct iio_dev *indio_dev, unsigned int reg,
++			      unsigned int writeval, unsigned int *readval)
++{
++	struct sc8547a *sc = iio_priv(indio_dev);
++
++	if (!readval)
++		return -EPERM;
++
++	return regmap_read(sc->regmap, reg, readval);
++}
++
++static const struct iio_info sc8547a_iio_info = {
++	.read_raw = sc8547a_read_raw,
++	.read_label = sc8547a_read_label,
++	.debugfs_reg_access = sc8547a_reg_access,
++};
++
++static const char * const sc8547a_prot_names[] = {
++	"vbat_insert", "adapter_insert", "ibus_ucp_fall", "ibus_ocp",
++	"vbus_ovp", "ibat_ocp", "vbat_ovp", "vout_ovp",
++};
++
++static void sc8547a_show_bits(struct seq_file *s, const char *name,
++			      unsigned int val)
++{
++	int i;
++
++	seq_printf(s, "%s: 0x%02x", name, val);
++	for (i = 0; i < ARRAY_SIZE(sc8547a_prot_names); i++)
++		if (val & BIT(i))
++			seq_printf(s, " %s", sc8547a_prot_names[i]);
++	seq_putc(s, '\n');
++}
++
++static int sc8547a_status_show(struct seq_file *s, void *unused)
++{
++	static const char * const wd[] = {
++		"off", "200ms", "500ms", "1s", "5s", "30s", "6", "7",
++	};
++	struct sc8547a *sc = s->private;
++	unsigned int status, ctrl, mode, stat, flag, adc;
++	int ret;
++
++	ret = regmap_read(sc->regmap, SC8547A_REG_STATUS, &status) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_CTRL, &ctrl) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_MODE, &mode) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_PROT_STAT, &stat) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_PROT_FLAG, &flag) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_ADC_CTRL, &adc);
++	if (ret)
++		return ret;
++
++	seq_printf(s, "chg_en: %d (0x07=0x%02x)\n",
++		   !!(ctrl & SC8547A_CHG_EN), ctrl);
++	seq_printf(s, "switching: %d (0x06=0x%02x)\n",
++		   !!(status & SC8547A_SWITCHING), status);
++	seq_printf(s, "mode: %s watchdog: %s (0x09=0x%02x)\n",
++		   mode & SC8547A_MODE_BYPASS ? "bypass" : "2:1",
++		   wd[FIELD_GET(SC8547A_WATCHDOG, mode)], mode);
++	seq_printf(s, "adc: %d (0x11=0x%02x)\n", !!(adc & SC8547A_ADC_EN), adc);
++	sc8547a_show_bits(s, "stat", stat);
++	sc8547a_show_bits(s, "flag", flag);
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(sc8547a_status);
++
++static int sc8547a_adc_enable_get(void *data, u64 *val)
++{
++	int ret = sc8547a_adc_enabled(data);
++
++	if (ret < 0)
++		return ret;
++
++	*val = ret;
++	return 0;
++}
++
++static int sc8547a_adc_enable_set(void *data, u64 val)
++{
++	struct sc8547a *sc = data;
++
++	if (val > 1)
++		return -EINVAL;
++
++	return regmap_write(sc->regmap, SC8547A_REG_ADC_CTRL,
++			    val ? SC8547A_ADC_CTRL_ON : SC8547A_ADC_CTRL_OFF);
++}
++DEFINE_DEBUGFS_ATTRIBUTE(sc8547a_adc_enable_fops, sc8547a_adc_enable_get,
++			 sc8547a_adc_enable_set, "%llu\n");
++
++/* The register set the vendor driver's dump reads on this board. */
++static const struct regmap_range sc8547a_readable_ranges[] = {
++	regmap_reg_range(0x00, 0x24),
++	regmap_reg_range(0x2b, 0x33),
++	regmap_reg_range(0x36, 0x36),
++	regmap_reg_range(0x3a, 0x3c),
++};
++
++static const struct regmap_access_table sc8547a_readable_table = {
++	.yes_ranges = sc8547a_readable_ranges,
++	.n_yes_ranges = ARRAY_SIZE(sc8547a_readable_ranges),
++};
++
++/* The registers the vendor drivers program for PPS charging. */
++static const struct regmap_range sc8547a_writable_ranges[] = {
++	regmap_reg_range(0x00, 0x02),
++	regmap_reg_range(0x04, 0x05),
++	regmap_reg_range(0x07, 0x09),
++	regmap_reg_range(0x0d, 0x0d),
++	regmap_reg_range(0x10, 0x11),
++	regmap_reg_range(0x2b, 0x2b),
++	regmap_reg_range(0x30, 0x30),
++	regmap_reg_range(0x33, 0x33),
++	regmap_reg_range(0x3a, 0x3c),
++};
++
++static const struct regmap_access_table sc8547a_writable_table = {
++	.yes_ranges = sc8547a_writable_ranges,
++	.n_yes_ranges = ARRAY_SIZE(sc8547a_writable_ranges),
++};
++
++static const struct regmap_config sc8547a_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = 0x3c,
++	.rd_table = &sc8547a_readable_table,
++	.wr_table = &sc8547a_writable_table,
++	.cache_type = REGCACHE_NONE,
++};
++
++static struct i2c_driver sc8547a_driver;
++
++/* A register write, or an update of the bits in @mask when it is nonzero. */
++struct sc8547a_reg_op {
++	u8 reg;
++	u8 mask;
++	u8 val;
++};
++
++#define SC8547A_W(_reg, _val)		{ .reg = _reg, .val = _val }
++#define SC8547A_U(_reg, _mask, _val)	{ .reg = _reg, .mask = _mask, .val = _val }
++
++/*
++ * PPS preparation replays the Android sequence for the primary
++ * (oplus_hal_sc8547a.c) on a freshly reset chip: the probe-time
++ * sc8547_hardware_init(), the 2:1 sc8547_svooc_hw_setting() with UCP and the
++ * soft-start timeout disabled, then the 5 s watchdog. The DT-derived values
++ * are VBAT OVP 4850 mV (0x36), VBUS OVP 10 V (0x50) and IBUS OCP 4500 mA
++ * with a 5 ms UCP deglitch (0x1b).
++ */
++static const struct sc8547a_reg_op sc8547a_primary_prepare[] = {
++	SC8547A_U(0x07, 0x40, 0x40),
++	SC8547A_W(0x11, 0x00), SC8547A_W(0x02, 0x01), SC8547A_W(0x04, 0x50),
++	SC8547A_W(0x00, 0x36), SC8547A_W(0x05, 0x1b), SC8547A_W(0x01, 0xbf),
++	SC8547A_W(0x2b, 0x00), SC8547A_W(0x3a, 0x60), SC8547A_U(0x09, 0x10, 0x10),
++	SC8547A_W(0x10, 0x02), SC8547A_W(0x3b, 0x04),
++	SC8547A_W(0x02, 0x01), SC8547A_W(0x04, 0x50), SC8547A_W(0x05, 0x1b),
++	SC8547A_U(0x09, 0x90, 0x10), SC8547A_W(0x11, 0x80), SC8547A_W(0x0d, 0x70),
++	SC8547A_W(0x33, 0xd1), SC8547A_W(0x3a, 0x60),
++	SC8547A_U(0x05, 0x80, 0x80), SC8547A_U(0x08, 0xe0, 0x00),
++	SC8547A_U(0x09, 0x07, 0x04),
++};
++
++/* The secondary's equivalents from oplus_sc8547_slave.c. */
++static const struct sc8547a_reg_op sc8547a_secondary_prepare[] = {
++	SC8547A_U(0x07, 0x40, 0x40),
++	SC8547A_W(0x11, 0x00), SC8547A_W(0x02, 0x01), SC8547A_W(0x04, 0x50),
++	SC8547A_W(0x00, 0x36), SC8547A_W(0x05, 0x1b), SC8547A_W(0x2b, 0x00),
++	SC8547A_W(0x30, 0x7f), SC8547A_W(0x3c, 0x40), SC8547A_W(0x07, 0x01),
++	SC8547A_W(0x02, 0x01), SC8547A_W(0x04, 0x50), SC8547A_W(0x05, 0x1b),
++	SC8547A_W(0x09, 0x03), SC8547A_W(0x3c, 0x40), SC8547A_W(0x11, 0x80),
++	SC8547A_W(0x07, 0x01), SC8547A_W(0x0d, 0x70),
++	SC8547A_U(0x09, 0x07, 0x04),
++};
++
++static const struct sc8547a_reg_op sc8547a_primary_on[] = {
++	SC8547A_W(0x07, 0x80),
++};
++
++static const struct sc8547a_reg_op sc8547a_primary_off[] = {
++	SC8547A_W(0x07, 0x00),
++};
++
++/* The vendor driver switches the secondary's ADC on as it starts it. */
++static const struct sc8547a_reg_op sc8547a_secondary_on[] = {
++	SC8547A_W(0x11, 0x80), SC8547A_W(0x07, 0x81),
++};
++
++static const struct sc8547a_reg_op sc8547a_secondary_off[] = {
++	SC8547A_W(0x07, 0x01),
++};
++
++/* Watchdog and ADC off, as the OEM PPS exit does after stopping work. */
++static const struct sc8547a_reg_op sc8547a_idle[] = {
++	SC8547A_U(0x09, 0x07, 0x00), SC8547A_W(0x11, 0x00),
++};
++
++/* UCP back on with an 81.92 s soft-start timeout (primary only). */
++static const struct sc8547a_reg_op sc8547a_ucp_restore[] = {
++	SC8547A_U(0x05, 0x80, 0x00), SC8547A_U(0x08, 0xe0, 0xe0),
++};
++
++static int sc8547a_run(struct sc8547a *sc, const struct sc8547a_reg_op *ops,
++		       size_t n)
++{
++	size_t i;
++	int ret;
++
++	for (i = 0; i < n; i++) {
++		if (ops[i].mask)
++			ret = regmap_update_bits(sc->regmap, ops[i].reg,
++						 ops[i].mask, ops[i].val);
++		else
++			ret = regmap_write(sc->regmap, ops[i].reg, ops[i].val);
++		if (ret) {
++			dev_err(&sc->client->dev, "failed to program 0x%02x: %d\n",
++				ops[i].reg, ret);
++			return ret;
++		}
++	}
++
++	return 0;
++}
++
++#define sc8547a_run_ops(sc, ops) sc8547a_run(sc, ops, ARRAY_SIZE(ops))
++
++/*
++ * Return the bound charge pump at @np with a device reference, or
++ * -EPROBE_DEFER until the driver has bound it.
++ */
++struct sc8547a *sc8547a_get(struct device_node *np)
++{
++	struct i2c_client *client = of_find_i2c_device_by_node(np);
++	struct sc8547a *sc = NULL;
++
++	if (!client)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	device_lock(&client->dev);
++	if (client->dev.driver == &sc8547a_driver.driver)
++		sc = i2c_get_clientdata(client);
++	device_unlock(&client->dev);
++	if (!sc) {
++		put_device(&client->dev);
++		return ERR_PTR(-EPROBE_DEFER);
++	}
++
++	return sc;
++}
++EXPORT_SYMBOL_GPL(sc8547a_get);
++
++void sc8547a_put(struct sc8547a *sc)
++{
++	put_device(&sc->client->dev);
++}
++EXPORT_SYMBOL_GPL(sc8547a_put);
++
++int sc8547a_pps_prepare(struct sc8547a *sc, bool primary)
++{
++	if (primary)
++		return sc8547a_run_ops(sc, sc8547a_primary_prepare);
++	return sc8547a_run_ops(sc, sc8547a_secondary_prepare);
++}
++EXPORT_SYMBOL_GPL(sc8547a_pps_prepare);
++
++int sc8547a_pps_switch(struct sc8547a *sc, bool primary, bool on)
++{
++	if (primary)
++		return on ? sc8547a_run_ops(sc, sc8547a_primary_on) :
++			    sc8547a_run_ops(sc, sc8547a_primary_off);
++	return on ? sc8547a_run_ops(sc, sc8547a_secondary_on) :
++		    sc8547a_run_ops(sc, sc8547a_secondary_off);
++}
++EXPORT_SYMBOL_GPL(sc8547a_pps_switch);
++
++int sc8547a_pps_restore_ucp(struct sc8547a *sc)
++{
++	return sc8547a_run_ops(sc, sc8547a_ucp_restore);
++}
++EXPORT_SYMBOL_GPL(sc8547a_pps_restore_ucp);
++
++/*
++ * Stop switching, then disable the watchdog and ADC. If switching may not
++ * have stopped, leave the watchdog armed to stop it.
++ */
++int sc8547a_pps_stop(struct sc8547a *sc, bool primary)
++{
++	int ret;
++
++	ret = sc8547a_pps_switch(sc, primary, false);
++	if (ret)
++		return ret;
++
++	return sc8547a_run_ops(sc, sc8547a_idle);
++}
++EXPORT_SYMBOL_GPL(sc8547a_pps_stop);
++
++static int sc8547a_read_adc(struct sc8547a *sc, enum sc8547a_adc adc, int *raw)
++{
++	u8 buf[2];
++	int ret;
++
++	ret = regmap_bulk_read(sc->regmap, sc8547a_adc_info[adc].reg, buf,
++			       sizeof(buf));
++	if (ret)
++		return ret;
++
++	*raw = (buf[0] & sc8547a_adc_info[adc].high_mask) << 8 | buf[1];
++	return 0;
++}
++
++int sc8547a_sample(struct sc8547a *sc, struct sc8547a_sample *s)
++{
++	unsigned int status, ctrl, stat;
++	int vbus, ibus, vout, tdie;
++	int ret;
++
++	ret = regmap_read(sc->regmap, SC8547A_REG_STATUS, &status) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_CTRL, &ctrl) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_PROT_STAT, &stat) ?:
++	      sc8547a_read_adc(sc, SC8547A_ADC_VBUS, &vbus) ?:
++	      sc8547a_read_adc(sc, SC8547A_ADC_IBUS, &ibus) ?:
++	      sc8547a_read_adc(sc, SC8547A_ADC_VOUT, &vout) ?:
++	      sc8547a_read_adc(sc, SC8547A_ADC_TDIE, &tdie);
++	if (ret)
++		return ret;
++
++	s->status = status;
++	s->ctrl = ctrl;
++	s->prot_stat = stat;
++	s->vbus_mv = vbus * 3750 / 1000;
++	s->ibus_ma = ibus * 1875 / 1000;
++	s->vout_mv = vout * 1250 / 1000;
++	s->tdie_dc = tdie * 5;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(sc8547a_sample);
++
++/* Flags in 0x0f clear on read. */
++int sc8547a_read_flags(struct sc8547a *sc, u8 *flags)
++{
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(sc->regmap, SC8547A_REG_PROT_FLAG, &val);
++	if (!ret)
++		*flags = val;
++	return ret;
++}
++EXPORT_SYMBOL_GPL(sc8547a_read_flags);
++
++static int sc8547a_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	unsigned int id, status, ctrl, mode, stat, flag, adc;
++	struct iio_dev *indio_dev;
++	struct dentry *dir;
++	struct sc8547a *sc;
++	int ret;
++
++	indio_dev = devm_iio_device_alloc(dev, sizeof(*sc));
++	if (!indio_dev)
++		return -ENOMEM;
++
++	sc = iio_priv(indio_dev);
++	sc->client = client;
++	sc->regmap = devm_regmap_init_i2c(client, &sc8547a_regmap_config);
++	if (IS_ERR(sc->regmap))
++		return dev_err_probe(dev, PTR_ERR(sc->regmap),
++				     "failed to init regmap\n");
++
++	ret = regmap_read(sc->regmap, SC8547A_REG_DEVICE_ID, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read device ID\n");
++	if (id != SC8547A_DEVICE_ID)
++		return dev_err_probe(dev, -ENODEV,
++				     "unexpected device ID 0x%02x\n", id);
++
++	ret = regmap_read(sc->regmap, SC8547A_REG_STATUS, &status) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_CTRL, &ctrl) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_MODE, &mode) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_PROT_STAT, &stat) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_PROT_FLAG, &flag) ?:
++	      regmap_read(sc->regmap, SC8547A_REG_ADC_CTRL, &adc);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read status\n");
++
++	dev_info(dev,
++		 "id 0x%02x: 06=0x%02x 07=0x%02x 09=0x%02x 0e=0x%02x 0f=0x%02x 11=0x%02x\n",
++		 id, status, ctrl, mode, stat, flag, adc);
++
++	i2c_set_clientdata(client, sc);
++
++	indio_dev->name = "sc8547a";
++	indio_dev->info = &sc8547a_iio_info;
++	indio_dev->modes = INDIO_DIRECT_MODE;
++	indio_dev->channels = sc8547a_channels;
++	indio_dev->num_channels = ARRAY_SIZE(sc8547a_channels);
++
++	ret = devm_iio_device_register(dev, indio_dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to register IIO device\n");
++
++	dir = iio_get_debugfs_dentry(indio_dev);
++	if (dir) {
++		debugfs_create_file("status", 0400, dir, sc, &sc8547a_status_fops);
++		debugfs_create_file_unsafe("adc_enable", 0600, dir, sc,
++					   &sc8547a_adc_enable_fops);
++	}
++
++	return 0;
++}
++
++static const struct of_device_id sc8547a_of_match[] = {
++	{ .compatible = "southchip,sc8547a" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sc8547a_of_match);
++
++static const struct i2c_device_id sc8547a_i2c_ids[] = {
++	{ "sc8547a" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, sc8547a_i2c_ids);
++
++static struct i2c_driver sc8547a_driver = {
++	.driver = {
++		.name = "sc8547a",
++		.of_match_table = sc8547a_of_match,
++		/* The PPS controller holds pointers to bound devices. */
++		.suppress_bind_attrs = true,
++	},
++	.probe = sc8547a_probe,
++	.id_table = sc8547a_i2c_ids,
++};
++module_i2c_driver(sc8547a_driver);
++
++MODULE_DESCRIPTION("SouthChip SC8547A charge pump driver");
++MODULE_LICENSE("GPL");
+diff --git a/include/linux/power/sc8547a.h b/include/linux/power/sc8547a.h
+new file mode 100644
+index 0000000..023f5ac
+--- /dev/null
++++ b/include/linux/power/sc8547a.h
+@@ -0,0 +1,51 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * SouthChip SC8547A charge pump control for the OnePlus Pad 2 PPS
++ * controller in qcom_battmgr.
++ */
++#ifndef __LINUX_POWER_SC8547A_H
++#define __LINUX_POWER_SC8547A_H
++
++#include <linux/err.h>
++#include <linux/types.h>
++
++struct device_node;
++struct sc8547a;
++
++/* One pass over the state the PPS controller monitors. */
++struct sc8547a_sample {
++	u8 status;		/* 0x06: switching in bit 2 */
++	u8 ctrl;		/* 0x07: reading it services the watchdog */
++	u8 prot_stat;		/* 0x0e */
++	int vbus_mv;
++	int ibus_ma;
++	int vout_mv;
++	int tdie_dc;		/* tenths of a degree C */
++};
++
++#define SC8547A_SAMPLE_SWITCHING(s)	(!!((s)->status & 0x04))
++
++#if IS_REACHABLE(CONFIG_CHARGER_SC8547A)
++struct sc8547a *sc8547a_get(struct device_node *np);
++void sc8547a_put(struct sc8547a *sc);
++int sc8547a_pps_prepare(struct sc8547a *sc, bool primary);
++int sc8547a_pps_switch(struct sc8547a *sc, bool primary, bool on);
++int sc8547a_pps_restore_ucp(struct sc8547a *sc);
++int sc8547a_pps_stop(struct sc8547a *sc, bool primary);
++int sc8547a_sample(struct sc8547a *sc, struct sc8547a_sample *s);
++int sc8547a_read_flags(struct sc8547a *sc, u8 *flags);
++#else
++static inline struct sc8547a *sc8547a_get(struct device_node *np)
++{
++	return ERR_PTR(-ENODEV);
++}
++static inline void sc8547a_put(struct sc8547a *sc) {}
++static inline int sc8547a_pps_prepare(struct sc8547a *sc, bool primary) { return -ENODEV; }
++static inline int sc8547a_pps_switch(struct sc8547a *sc, bool primary, bool on) { return -ENODEV; }
++static inline int sc8547a_pps_restore_ucp(struct sc8547a *sc) { return -ENODEV; }
++static inline int sc8547a_pps_stop(struct sc8547a *sc, bool primary) { return -ENODEV; }
++static inline int sc8547a_sample(struct sc8547a *sc, struct sc8547a_sample *s) { return -ENODEV; }
++static inline int sc8547a_read_flags(struct sc8547a *sc, u8 *flags) { return -ENODEV; }
++#endif
++
++#endif

@@ -171,7 +171,7 @@ This is diagnostic access, not a PPS charging controller.
  	pmic_glink_client_register(battmgr->client);
  
 +	if (of_machine_is_compatible("qcom,sm8650")) {
-+		debugfs = debugfs_create_dir("pad2_battmgr", NULL);
++		debugfs = debugfs_create_dir("caihong_battmgr", NULL);
 +		if (IS_ERR(debugfs))
 +			return dev_err_probe(dev, PTR_ERR(debugfs), "failed to create battery debugfs\n");
 +		ret = devm_add_action_or_reset(dev, qcom_battmgr_remove_debugfs, debugfs);

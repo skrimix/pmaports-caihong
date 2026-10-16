@@ -1,13 +1,11 @@
 From: Pad 2 bring-up <local@localhost>
 Subject: [PATCH] power: supply: qcom_battmgr: consume a fresh shell-back estimate
 
-Accept the project-23978 userspace shell estimate through device/shell_temp
+Accept the userspace shell estimate through device/shell_temp
 (m°C, or "invalid") and expose it as the shell_back thermal zone. Select it
 for health under the OEM wired-temperature guards, as
 oplus_comm_check_shell_temp does; battery temp stays the gauge value.
 Samples expire after 15 seconds of boottime, so suspend also invalidates them.
-
-Only reporting changes; this does not control the charger or PPS.
 
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
@@ -33,7 +31,7 @@ Only reporting changes; this does not control the charger or PPS.
  	struct work_struct enable_work;
  	// OnePlus specific work functions
  	bool oplus_otg_state;
-@@ -527,6 +535,16 @@
+@@ -527,6 +535,29 @@
  	[POWER_SUPPLY_PROP_STATE_OF_HEALTH] = BATT_SOH,
  };
  
@@ -47,22 +45,27 @@ Only reporting changes; this does not control the charger or PPS.
 +		ktime_get_boottime_ns() - battmgr->shell_updated < SHELL_TEMP_LIFETIME_NS;
 +}
 +
++/*
++ * OEM wired policy (oplus_comm_check_shell_temp): the shell estimate replaces
++ * the gauge above 32 C up to the WARM limit (below 53 C, at most 51 C while
++ * hot) and within 15 C of it, with only wired power online, which the caller
++ * checks. This board configures no BMS heating compensation.
++ */
++static bool qcom_battmgr_shell_selected(struct qcom_battmgr *battmgr, int gauge_temp)
++{
++	return qcom_battmgr_shell_fresh(battmgr) && gauge_temp > 320 &&
++		gauge_temp <= (battmgr->status.hot ? 510 : 529) &&
++		abs(battmgr->shell_temperature / 100 - gauge_temp) < 150;
++}
++
  /*
   * The Oplus firmware's generic health reply reports Overheat at ordinary
   * temperatures. Derive health from gauge presence, temperature and voltage.
-@@ -552,6 +570,28 @@
+@@ -552,6 +583,20 @@
  		return ret;
  	temperature = status->temperature;
  
-+	/*
-+	 * OEM wired policy (oplus_comm_check_shell_temp): use the shell estimate
-+	 * above 32 C up to the WARM limit (below 53 C, at most 51 C while hot),
-+	 * within 15 C of the gauge and with only wired power online. Project
-+	 * 23978 has no BMS heating compensation configured.
-+	 */
-+	if (qcom_battmgr_shell_fresh(battmgr) && temperature > 320 &&
-+	    temperature <= (status->hot ? 510 : 529) &&
-+	    abs(battmgr->shell_temperature / 100 - temperature) < 150) {
++	if (qcom_battmgr_shell_selected(battmgr, temperature)) {
 +		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ONLINE, 0);
 +		if (ret)
 +			return ret;
@@ -79,7 +82,7 @@ Only reporting changes; this does not control the charger or PPS.
  	/*
  	 * Pad 2 OEM limits (/soc/oplus,comm): -10/53 C and 4.6 V, with the
  	 * Oplus 2 C and 200 mV hysteresis. Temperatures are in tenths of a
-@@ -593,6 +633,75 @@
+@@ -593,6 +638,75 @@
  	return ret;
  }
  
@@ -155,7 +158,7 @@ Only reporting changes; this does not control the charger or PPS.
  static int qcom_battmgr_bat_sc8280xp_update(struct qcom_battmgr *battmgr,
  					    enum power_supply_property psp)
  {
-@@ -1946,6 +2055,7 @@
+@@ -1944,6 +2058,7 @@
  		return -ENOMEM;
  
  	battmgr->dev = dev;
@@ -163,7 +166,7 @@ Only reporting changes; this does not control the charger or PPS.
  
  	psy_cfg.drv_data = battmgr;
  	psy_cfg.fwnode = dev_fwnode(&adev->dev);
-@@ -2032,6 +2142,17 @@
+@@ -2030,6 +2145,17 @@
  	pmic_glink_client_register(battmgr->client);
  
  	if (of_machine_is_compatible("qcom,sm8650")) {
@@ -178,6 +181,6 @@ Only reporting changes; this does not control the charger or PPS.
 +		ret = devm_device_add_group(dev, &qcom_battmgr_shell_group);
 +		if (ret)
 +			return ret;
- 		debugfs = debugfs_create_dir("pad2_battmgr", NULL);
+ 		debugfs = debugfs_create_dir("caihong_battmgr", NULL);
  		if (IS_ERR(debugfs))
  			return dev_err_probe(dev, PTR_ERR(debugfs), "failed to create battery debugfs\n");

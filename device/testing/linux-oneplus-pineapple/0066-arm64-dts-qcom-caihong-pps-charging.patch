@@ -1,0 +1,63 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] arm64: dts: qcom: caihong: describe the PPS charge pumps
+
+Add the SC8547A charge pumps on i2c_hub_0 (secondary) and i2c_hub_2
+(primary) at 400 kHz, the sub-board thermistor ADC channel, and the
+pmic-glink PPS wiring: the battery and USB connector thermistors and the
+pumps, primary first.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+index de271d1..d1b68c0 100644
+--- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
++++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+@@ -860,6 +860,14 @@
+ 			qcom,ratiometric;
+ 			label = "wls_therm";
+ 		};
++		/* Sub-board thermistor, Android subboard_temp_adc */
++		channel@74c {
++			reg = <0x74c>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			label = "subboard_therm";
++		};
+ 		channel@78f {
+ 			reg = <0x78f>;
+ 			qcom,pre-scaling = <1 3>;
+@@ -893,6 +901,35 @@
+ 	status = "okay";
+ };
+ 
++&{/pmic-glink} {
++	/* PPS charging: connector thermistors and the charge pumps (primary first) */
++	io-channels = <&vadc 0x14b>, <&vadc 0x747>;
++	io-channel-names = "batt_con_therm", "usb_con_therm";
++	oneplus,charge-pumps = <&cp_primary>, <&cp_secondary>;
++};
++
++&i2c_hub_0 {
++	status = "okay";
++	clock-frequency = <400000>;
++
++	cp_secondary: charge-pump@6f {
++		compatible = "southchip,sc8547a";
++		reg = <0x6f>;
++		label = "secondary";
++	};
++};
++
++&i2c_hub_2 {
++	status = "okay";
++	clock-frequency = <400000>;
++
++	cp_primary: charge-pump@6f {
++		compatible = "southchip,sc8547a";
++		reg = <0x6f>;
++		label = "primary";
++	};
++};
++
+ &i2c_hub_4 {
+ 	status = "okay";
+ 	clock-frequency = <400000>;
