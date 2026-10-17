@@ -1,0 +1,10 @@
+# Hide Android partitions on UFS from file managers (udisks)
+SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", \
+  ENV{ID_PATH}=="platform-1d84000.ufshc-*", \
+  ENV{ID_FS_LABEL}!="pmOS_*", \
+  ENV{UDISKS_IGNORE}="1"
+
+# Hide Android logical partitions that make-dynpart-mappings maps from super
+SUBSYSTEM=="block", KERNEL=="dm-*", \
+  ENV{DM_NAME}=="*_a|*_b", ENV{DM_UUID}=="", \
+  ENV{UDISKS_IGNORE}="1"
