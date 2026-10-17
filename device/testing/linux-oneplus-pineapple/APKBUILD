@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=9
+pkgrel=10
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -142,7 +142,7 @@ package() {
 
 sha512sums="
 a43556cfff1dc107cdceac9e8344a2ee7c304a6826e7c3cc08b1a0d2099320274cdb5b45948c0d86632b94b923a4036faa50e2b1b1c62c5a1315df00d9a95de3  linux-oneplus-pineapple-7.3-rc7.tar.gz
-b61d6409595632081506eab13b6d1011603ae8c11c4857003a21213719cc7048d22b2dc17a61b41aaee9080f0b5102419d896012e021ab925d8ef50b3589fccc  0001-patch_pineapple_dts.patch
+408d89440c99a934fd4bcbff903b1bce44e799e9d03c5e80754b6f84ca984848d49da689caa3059b1268f0feeb4068428d8f990b253603ebbfa8ee678dcf1b82  0001-patch_pineapple_dts.patch
 9d4d2a9c1f89ccf38e52a3033dd886bc5b0877f1fcaff2483aa546e4510bc7141de0a9b96d37dec27bf73329cba4a62e4a4151641c2731b5a923aee6e15ea236  0002-patch_pineapple_dts_makefile.patch
 1766f2d29c01655c8c46678db0c828a7080e0d6e6c2d06ef58f72fb4b6bbe520b112391beb2e5bd8bb95f22be8a3a8c6cffdcfde399d1deaf0d66806da3cd054  0003-drm-panel-Add-support-for-novatek_nt36532.patch
 8d814a56cb2f9132137a85c2adb98db5fbbe9a57412d4ce65028518bc9423ea2c03178c61baffa02ee1e22bd59497b2610c7701d5a6be50f5e3e01d63f09f0ed  0006-drm-panel-fix-Novatek-nt36532-clock.patch
