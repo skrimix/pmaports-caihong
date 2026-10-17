@@ -1,0 +1,32 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] power: supply: qcom_battmgr: acknowledge power role and PD hard reset notifications
+
+The Pad 2 ADSP charger firmware sends Oplus notifications 0x7d
+(BC_POWER_ROLE_STATUS) and 0x7f (PD_CONNECT_HARD_RESET) during boot,
+which the driver logs as unknown notification errors. In the Oplus
+kernel, 0x7d only republishes the USB power role to its charging
+policy, which Linux gets from UCSI, and 0x7f only adjusts reverse
+charging, which the stock device tree does not configure.
+
+Acknowledge both alongside the other informational Oplus events.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -137,6 +137,8 @@ enum qcom_battmgr_variant {
+ #define NOTIF_OPLUS_UFCS_PWR_INFO_READY 0x77
+ #define NOTIF_OPLUS_BATTERY_RESET_START 0x78
+ #define NOTIF_OPLUS_PD_SOURCECAP_DONE 0x79
++#define NOTIF_OPLUS_POWER_ROLE_STATUS 0x7d
++#define NOTIF_OPLUS_PD_HARD_RESET 0x7f
+ 
+ #define OPLUS_USB_VOOCPHY_ENABLE 16
+ #define OPLUS_PPS_READ_BUFFER 0x10004
+@@ -3013,6 +3015,8 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+ 	case NOTIF_OPLUS_UFCS_DISABLE_MOS:
+ 	case NOTIF_OPLUS_UFCS_PWR_INFO_READY:
+ 	case NOTIF_OPLUS_BATTERY_RESET_START:
++	case NOTIF_OPLUS_POWER_ROLE_STATUS:
++	case NOTIF_OPLUS_PD_HARD_RESET:
+ 		/* Handled / acknowledged proprietary fast charging events */
+ 		dev_info(battmgr->dev, "OnePlus charging notification: %#x\n", notification);
+ 		break;

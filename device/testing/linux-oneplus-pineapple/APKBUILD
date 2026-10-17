@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=10
+pkgrel=11
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -96,6 +96,7 @@ source="
 	0070-PCI-qcom-honor-iommu-map-cell-count.patch
 	0071-drm-panel-nt36532-remove-system-suspend-helper.patch
 	0072-arm64-dts-qcom-caihong-bluetooth.patch
+	0073-power-supply-qcom-battmgr-acknowledge-power-role-and-hard-reset.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -196,6 +197,7 @@ d343470c9d1dd0b488aec488b929400d7e61663b75a7325b41fbdc42832fc9a308d73ecca010f05b
 b91cf57fb0fe057c0b3a8f95b09ee87568c62021325f9a2322dcea95fe3452302dc7e6929f3b3bd7a11da472245f432b95e2396f3887d5c2d48d507af5ff7f49  0070-PCI-qcom-honor-iommu-map-cell-count.patch
 6c4c871dbe852ca41ccfcca6b7b1b641c0e2e44864128e74d19fa7f44fd8b0292356822758c5b692ede0d9da56b93b32873abcaa04bbd4d6028387eb02b42903  0071-drm-panel-nt36532-remove-system-suspend-helper.patch
 b08f656257ce9c630f45cfedaa276dd15d511d1cf69f10cf7706fca222655ec3ac81e954fc2784782787c4edf5cdb05b87b7010f39baff65407b96abb05d0010  0072-arm64-dts-qcom-caihong-bluetooth.patch
+1a90ce9156cb3c35eaa264a128084d717715f3224391f3809ab9a9a6135d0056e0f92b25bab3c2a5d8247d3a32da3099ecd924cdd9d0b05fbc0ed566827b1f09  0073-power-supply-qcom-battmgr-acknowledge-power-role-and-hard-reset.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 7c052ae2b9ce5da24ea86c1955c0650b750d59f3c45347cc88cf82d284879547cac6994e33ba35edf69d555e66fa3246e1dada43f4bc8b70551d2e46ad068583  config-oneplus-pineapple.aarch64
 "
