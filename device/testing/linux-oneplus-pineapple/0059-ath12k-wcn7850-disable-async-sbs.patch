@@ -11,6 +11,15 @@ advertised default configuration minus FW mode bit 26 (ASYNC_SBS, as
 defined in the OEM fw-api wmi_unified.h). 5 GHz channels are then scanned
 on one MAC. Log a rejected configuration.
 
+This matches stock Android on the tablet. Its ODM WCNSS_qcom_cfg.ini sets
+enable_sbs=0 (commented by Oplus as hardware without SBS support), so
+the OEM driver's policy_mgr_init_sbs_fw_config() never sets ASYNC_SBS,
+and wlan_hdd_update_dbs_scan_and_fw_mode_config() sends the same
+WMI_PDEV_SET_MAC_CONFIG at startup. With the firmware defaults seen here
+(scan 0xf8000000, FW mode 0xbc000000) and the stock ini, both drivers
+send scan 0xf8000000, FW mode 0xb8000000. OEM SBS support is a per-board
+ini setting; this patch applies it to every WCN7850 hw2.0.
+
 ---
 diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
 index 754e939c7..38335fdb8 100644
@@ -20,11 +29,11 @@ index 754e939c7..38335fdb8 100644
  		}
  	}
  
-+	/* WCN7850 firmware with asynchronous SBS splits a scan containing
-+	 * 5 GHz channels above about 5350 MHz across both MACs, and the MAC
-+	 * covering the lower channels then receives nothing for that scan.
-+	 * Keep the firmware's default configuration without asynchronous SBS,
-+	 * so 5 GHz channels are scanned on one MAC.
++	/* With asynchronous SBS, the firmware splits a scan containing 5 GHz
++	 * channels above about 5350 MHz across both MACs, and on the OnePlus
++	 * Pad 2 the MAC covering the lower channels then receives nothing.
++	 * Its stock Android driver disables SBS too (enable_sbs=0) and keeps
++	 * the firmware's other defaults; do the same.
 +	 */
 +	if (ab->hw_rev == ATH12K_HW_WCN7850_HW20) {
 +		ret = ath12k_wmi_set_mac_config(ab,
