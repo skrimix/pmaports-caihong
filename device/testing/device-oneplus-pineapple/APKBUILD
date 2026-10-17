@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=33
+pkgrel=35
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -34,6 +34,7 @@ depends="
 	python3
 "
 makedepends="devicepkg-dev fastrpc-dev"
+subpackages="$pkgname-audio"
 source="
 	deviceinfo
 	initfs.files
@@ -120,11 +121,19 @@ package() {
 	ln -s /dev/null "$pkgdir/etc/systemd/system/hexagonrpcd-adsp-sensorspd.service"
 }
 
+audio() {
+	# PulseAudio is the default backend provider; the speaker setup targets PipeWire.
+	install_if="$pkgname=$pkgver-r$pkgrel postmarketos-base-ui-audio"
+	depends="postmarketos-base-ui-audio-backend-pipewire"
+
+	mkdir -p "$subpkgdir"
+}
+
 sha512sums="
 ed55391dbdf98200a300151df421abeee9ea97c4ae4d20c28cac48d19e6cb79133e76fe1091dd55fc997a6e145cffdd66310c34fe6a534e76cf21eedba73e215  deviceinfo
 95260daa5bc5c6a1075fa7f704670dadf906f1740f969a9b5d233db8209bfeffc53f9a0e43bbec968c132ce386ce3aff4e52e2516f9aedf041b9afdf4d06435b  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
-6b759413a42924fdd3a8b93b8f720ddb0b9f60b4811087b04ae9acec05c7a4e05ae4d659c388bfd41c7823e4c2060f02f689629ca6d5ef57e114630ccda8197e  caihong.conf
+349218102b923e2b381af89191f0880976568fdf3fe54c6c2e72b73cea6c25fc23881a964658164536dcdcc63a38506d51cfa1153fea9e60e89eda43c9df6cf9  caihong.conf
 452cfacd546f0717e7c01da32449a98e7847a071229ed8cc95fb3adf28fdd843e2a67ae2816e29c69ef57ba27f2e8a094f1ecb17b298c1021ac9baaf4d054a68  HiFi.conf
 0a702af824fd2abd7f173cb70030b88ea352b928b7506c78f6492d66e31fd0163fa43989a66a1b61a0647dba56dc7ec1fba07b2a1d97149dc0c107f6e1a4c033  52-oneplus-pineapple.conf
 d73a2cce5d39958340142d18ba550c32cc1df892d5137b7e87a29792afc1a3bb5d59fe4a78400bb25eb284e265ea93adb41c577e079319469cecbdb929a64bcc  pad2-usb-serial-initfs.sh
