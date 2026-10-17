@@ -3,14 +3,14 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=7
+pkgrel=9
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
 _flavor="oneplus-pineapple"
 url="https://kernel.org"
 license="GPL-2.0-only"
-options="!strip !check !tracedeps pmb:cross-native"
+options="!strip !check !tracedeps pmb:cross-native pmb:kconfigcheck-nftables"
 makedepends="
 	bash
 	bc
@@ -197,5 +197,5 @@ b91cf57fb0fe057c0b3a8f95b09ee87568c62021325f9a2322dcea95fe3452302dc7e6929f3b3bd7
 6c4c871dbe852ca41ccfcca6b7b1b641c0e2e44864128e74d19fa7f44fd8b0292356822758c5b692ede0d9da56b93b32873abcaa04bbd4d6028387eb02b42903  0071-drm-panel-nt36532-remove-system-suspend-helper.patch
 b08f656257ce9c630f45cfedaa276dd15d511d1cf69f10cf7706fca222655ec3ac81e954fc2784782787c4edf5cdb05b87b7010f39baff65407b96abb05d0010  0072-arm64-dts-qcom-caihong-bluetooth.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
-9fd01d0af4be4b7e949fa540f1cef605b3049d939d8428517ac14cbdb546dde38aa3c5d5e5b7c879d4b4224cdbbe3b1eaf477015099afbe12ed10a19cd911390  config-oneplus-pineapple.aarch64
+7c052ae2b9ce5da24ea86c1955c0650b750d59f3c45347cc88cf82d284879547cac6994e33ba35edf69d555e66fa3246e1dada43f4bc8b70551d2e46ad068583  config-oneplus-pineapple.aarch64
 "
