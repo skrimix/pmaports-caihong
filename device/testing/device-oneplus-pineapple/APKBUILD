@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=35
+pkgrel=36
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -12,7 +12,6 @@ depends="
 	linux-oneplus-pineapple>=7.1-r88
 	mkbootimg
 	android-tools
-	agetty
 	postmarketos-base
 	postmarketos-initramfs
 	lz4
@@ -42,8 +41,6 @@ source="
 	caihong.conf
 	HiFi.conf
 	52-oneplus-pineapple.conf
-	pad2-usb-serial-initfs.sh
-	pad2-usb-serial-rootfs.service
 	pad2-usb-gadget
 	pad2-usb-gadget.service
 	81-pad2-usb-gadget.rules
@@ -71,10 +68,6 @@ package() {
 	devicepkg_package $startdir $pkgname
 	install -Dm644 "$srcdir/initfs.files" \
 		"$pkgdir/usr/share/mkinitfs/files/00-$pkgname.files"
-	install -Dm755 "$srcdir/pad2-usb-serial-initfs.sh" \
-		"$pkgdir/usr/libexec/pad2-usb-serial-initfs.sh"
-	install -Dm644 "$srcdir/pad2-usb-serial-rootfs.service" \
-		"$pkgdir/usr/lib/systemd/system/pad2-usb-serial-rootfs.service"
 	install -Dm755 "$srcdir/pad2-usb-gadget" "$pkgdir/usr/libexec/pad2-usb-gadget"
 	install -Dm644 "$srcdir/pad2-usb-gadget.service" \
 		"$pkgdir/usr/lib/systemd/system/pad2-usb-gadget.service"
@@ -131,17 +124,15 @@ audio() {
 
 sha512sums="
 ed55391dbdf98200a300151df421abeee9ea97c4ae4d20c28cac48d19e6cb79133e76fe1091dd55fc997a6e145cffdd66310c34fe6a534e76cf21eedba73e215  deviceinfo
-95260daa5bc5c6a1075fa7f704670dadf906f1740f969a9b5d233db8209bfeffc53f9a0e43bbec968c132ce386ce3aff4e52e2516f9aedf041b9afdf4d06435b  initfs.files
+a07ac14549c5f02028fd099ff2277c2e64153366444ddec87a7c37efa7a3c70882be5a6d5ccda6d5de4571080e59ae82ecf265bd28ceb0bb1606d70b47f62292  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
 349218102b923e2b381af89191f0880976568fdf3fe54c6c2e72b73cea6c25fc23881a964658164536dcdcc63a38506d51cfa1153fea9e60e89eda43c9df6cf9  caihong.conf
 452cfacd546f0717e7c01da32449a98e7847a071229ed8cc95fb3adf28fdd843e2a67ae2816e29c69ef57ba27f2e8a094f1ecb17b298c1021ac9baaf4d054a68  HiFi.conf
 0a702af824fd2abd7f173cb70030b88ea352b928b7506c78f6492d66e31fd0163fa43989a66a1b61a0647dba56dc7ec1fba07b2a1d97149dc0c107f6e1a4c033  52-oneplus-pineapple.conf
-d73a2cce5d39958340142d18ba550c32cc1df892d5137b7e87a29792afc1a3bb5d59fe4a78400bb25eb284e265ea93adb41c577e079319469cecbdb929a64bcc  pad2-usb-serial-initfs.sh
-6bbfdf7198278e9b17a3365a587d8b50e335e64de7e1dd582040db71180e062b761264b8e1511d6dd63c76f3881a4599b0e2d608d98f5bf914e399b9af10400d  pad2-usb-serial-rootfs.service
-bfc345bc0fe41d4a5ce3225e4381beff32a3ac3c547ea76c7a9905c0ae0fa87cb94a5b5206dfc1f14c9861347f6cb105f5c098ac97012f793ec5b64f287d1ce4  pad2-usb-gadget
-a718918458143ed7c21cb5e9db9b49eb3d45c0aea53aa8822c5a05d24405573b8f1d863bf2c6751868215e81e301e1c2425e13c9afe4c92d3e2dff47db24ace5  pad2-usb-gadget.service
+32abccb63255478f817d3095b472e93f2648753be38bab92a5ba2401805b273dde93b9046216ea54fdedd376ce84229a1e6e27f7b7d0ddae3887e3ef6ee09bc3  pad2-usb-gadget
+25eccfab783fa6c6745b14c005c47a05f71fd73b00c1c1149a03ee77675ded94e5d35e8112514db580eacd9f9baaa42832f6741bcca9c16e150695d6903f4d16  pad2-usb-gadget.service
 18e9d19a242f6736a238a1458d0200b05452532452ce5c2a1f13bac4f80eefc3088b010a396489b805f6f743a369fbcaee9f8c254af14fab11818882f86ca6d9  81-pad2-usb-gadget.rules
-f7076fab91e7e823a3ce12fcf4d8da91cb83b16003f0276df8018b86def43849b746604edfa31ac09667e5426d5a829a32891c1fc369bf2065cba337d160bf6a  80-oneplus-pineapple.preset
+7e08e7a1f74811a5c9a003788c98ec70b73c30b5ad71a8827c3e684ac46b809c7b9a831622560ae11e1c5145040760b98e176491d02babb6a137484a6ded37d0  80-oneplus-pineapple.preset
 18f063a3c6af8fd3ac1abc85c19a492554a42a18517a1b7d63170156e087f8fb6151f3fe89358c04f6e57fd9138edfe0a98de65de543f7dd967dc4a006f35f0d  81-libssc-oneplus-pineapple.rules
 acd3ef4b56378d4195a9cb0af22318c74fb2ffdf1b70316836b4fc22ee51247202e187f88b6bea16ba7da9ea27692482b543bd2044586c682b52c903e2da259a  caihong-persist-import
 4e60222efeaa1e540b42b3201093c6a153cf9dc9c4358a84821ad01aab1f4190ca666be09d3d32077c545c9f6ad50cf197423db254d61b6fabfca90aec0c25c0  caihong-persist-import.service

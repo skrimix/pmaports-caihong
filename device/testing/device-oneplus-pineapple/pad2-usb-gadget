@@ -24,22 +24,19 @@ cd "$gadget"
 bound_udc=$(cat UDC)
 if [ -n "$bound_udc" ]; then
 	test "$bound_udc" = "$udc"
-	if [ -L configs/c.1/ncm.usb0 ] && [ -L configs/c.1/acm.usb0 ]; then
-		echo 'USB network and serial already attached'
+	if [ -L configs/c.1/ncm.usb0 ]; then
+		echo 'USB network already attached'
 		exit 0
 	fi
 	printf '\n' > UDC
 fi
 
-for function in ncm.usb0 acm.usb0; do
-	mkdir -p "functions/$function"
-	if [ ! -L "configs/c.1/$function" ]; then
-		ln -s "$gadget/functions/$function" "configs/c.1/$function"
-	fi
-done
-test "$(cat functions/acm.usb0/port_num)" = 0
+mkdir -p functions/ncm.usb0
+if [ ! -L configs/c.1/ncm.usb0 ]; then
+	ln -s "$gadget/functions/ncm.usb0" configs/c.1/ncm.usb0
+fi
 # NCM creates usb0 only once the gadget binds to the controller.
 printf '%s\n' "$udc" > UDC
 ip address replace 172.16.42.1/16 dev usb0
 ip link set usb0 up
-echo 'USB network and serial attached'
+echo 'USB network attached'

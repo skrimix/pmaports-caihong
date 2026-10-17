@@ -21,7 +21,6 @@ trap 'reboot -f' TERM
 . ./init_functions.sh
 . /usr/share/misc/source_deviceinfo
 [ -e /etc/os-release ] && . /etc/os-release
-[ -e /usr/lib/os-release ] && . /usr/lib/os-release
 # provide a default for os-release's VERSION in case the file doesn't exist
 VERSION="${VERSION:-unknown}"
 

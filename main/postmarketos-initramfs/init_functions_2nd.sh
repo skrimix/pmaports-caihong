@@ -129,8 +129,7 @@ resize_root_filesystem() {
 		f2fs)
 			echo "Resize 'f2fs' root filesystem ($partition)"
 			modprobe f2fs
-			# resize.f2fs is interactive by default, -F makes it not interactive
-			resize.f2fs -F "$partition"
+			resize.f2fs "$partition"
 			;;
 		btrfs)
 			# Resize happens below after mount

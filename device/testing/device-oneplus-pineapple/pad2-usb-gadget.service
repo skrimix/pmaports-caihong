@@ -1,5 +1,5 @@
 [Unit]
-Description=OnePlus Pad 2 USB network and serial gadget
+Description=OnePlus Pad 2 USB network gadget
 Requires=sys-kernel-config.mount
 After=sys-kernel-config.mount
 Wants=unudhcpd@usb0.service
