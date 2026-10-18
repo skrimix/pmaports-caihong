@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=37
+pkgrel=38
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -126,7 +126,7 @@ audio() {
 }
 
 sha512sums="
-ed55391dbdf98200a300151df421abeee9ea97c4ae4d20c28cac48d19e6cb79133e76fe1091dd55fc997a6e145cffdd66310c34fe6a534e76cf21eedba73e215  deviceinfo
+d12a58f7a95e81225f85c6089cda38440df157f5631ea12f690cde3f1fb64b03b82cbee6ca12d69968cd5ac64216a17e919171ca6ac2803b15ceba0b50a51753  deviceinfo
 a07ac14549c5f02028fd099ff2277c2e64153366444ddec87a7c37efa7a3c70882be5a6d5ccda6d5de4571080e59ae82ecf265bd28ceb0bb1606d70b47f62292  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
 349218102b923e2b381af89191f0880976568fdf3fe54c6c2e72b73cea6c25fc23881a964658164536dcdcc63a38506d51cfa1153fea9e60e89eda43c9df6cf9  caihong.conf
