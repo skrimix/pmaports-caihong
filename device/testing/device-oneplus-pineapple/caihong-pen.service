@@ -1,0 +1,12 @@
+[Unit]
+Description=OnePlus Pad 2 stylus activation
+After=bluetooth.service
+
+[Service]
+ExecStart=/usr/libexec/caihong-pen
+ExecStopPost=/bin/sh -c 'for f in /sys/bus/spi/drivers/novatek-nt36532-ts/*/pen_type; do echo 0 > "$f"; done'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=bluetooth.target

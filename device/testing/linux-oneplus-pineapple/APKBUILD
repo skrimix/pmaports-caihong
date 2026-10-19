@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=17
+pkgrel=23
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -98,6 +98,8 @@ source="
 	0072-arm64-dts-qcom-caihong-bluetooth.patch
 	0073-power-supply-qcom-battmgr-acknowledge-power-role-and-hard-reset.patch
 	0074-arm64-dts-qcom-sm8650-minidump-destination.patch
+	0075-input-novatek-nt36532-pen.patch
+	0076-drm-panel-nt36532-run-at-120hz.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -200,6 +202,8 @@ b91cf57fb0fe057c0b3a8f95b09ee87568c62021325f9a2322dcea95fe3452302dc7e6929f3b3bd7
 b08f656257ce9c630f45cfedaa276dd15d511d1cf69f10cf7706fca222655ec3ac81e954fc2784782787c4edf5cdb05b87b7010f39baff65407b96abb05d0010  0072-arm64-dts-qcom-caihong-bluetooth.patch
 1a90ce9156cb3c35eaa264a128084d717715f3224391f3809ab9a9a6135d0056e0f92b25bab3c2a5d8247d3a32da3099ecd924cdd9d0b05fbc0ed566827b1f09  0073-power-supply-qcom-battmgr-acknowledge-power-role-and-hard-reset.patch
 cfaf74ef233612b6a4219bde741744285f450ee4d60a6588cd80ec5b20c4a0428f7a33545fa594059d72fcbb65299280963713c20d2919464280b754b0898a24  0074-arm64-dts-qcom-sm8650-minidump-destination.patch
+d3ddcc0caaf916549198261dc4839b0881d32ca1c44fa70754ddb88542654800690091175fc599c954aaea7fb00fd753bc02b7a85bad967421dba7b008ac1173  0075-input-novatek-nt36532-pen.patch
+6842c52da9dd66e9345d9e234547d6ebe7f87d856d49131f6fe37e2fcc259faed0d249dda3a9a79eac5f9bd243da51b5fd70708d2bd2bf050e17ce403af0cf30  0076-drm-panel-nt36532-run-at-120hz.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 5e61cfbcad1e9840a64309965ad1e02d936cda7a4e1d430ab6f7f7193abb49acc68667ce99de0ce8e719850a527449e208de793a68aa251ff9d51f3af33f4311  config-oneplus-pineapple.aarch64
 "

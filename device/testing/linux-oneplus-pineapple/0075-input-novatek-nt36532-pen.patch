@@ -1,0 +1,353 @@
+Subject: [PATCH] Input: novatek-nt36532 - add pen support
+
+Report the pen packet that the firmware places after the finger data
+(OEM nvt_get_pen_points) on a separate input device, and add a pen_type
+sysfs attribute that selects the firmware pen mode like Android's
+pencil_connected (OEM nvt_enable_pen_mode). The mode is re-sent after
+every firmware load. After pen mode off, this firmware reports no pen
+again until it is reloaded, so turning pen mode back on reloads it.
+diff --git a/drivers/input/touchscreen/novatek_nt36532_ts.c b/drivers/input/touchscreen/novatek_nt36532_ts.c
+index b91a7c9..c72a1ef 100644
+--- a/drivers/input/touchscreen/novatek_nt36532_ts.c
++++ b/drivers/input/touchscreen/novatek_nt36532_ts.c
+@@ -61,11 +61,31 @@
+ 
+ #define DTAP_DETECT 15
+ 
++/* Pen packet: format id, then data; see OEM nvt_get_pen_points(). */
++#define NVT_PEN_DATA_OFFSET 66
++#define NVT_PEN_DATA_LEN 14
++#define NVT_PEN_FORMAT_DATA 0x01
++#define NVT_PEN_MAX_PRESSURE 16384
++#define NVT_PEN_MAX_TILT 60
++#define NVT_PEN_RESOLUTION 120 /* units per mm */
++
++#define EVENTBUFFER_EXT_CMD 0x7f
++#define EVENTBUFFER_EXT_PEN_MODE_OFF 0x11
++#define RESET_STATE_NORMAL_RUN 0xA3
++
++/* Pencil type as set by Android's ipemanager; 0 = no pen. */
++#define NVT_PEN_TYPE_MAX 6
++
+ struct novatek_ts_data {
+     struct spi_device* spi;
+     struct input_dev* input;
++    struct input_dev* pen_input;
+     struct gpio_desc* reset_gpio;
+     struct touchscreen_properties prop;
++    struct touchscreen_properties pen_prop;
++    u8 pen_type;
++    bool pen_mode_off; /* Pen mode off sent since the last firmware load */
++    bool pen_in_range;
+     int max_touches;
+     struct mutex lock; /* Serializes IRQ, firmware loading and power changes. */
+     bool panel_enabled;
+@@ -1627,6 +1647,83 @@ static int novatek_fw_update(struct spi_device* touch_spi, const struct firmware
+     return 0;
+ }
+ 
++/* OEM nvt_extend_cmd_store(): the firmware clears the command byte once done. */
++static int nvt_extend_cmd_store(struct spi_device* spi, u8 cmd, u8 sub_cmd)
++{
++    u8 buf[3] = { EVENT_MAP_HOST_CMD, cmd, sub_cmd };
++    u8 status = 0xff;
++    int ret, i;
++
++    ret = nvt_set_page(spi, NVT_EVENT_BUF_ADDR);
++    if (ret)
++        return ret;
++
++    for (i = 0; i < 5; i++) {
++        if (status != cmd) {
++            ret = nvt_spi_write_cmd(spi, buf, sizeof(buf));
++            if (ret)
++                return ret;
++        }
++        msleep(20);
++
++        ret = nvt_spi_read_cmd(spi, EVENT_MAP_HOST_CMD, &status);
++        if (ret)
++            return ret;
++        if (status == 0)
++            return 0;
++    }
++
++    dev_warn(&spi->dev, "Cmd 0x%02x 0x%02x not acknowledged, status 0x%02x\n",
++        cmd, sub_cmd, status);
++    return -ETIMEDOUT;
++}
++
++static u8 nvt_pen_mode_cmd(u8 pen_type)
++{
++    switch (pen_type) {
++    case 0:
++        return EVENTBUFFER_EXT_PEN_MODE_OFF;
++    case 2: /* Maxeye */
++        return 0x12;
++    case 3: /* Maxeye 2nd */
++        return 0x13;
++    case 4: /* Sunwoda */
++        return 0x15;
++    case 5: /* Maxeye 3rd */
++        return 0x18;
++    default: /* Havon; OEM also falls back to it for unknown types */
++        return 0x10;
++    }
++}
++
++/* Caller holds ts->lock and has firmware running. */
++static int novatek_ts_set_pen_mode(struct novatek_ts_data* ts)
++{
++    u8 state = 0;
++    int ret, i;
++
++    /* The OEM driver sends mode commands only after the firmware reaches normal run. */
++    for (i = 0; i < 100; i++) {
++        ret = nvt_set_page(ts->spi, NVT_EVENT_BUF_ADDR);
++        if (!ret)
++            ret = nvt_spi_read_cmd(ts->spi, EVENT_MAP_RESET_COMPLETE, &state);
++        if (!ret && state >= RESET_STATE_NORMAL_RUN && state <= RESET_STATE_MAX)
++            break;
++        msleep(10);
++    }
++    if (i == 100)
++        dev_warn(&ts->spi->dev, "Firmware not in normal run (0x%02x)\n", state);
++
++    ret = nvt_extend_cmd_store(ts->spi, EVENTBUFFER_EXT_CMD, nvt_pen_mode_cmd(ts->pen_type));
++    if (ret) {
++        dev_err(&ts->spi->dev, "Failed to set pen mode 0x%02x: %d\n",
++            nvt_pen_mode_cmd(ts->pen_type), ret);
++        return ret;
++    }
++    ts->pen_mode_off = !ts->pen_type;
++    return 0;
++}
++
+ /*
+  * Firmware loading hook
+  */
+@@ -1654,6 +1751,11 @@ static int novatek_fw_load(struct novatek_ts_data* ts)
+         return ret;
+     }
+ 
++    /* A fresh firmware starts with pen mode off. Touch works without it. */
++    ts->pen_mode_off = false;
++    if (ts->pen_type)
++        novatek_ts_set_pen_mode(ts);
++
+     return 0;
+ }
+ 
+@@ -1699,6 +1801,76 @@ static int nvt_ts_point_checksum(const u8* buf, size_t length)
+     return 0;
+ }
+ 
++static int nvt_ts_pen_checksum(const u8* buf)
++{
++    u8 checksum = 0;
++    int i;
++
++    for (i = 0; i < NVT_PEN_DATA_LEN - 1; i++)
++        checksum += buf[i];
++
++    return (u8)(~checksum + 1) == buf[NVT_PEN_DATA_LEN - 1] ? 0 : -EBADMSG;
++}
++
++static void novatek_ts_report_pen_out(struct novatek_ts_data* ts)
++{
++    struct input_dev* pen = ts->pen_input;
++
++    if (!ts->pen_in_range)
++        return;
++
++    ts->pen_in_range = false;
++    input_report_abs(pen, ABS_PRESSURE, 0);
++    input_report_key(pen, BTN_TOUCH, 0);
++    input_report_key(pen, BTN_STYLUS, 0);
++    input_report_key(pen, BTN_STYLUS2, 0);
++    input_report_key(pen, BTN_TOOL_PEN, 0);
++    input_sync(pen);
++}
++
++static void novatek_ts_report_pen(struct novatek_ts_data* ts, const u8* data)
++{
++    struct input_dev* pen = ts->pen_input;
++    unsigned int x, y, pressure, distance;
++    int tilt_x, tilt_y;
++
++    if (nvt_ts_pen_checksum(data))
++        return;
++
++    if (data[0] != NVT_PEN_FORMAT_DATA) {
++        novatek_ts_report_pen_out(ts);
++        return;
++    }
++
++    x = get_unaligned_be16(&data[1]);
++    y = get_unaligned_be16(&data[3]);
++    pressure = get_unaligned_be16(&data[5]);
++    tilt_x = (s8)data[7];
++    tilt_y = (s8)data[8];
++    distance = get_unaligned_be16(&data[9]);
++
++    /* Same axis transform as touchscreen_report_pos() applies to X/Y. */
++    if (ts->pen_prop.invert_x)
++        tilt_x = -tilt_x;
++    if (ts->pen_prop.invert_y)
++        tilt_y = -tilt_y;
++    if (ts->pen_prop.swap_x_y)
++        swap(tilt_x, tilt_y);
++
++    /* OEM tp_pen_handle(): in range while touching or hovering. */
++    ts->pen_in_range = pressure || distance;
++
++    touchscreen_report_pos(pen, &ts->pen_prop, x, y, false);
++    input_report_abs(pen, ABS_PRESSURE, pressure);
++    input_report_abs(pen, ABS_TILT_X, tilt_x);
++    input_report_abs(pen, ABS_TILT_Y, tilt_y);
++    input_report_key(pen, BTN_TOUCH, !!pressure);
++    input_report_key(pen, BTN_STYLUS, data[11] & BIT(0));
++    input_report_key(pen, BTN_STYLUS2, data[11] & BIT(1));
++    input_report_key(pen, BTN_TOOL_PEN, ts->pen_in_range);
++    input_sync(pen);
++}
++
+ static irqreturn_t novatek_ts_irq(int irq, void* dev_id)
+ {
+     struct novatek_ts_data* ts = dev_id;
+@@ -1735,6 +1907,7 @@ static irqreturn_t novatek_ts_irq(int irq, void* dev_id)
+         /* An empty frame releases every contact (INPUT_MT_DROP_UNUSED). */
+         input_mt_sync_frame(ts->input);
+         input_sync(ts->input);
++        novatek_ts_report_pen_out(ts);
+ 
+         if (payload[1] == 0xfe) {
+             error = nvt_write_addr(ts->spi, NVT_SWRST_SIF_ADDR, 0xaa);
+@@ -1807,6 +1980,8 @@ static irqreturn_t novatek_ts_irq(int irq, void* dev_id)
+     input_mt_sync_frame(ts->input);
+     input_sync(ts->input);
+ 
++    novatek_ts_report_pen(ts, &payload[NVT_PEN_DATA_OFFSET]);
++
+     goto out;
+ 
+ recovery_failed:
+@@ -1870,6 +2045,7 @@ static void novatek_ts_stop(struct novatek_ts_data* ts)
+     novatek_ts_power_off(ts);
+     input_mt_sync_frame(ts->input);
+     input_sync(ts->input);
++    novatek_ts_report_pen_out(ts);
+ }
+ 
+ static void novatek_ts_fw_load_worker(struct work_struct *work)
+@@ -1928,6 +2104,56 @@ static const struct drm_panel_follower_funcs novatek_ts_follower_funcs = {
+     .panel_unpreparing = novatek_ts_panel_unpreparing,
+ };
+ 
++static ssize_t pen_type_show(struct device* dev, struct device_attribute* attr, char* buf)
++{
++    struct novatek_ts_data* ts = dev_get_drvdata(dev);
++
++    return sysfs_emit(buf, "%u\n", ts->pen_type);
++}
++
++static ssize_t pen_type_store(struct device* dev, struct device_attribute* attr,
++    const char* buf, size_t count)
++{
++    struct novatek_ts_data* ts = dev_get_drvdata(dev);
++    u8 type;
++    int ret;
++
++    ret = kstrtou8(buf, 10, &type);
++    if (ret)
++        return ret;
++    if (type > NVT_PEN_TYPE_MAX)
++        return -EINVAL;
++
++    mutex_lock(&ts->lock);
++    ts->pen_type = type;
++    /* Otherwise the next firmware load applies it. */
++    if (ts->enabled && !ts->gesture_mode_active) {
++        if (type && ts->pen_mode_off) {
++            /*
++             * After pen mode off, this firmware acknowledges pen mode on but
++             * reports no pen until it is reloaded. The reload applies pen mode.
++             */
++            input_mt_sync_frame(ts->input);
++            input_sync(ts->input);
++            ret = novatek_fw_load(ts);
++        } else {
++            ret = novatek_ts_set_pen_mode(ts);
++        }
++    }
++    if (!type)
++        novatek_ts_report_pen_out(ts);
++    mutex_unlock(&ts->lock);
++
++    return ret ?: count;
++}
++static DEVICE_ATTR_RW(pen_type);
++
++static struct attribute* novatek_ts_attrs[] = {
++    &dev_attr_pen_type.attr,
++    NULL
++};
++ATTRIBUTE_GROUPS(novatek_ts);
++
+ static int novatek_ts_probe(struct spi_device* spi)
+ {
+     struct device* dev = &spi->dev;
+@@ -1990,6 +2216,32 @@ static int novatek_ts_probe(struct spi_device* spi)
+ 
+     input_set_drvdata(ts->input, ts);
+ 
++    ts->pen_input = devm_input_allocate_device(dev);
++    if (!ts->pen_input) {
++        error = -ENOMEM;
++        goto err_power_off;
++    }
++
++    ts->pen_input->name = "Novatek NT36532 Pen";
++    ts->pen_input->id.bustype = BUS_SPI;
++
++    input_set_abs_params(ts->pen_input, ABS_X, 0, NVT_TS_DEFAULT_MAX_X - 1, 0, 0);
++    input_set_abs_params(ts->pen_input, ABS_Y, 0, NVT_TS_DEFAULT_MAX_Y - 1, 0, 0);
++    input_set_abs_params(ts->pen_input, ABS_PRESSURE, 0, NVT_PEN_MAX_PRESSURE - 1, 0, 0);
++    input_set_abs_params(ts->pen_input, ABS_TILT_X, -NVT_PEN_MAX_TILT, NVT_PEN_MAX_TILT, 0, 0);
++    input_set_abs_params(ts->pen_input, ABS_TILT_Y, -NVT_PEN_MAX_TILT, NVT_PEN_MAX_TILT, 0, 0);
++    input_set_capability(ts->pen_input, EV_KEY, BTN_TOUCH);
++    input_set_capability(ts->pen_input, EV_KEY, BTN_TOOL_PEN);
++    input_set_capability(ts->pen_input, EV_KEY, BTN_STYLUS);
++    input_set_capability(ts->pen_input, EV_KEY, BTN_STYLUS2);
++    __set_bit(INPUT_PROP_DIRECT, ts->pen_input->propbit);
++
++    /* Pen and fingers share the panel coordinate space (OEM pen-panel-coords). */
++    touchscreen_parse_properties(ts->pen_input, false, &ts->pen_prop);
++    /* libinput requires a resolution: 30000 x 21200 units over 250 x 177 mm. */
++    input_abs_set_res(ts->pen_input, ABS_X, NVT_PEN_RESOLUTION);
++    input_abs_set_res(ts->pen_input, ABS_Y, NVT_PEN_RESOLUTION);
++
+     // Register input mode
+     error = devm_request_threaded_irq(dev, spi->irq, NULL, novatek_ts_irq,
+         IRQF_ONESHOT | IRQF_TRIGGER_FALLING | IRQF_NO_AUTOEN,
+@@ -2005,6 +2257,12 @@ static int novatek_ts_probe(struct spi_device* spi)
+         goto err_power_off;
+     }
+ 
++    error = input_register_device(ts->pen_input);
++    if (error) {
++        dev_err(dev, "Failed to register pen input device: %d\n", error);
++        goto err_power_off;
++    }
++
+     // Synchronize firmware re-upload to the screen
+     ts->panel_follower.funcs = &novatek_ts_follower_funcs;
+     error = drm_panel_add_follower(&spi->dev, &ts->panel_follower);
+@@ -2082,6 +2340,7 @@ MODULE_DEVICE_TABLE(spi, novatek_ts_spi_id);
+ static struct spi_driver novatek_ts_driver = {
+     .driver = {
+         .name = "novatek-nt36532-ts",
++        .dev_groups = novatek_ts_groups,
+         // .pm = pm_sleep_ptr(&novatek_ts_pm_ops),
+         .of_match_table = novatek_ts_of_match,
+     },

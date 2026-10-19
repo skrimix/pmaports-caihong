@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=41
+pkgrel=43
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -31,6 +31,8 @@ depends="
 	ssc-monitor
 	alsa-ucm-conf
 	python3
+	py3-dbus
+	py3-gobject3
 "
 makedepends="devicepkg-dev fastrpc-dev"
 subpackages="$pkgname-audio"
@@ -57,6 +59,8 @@ source="
 	81-caihong-pps-inhibit.rules
 	caihong-minidump
 	caihong-minidump-save.service
+	caihong-pen
+	caihong-pen.service
 	90-dev-nopasswd
 	99-watchdog.conf
 "
@@ -100,6 +104,9 @@ package() {
 	install -Dm755 "$srcdir/caihong-minidump" "$pkgdir/usr/bin/caihong-minidump"
 	install -Dm644 "$srcdir/caihong-minidump-save.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-minidump-save.service"
+	install -Dm755 "$srcdir/caihong-pen" "$pkgdir/usr/libexec/caihong-pen"
+	install -Dm644 "$srcdir/caihong-pen.service" \
+		"$pkgdir/usr/lib/systemd/system/caihong-pen.service"
 	install -Dm644 "$srcdir/99-watchdog.conf" \
 		"$pkgdir/usr/lib/systemd/system.conf.d/99-oneplus-pineapple-watchdog.conf"
 	# DEBUG: passwordless sudo for development; remove before release.
@@ -141,7 +148,7 @@ df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd55
 32abccb63255478f817d3095b472e93f2648753be38bab92a5ba2401805b273dde93b9046216ea54fdedd376ce84229a1e6e27f7b7d0ddae3887e3ef6ee09bc3  pad2-usb-gadget
 25eccfab783fa6c6745b14c005c47a05f71fd73b00c1c1149a03ee77675ded94e5d35e8112514db580eacd9f9baaa42832f6741bcca9c16e150695d6903f4d16  pad2-usb-gadget.service
 18e9d19a242f6736a238a1458d0200b05452532452ce5c2a1f13bac4f80eefc3088b010a396489b805f6f743a369fbcaee9f8c254af14fab11818882f86ca6d9  81-pad2-usb-gadget.rules
-7e08e7a1f74811a5c9a003788c98ec70b73c30b5ad71a8827c3e684ac46b809c7b9a831622560ae11e1c5145040760b98e176491d02babb6a137484a6ded37d0  80-oneplus-pineapple.preset
+4950ba1d7a7bd6ea9a191f260095ba310738fa0d1f6d222f6cb487f1c98c2deb2cabd1382f59abf98e07c7289f761fd6d1576dd8702b5692bf1046674e4b72ee  80-oneplus-pineapple.preset
 18f063a3c6af8fd3ac1abc85c19a492554a42a18517a1b7d63170156e087f8fb6151f3fe89358c04f6e57fd9138edfe0a98de65de543f7dd967dc4a006f35f0d  81-libssc-oneplus-pineapple.rules
 926e1a2823ab7c75fee631e88012d18ec0f7bdce46f0ef857c19b33fe3c92d4aa71dcb4011121dcf8b58e1337f92dab657d136a3011393ebdb208f3d5bfeaaff  90-hide-android-partitions.rules
 acd3ef4b56378d4195a9cb0af22318c74fb2ffdf1b70316836b4fc22ee51247202e187f88b6bea16ba7da9ea27692482b543bd2044586c682b52c903e2da259a  caihong-persist-import
@@ -154,6 +161,8 @@ f3a1b96f12f2a6f06f2e00d410b01ee7a12cfa19ae0982f97479c8e303a68dfe7af8b14bc5b8ebe5
 699cecb9dda387af46365ad8357b9e195542df79eee64b38263f8a928bcfe120ff4a66931fd83cfa0dc62277a7d2fda25b1f68d742a7d816cd8cc8a76466e3c9  81-caihong-pps-inhibit.rules
 0ebee4e30d51de9fba8786e6fd459ca3faed4015979d7edfdcee9f3b3b9a698a2eac88a8bc49d452ece1cb67d51900e7a45690bd4ff678d17171d8888276dd3a  caihong-minidump
 24dd8892e79efe0cd57add6326b4ab2741ca0298c2ce5674d49bbd63c4b96497046b97387fde9b61c1426feab4d1231e9edc1389f132ecaf0d590b63a8f664c3  caihong-minidump-save.service
+5cab823dc6eb3aac8fb69dbf713d3c7afdb9cf06f0a66fcc1b6bf9dd11c19b977b30f28208bc954af8a08f079ed9975c269d85adeda348f8fd40a5ce74f743f6  caihong-pen
+42c1278ba85f828f9d2ac25d91c599167a9ab052f51457485cd63305e0575ee4886404d3d7412c369e175edebb92568b0fce34790af9120a1fd61be957d51024  caihong-pen.service
 d757e155c598ba8894e1f27d511bbb9504578503596d581ead84ac4c38318643fdb3cfa7164f77d361021af47022a4f3eaab20423784f54494e28aade1faffc0  90-dev-nopasswd
 39f18b25e12f5387dbbbfe699a59f6500b71eaaa81c3ec02e709e037ca9a89d3e9f3e5c2dc17da148069177994a6161b744918fbb13c4b255cc371009f559c64  99-watchdog.conf
 "

@@ -2,3 +2,4 @@ enable caihong-persist-import.service
 enable caihong-sensors.service
 enable caihong-shell-back.service
 enable caihong-minidump-save.service
+enable caihong-pen.service
