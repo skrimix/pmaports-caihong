@@ -15,15 +15,14 @@ new file mode 100644
 index 000000000..337cb5d68
 --- /dev/null
 +++ b/drivers/soc/qcom/pad2_minidump.c
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,163 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Minimal APSS minidump support for OnePlus Pad 2 crash logs.
 + *
-+ * Mirrors what Android's qcom-dload-mode, minidump_smem and qcom_wdt_core
-+ * drivers do so that a panic with qcom_scm.download_mode=mini makes the boot
-+ * firmware write a Raw_Dmp! image to the rawdump partition:
-+ *  - IMEM dload type = 2 (dump to storage instead of USB/Sahara)
++ * Mirrors what Android's minidump_smem and qcom_wdt_core drivers do so that
++ * a panic with qcom_scm.download_mode=mini and qcom_scm.minidump_dest=storage
++ * makes the boot firmware write a Raw_Dmp! image to the rawdump partition:
 + *  - the HLOS entry of the SMEM minidump table lists the printk text ring
 + *    and the ramoops region
 + *  - on panic, bite the Gunyah virtual watchdog; the firmware dumps on a
@@ -36,7 +35,6 @@ index 000000000..337cb5d68
 +#include <linux/console.h>
 +#include <linux/delay.h>
 +#include <linux/init.h>
-+#include <linux/io.h>
 +#include <linux/limits.h>
 +#include <linux/of.h>
 +#include <linux/of_reserved_mem.h>
@@ -51,10 +49,6 @@ index 000000000..337cb5d68
 +#define MD_SS_ENCR_NOTREQ	(0 << 24 | 0 << 16 | 'N' << 8 | 'R' << 0)
 +#define MD_SS_ENCR_DONE		('D' << 24 | 'O' << 16 | 'N' << 8 | 'E' << 0)
 +#define MD_SS_ENABLED		('E' << 24 | 'N' << 16 | 'B' << 8 | 'L' << 0)
-+
-+/* pineapple.dtsi: qcom,msm-imem@14680000 dload_type@1c; 2 = EMMC/UFS */
-+#define IMEM_DLOAD_TYPE		0x1468001c
-+#define DLOAD_DEST_STORAGE	2
 +
 +/* gh_virt_wdt.c */
 +#define GH_WDT_CALL(fn)		ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_32, \
@@ -176,16 +170,8 @@ index 000000000..337cb5d68
 +
 +static int __init pad2_minidump_init(void)
 +{
-+	void __iomem *imem;
-+
 +	if (!of_machine_is_compatible("qcom,sm8650"))
 +		return 0;
-+
-+	imem = ioremap(IMEM_DLOAD_TYPE, 4);
-+	if (!imem)
-+		return -ENOMEM;
-+	writel(DLOAD_DEST_STORAGE, imem);
-+	iounmap(imem);
 +
 +	schedule_delayed_work(&pad2_minidump_work, 0);
 +	atomic_notifier_chain_register(&panic_notifier_list,
