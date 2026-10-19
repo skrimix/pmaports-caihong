@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=23
+pkgrel=28
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -100,6 +100,9 @@ source="
 	0074-arm64-dts-qcom-sm8650-minidump-destination.patch
 	0075-input-novatek-nt36532-pen.patch
 	0076-drm-panel-nt36532-run-at-120hz.patch
+	0077-soc-qcom-pmic_glink-allow-external-clients.patch
+	0078-power-supply-add-cps8601-stylus-charger.patch
+	0079-arm64-dts-qcom-caihong-stylus-charger.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -204,6 +207,9 @@ b08f656257ce9c630f45cfedaa276dd15d511d1cf69f10cf7706fca222655ec3ac81e954fc278478
 cfaf74ef233612b6a4219bde741744285f450ee4d60a6588cd80ec5b20c4a0428f7a33545fa594059d72fcbb65299280963713c20d2919464280b754b0898a24  0074-arm64-dts-qcom-sm8650-minidump-destination.patch
 d3ddcc0caaf916549198261dc4839b0881d32ca1c44fa70754ddb88542654800690091175fc599c954aaea7fb00fd753bc02b7a85bad967421dba7b008ac1173  0075-input-novatek-nt36532-pen.patch
 6842c52da9dd66e9345d9e234547d6ebe7f87d856d49131f6fe37e2fcc259faed0d249dda3a9a79eac5f9bd243da51b5fd70708d2bd2bf050e17ce403af0cf30  0076-drm-panel-nt36532-run-at-120hz.patch
+9196e4123432035afc7cda1d819fc0b90d3a3bb8b4ca6d5b7055ab68a4496e4977b9f9691b0f695fc4cb45952c6b3a6bf0bfc3546a16e2a913dc75e34f08d092  0077-soc-qcom-pmic_glink-allow-external-clients.patch
+06bb85a970ae9522f72b50f2e87e99410c8159314336d1c922bcbea91b56f76ef96815bb5565666455d3a5b8898e760fd497c53c4878666832dca308f1ad644d  0078-power-supply-add-cps8601-stylus-charger.patch
+dab91ff65311b67b06b3de985d4d990b34579ef1b0a9104bea6e82e5405b0a1afb839f5b00994767113445786485afc33aa3b33b668039605445d8f02994f62b  0079-arm64-dts-qcom-caihong-stylus-charger.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
-5e61cfbcad1e9840a64309965ad1e02d936cda7a4e1d430ab6f7f7193abb49acc68667ce99de0ce8e719850a527449e208de793a68aa251ff9d51f3af33f4311  config-oneplus-pineapple.aarch64
+90f881d5278f010f2c87737464076dafac2d262af4b72247d287c294e218e92ab10ce25fffaebff8fbbea178a68817d04e51e30672f020892dd0ae1206ddefc4  config-oneplus-pineapple.aarch64
 "

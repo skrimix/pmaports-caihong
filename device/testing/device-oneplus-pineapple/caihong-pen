@@ -4,18 +4,28 @@
 The pen sends nothing to the touch controller until it receives the serial-number
 query; ipemanager on Android sends it after every connection. The NT36532 pen mode
 follows the pen firmware vendor, as in ipemanager (PencilBleManager.t0).
+
+Like ipemanager, also bond a pen when the wireless charger reports it attached and
+BlueZ does not know it, and pass the pen battery level to the charger, which needs
+it to resume charging after the pen reported full. BlueZ reconnects bonded pens by
+itself.
 """
 
 import glob
+import socket
 
 import dbus
 import dbus.mainloop.glib
+import dbus.service
 from gi.repository import GLib
 
 
 BLUEZ = "org.bluez"
+ADAPTER = "org.bluez.Adapter1"
+AGENT_MANAGER = "org.bluez.AgentManager1"
 DEVICE = "org.bluez.Device1"
 CHARACTERISTIC = "org.bluez.GattCharacteristic1"
+BATTERY = "org.bluez.Battery1"
 PROPERTIES = "org.freedesktop.DBus.Properties"
 OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
 # Vendor command channel: requests are written, replies arrive as notifications.
@@ -25,6 +35,35 @@ SERIAL_QUERY = [0x2C, 0x53, 0x01]
 # ipemanager's order; any other firmware gets type 3.
 PEN_TYPES = [("4D45.03", 3), ("4D45.05", 6), ("4D45.04", 5), ("4857", 1), ("5357.01", 4), ("4D45", 2)]
 PEN_TYPE = "/sys/bus/spi/drivers/novatek-nt36532-ts/*/pen_type"
+PEN_CAPACITY = "/sys/bus/i2c/drivers/cps8601-pen/*/pen_capacity"
+NETLINK_KOBJECT_UEVENT = 15  # not exported by the socket module
+AGENT_PATH = "/org/postmarketos/caihong_pen/agent"
+DISCOVERY_TIMEOUT = 30  # seconds
+PAIR_TIMEOUT = 60  # seconds
+
+
+class Agent(dbus.service.Object):
+    """Accept the pen's Just Works pairing; used only for pairings this service starts."""
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Release(self):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
+    def RequestAuthorization(self, device):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device, passkey):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+    def AuthorizeService(self, device, uuid):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Cancel(self):
+        pass
 
 
 def firmware_version(data):
@@ -36,8 +75,8 @@ def pen_type(version):
     return next((t for prefix, t in PEN_TYPES if version.startswith(prefix)), 3)
 
 
-def write_pen_type(value):
-    for path in glob.glob(PEN_TYPE):
+def write_sysfs(pattern, value):
+    for path in glob.glob(pattern):
         try:
             with open(path, "w") as f:
                 f.write(f"{value}\n")
@@ -45,24 +84,123 @@ def write_pen_type(value):
             print(f"{path}: {e}", flush=True)
 
 
+def write_pen_type(value):
+    write_sysfs(PEN_TYPE, value)
+
+
 class PenManager:
     def __init__(self, bus):
         self.bus = bus
         self.pens = {}  # device path -> command characteristic path
+        self.discovering = None  # address of an attached pen being searched for
+        self.pairing = set()  # addresses
+        self.agent = Agent(bus, AGENT_PATH)
         bus.add_signal_receiver(self.properties_changed, "PropertiesChanged", PROPERTIES,
                                 BLUEZ, path_keyword="path")
+        bus.add_signal_receiver(self.interfaces_added, "InterfacesAdded", OBJECT_MANAGER, BLUEZ)
         bus.add_signal_receiver(self.interfaces_removed, "InterfacesRemoved", OBJECT_MANAGER, BLUEZ)
         bus.watch_name_owner(BLUEZ, self.bluez_owner)
+        self.watch_uevents()
+
+    def watch_uevents(self):
+        """Watch kernel uevents for the charger's pen attach events."""
+        self.uevents = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM,
+                                     NETLINK_KOBJECT_UEVENT)
+        self.uevents.bind((0, 1))
+        GLib.io_add_watch(self.uevents.fileno(), GLib.IO_IN, self.uevent)
+
+    def uevent(self, fd, condition):
+        fields = self.uevents.recv(16384).split(b"\0")
+        env = dict(f.decode(errors="replace").split("=", 1) for f in fields[1:] if b"=" in f)
+        if env.get("ACTION") == "change" and env.get("PEN_PRESENT") == "1":
+            self.attached(env.get("PEN_ADDRESS", "").upper())
+        return True
+
+    def attached(self, address):
+        """Bond an attached pen that BlueZ does not know, as ipemanager does."""
+        path, device = self.find(address)
+        if device and device.get("Bonded", device.get("Paired")):
+            return
+        if address in self.pairing or self.discovering:
+            return
+        if path:
+            self.pair(address, path)
+            return
+        print(f"pen {address} attached, searching", flush=True)
+        adapter = self.adapter()
+        try:
+            adapter.SetDiscoveryFilter({"Transport": "le"})
+            adapter.StartDiscovery()
+        except dbus.exceptions.DBusException as e:
+            print(f"discovery: {e.get_dbus_message()}", flush=True)
+            return
+        self.discovering = address
+        GLib.timeout_add_seconds(DISCOVERY_TIMEOUT, self.discovery_timeout, address)
+
+    def stop_discovery(self):
+        self.discovering = None
+        try:
+            self.adapter().StopDiscovery()
+        except dbus.exceptions.DBusException as e:
+            print(f"discovery: {e.get_dbus_message()}", flush=True)
+
+    def discovery_timeout(self, address):
+        if self.discovering == address:
+            print(f"pen {address} not found", flush=True)
+            self.stop_discovery()
+        return False
+
+    def interfaces_added(self, path, interfaces):
+        device = interfaces.get(DEVICE)
+        if device and self.discovering and device.get("Address") == self.discovering:
+            self.stop_discovery()
+            self.pair(str(device["Address"]), path)
+
+    def pair(self, address, path):
+        print(f"{path}: pairing attached pen", flush=True)
+        self.pairing.add(address)
+        device = dbus.Interface(self.bus.get_object(BLUEZ, path), DEVICE)
+
+        def paired():
+            self.pairing.discard(address)
+            print(f"{path}: paired", flush=True)
+            # Let the pen reconnect without authorization, as after a manual pairing.
+            dbus.Interface(self.bus.get_object(BLUEZ, path), PROPERTIES).Set(
+                DEVICE, "Trusted", True)
+
+        def failed(e):
+            self.pairing.discard(address)
+            print(f"{path}: pairing failed: {e.get_dbus_message()}", flush=True)
+
+        device.Pair(reply_handler=paired, error_handler=failed, timeout=PAIR_TIMEOUT)
+
+    def find(self, address):
+        for path, interfaces in self.objects().items():
+            device = interfaces.get(DEVICE)
+            if device and device.get("Address") == address:
+                return path, device
+        return None, None
+
+    def adapter(self):
+        path = next(p for p, i in self.objects().items() if ADAPTER in i)
+        return dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER)
 
     def objects(self):
         manager = dbus.Interface(self.bus.get_object(BLUEZ, "/"), OBJECT_MANAGER)
         return manager.GetManagedObjects()
 
     def bluez_owner(self, owner):
+        self.discovering = None
+        self.pairing.clear()
         if self.pens:
             self.pens.clear()
             write_pen_type(0)
         if owner:
+            try:
+                dbus.Interface(self.bus.get_object(BLUEZ, "/org/bluez"), AGENT_MANAGER) \
+                    .RegisterAgent(AGENT_PATH, "NoInputNoOutput")
+            except dbus.exceptions.DBusException as e:
+                print(f"agent: {e.get_dbus_message()}", flush=True)
             for path, interfaces in self.objects().items():
                 device = interfaces.get(DEVICE)
                 if device and device.get("Connected") and device.get("ServicesResolved"):
@@ -74,6 +212,8 @@ class PenManager:
                 self.connected(path)
             elif not changed.get("Connected", True):
                 self.disconnected(path)
+        elif interface == BATTERY and "Percentage" in changed and path in self.pens:
+            write_sysfs(PEN_CAPACITY, int(changed["Percentage"]))
         elif interface == CHARACTERISTIC and "Value" in changed:
             device = next((d for d, c in self.pens.items() if c == path), None)
             if device:
@@ -94,6 +234,9 @@ class PenManager:
             return
         self.pens[device] = characteristic
         print(f"{device}: pen connected", flush=True)
+        battery = self.objects().get(device, {}).get(BATTERY, {})
+        if "Percentage" in battery:
+            write_sysfs(PEN_CAPACITY, int(battery["Percentage"]))
         try:
             self.command(device).StartNotify()
             self.write(device, FIRMWARE_QUERY)

@@ -1,0 +1,53 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] arm64: dts: qcom: caihong: add the stylus wireless charger
+
+The CPS8601 stylus charger sits at 0x41 on I2C hub 3 with its interrupt on
+GPIO 12, supply switch on GPIO 10, wake on GPIO 15, scan on GPIO 85 and the
+transfer inhibit line on GPIO 111, as in stock oplus-chg-23926.dtsi.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+index 4e3e4ca04..9f7c3969c 100644
+--- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
++++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+@@ -1025,3 +1025,41 @@ bluetooth {
+ 		max-speed = <3200000>;
+ 	};
+ };
++
++&i2c_hub_3 {
++	status = "okay";
++	clock-frequency = <400000>;
++
++	pen-charger@41 {
++		compatible = "convenientpower,cps8601";
++		reg = <0x41>;
++
++		interrupts-extended = <&tlmm 12 IRQ_TYPE_EDGE_FALLING>;
++
++		enable-gpios = <&tlmm 10 GPIO_ACTIVE_HIGH>;
++		wake-gpios = <&tlmm 15 GPIO_ACTIVE_HIGH>;
++		scan-gpios = <&tlmm 85 GPIO_ACTIVE_HIGH>;
++		inhibit-gpios = <&tlmm 111 GPIO_ACTIVE_HIGH>;
++
++		pinctrl-0 = <&pen_charger_default>;
++		pinctrl-names = "default";
++	};
++};
++
++&tlmm {
++	pen_charger_default: pen-charger-default-state {
++		int-pins {
++			pins = "gpio12";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-up;
++		};
++
++		ctrl-pins {
++			pins = "gpio10", "gpio15", "gpio85", "gpio111";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++};

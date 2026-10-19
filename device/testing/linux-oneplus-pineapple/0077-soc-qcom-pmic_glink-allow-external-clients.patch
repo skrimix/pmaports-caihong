@@ -1,0 +1,96 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] soc: qcom: pmic_glink: allow clients outside the auxiliary bus
+
+Only pmic_glink's own auxiliary devices can allocate a client, because the
+allocator takes the pmic_glink instance from the parent device. OEM ADSP
+firmware also serves peripherals elsewhere in the device tree, such as the
+OnePlus Pad 2's stylus charger on I2C, whose supply boost is set through a
+vendor message owner. Add an allocator that takes the single pmic_glink
+instance, defers until it has probed and links the consumer to it.
+
+diff --git a/drivers/soc/qcom/pmic_glink.c b/drivers/soc/qcom/pmic_glink.c
+index 304226157..03005a3e8 100644
+--- a/drivers/soc/qcom/pmic_glink.c
++++ b/drivers/soc/qcom/pmic_glink.c
+@@ -77,14 +77,14 @@ static void _devm_pmic_glink_release_client(struct device *dev, void *res)
+ 	spin_unlock_irqrestore(&pg->client_lock, flags);
+ }
+ 
+-struct pmic_glink_client *devm_pmic_glink_client_alloc(struct device *dev,
+-						       unsigned int id,
+-						       void (*cb)(const void *, size_t, void *),
+-						       void (*pdr)(void *, int),
+-						       void *priv)
++static struct pmic_glink_client *__devm_pmic_glink_client_alloc(struct device *dev,
++								 struct pmic_glink *pg,
++								 unsigned int id,
++								 void (*cb)(const void *, size_t, void *),
++								 void (*pdr)(void *, int),
++								 void *priv)
+ {
+ 	struct pmic_glink_client *client;
+-	struct pmic_glink *pg = dev_get_drvdata(dev->parent);
+ 
+ 	client = devres_alloc(_devm_pmic_glink_release_client, sizeof(*client), GFP_KERNEL);
+ 	if (!client)
+@@ -101,8 +101,44 @@ struct pmic_glink_client *devm_pmic_glink_client_alloc(struct device *dev,
+ 
+ 	return client;
+ }
++
++struct pmic_glink_client *devm_pmic_glink_client_alloc(struct device *dev,
++						       unsigned int id,
++						       void (*cb)(const void *, size_t, void *),
++						       void (*pdr)(void *, int),
++						       void *priv)
++{
++	struct pmic_glink *pg = dev_get_drvdata(dev->parent);
++
++	return __devm_pmic_glink_client_alloc(dev, pg, id, cb, pdr, priv);
++}
+ EXPORT_SYMBOL_GPL(devm_pmic_glink_client_alloc);
+ 
++/*
++ * Allocate a client for a device that is not one of pmic_glink's auxiliary
++ * devices, such as a peripheral that needs an OEM firmware service. Returns
++ * -EPROBE_DEFER until pmic_glink has probed.
++ */
++struct pmic_glink_client *devm_pmic_glink_client_alloc_external(struct device *dev,
++								unsigned int id,
++								void (*cb)(const void *, size_t, void *),
++								void (*pdr)(void *, int),
++								void *priv)
++{
++	struct pmic_glink *pg;
++
++	guard(mutex)(&__pmic_glink_lock);
++	pg = __pmic_glink;
++	if (!pg)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	if (!device_link_add(dev, pg->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
++		return ERR_PTR(-EINVAL);
++
++	return __devm_pmic_glink_client_alloc(dev, pg, id, cb, pdr, priv);
++}
++EXPORT_SYMBOL_GPL(devm_pmic_glink_client_alloc_external);
++
+ void pmic_glink_client_register(struct pmic_glink_client *client)
+ {
+ 	struct pmic_glink *pg = client->pg;
+diff --git a/include/linux/soc/qcom/pmic_glink.h b/include/linux/soc/qcom/pmic_glink.h
+index 7cddf1027..6a3841ed1 100644
+--- a/include/linux/soc/qcom/pmic_glink.h
++++ b/include/linux/soc/qcom/pmic_glink.h
+@@ -28,6 +28,11 @@ struct pmic_glink_client *devm_pmic_glink_client_alloc(struct device *dev,
+ 						       void (*cb)(const void *, size_t, void *),
+ 						       void (*pdr)(void *, int),
+ 						       void *priv);
++struct pmic_glink_client *devm_pmic_glink_client_alloc_external(struct device *dev,
++								unsigned int id,
++								void (*cb)(const void *, size_t, void *),
++								void (*pdr)(void *, int),
++								void *priv);
+ void pmic_glink_client_register(struct pmic_glink_client *client);
+ 
+ #endif

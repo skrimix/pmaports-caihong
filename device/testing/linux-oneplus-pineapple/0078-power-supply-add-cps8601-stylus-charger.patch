@@ -1,0 +1,926 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] power: supply: add CPS8601 stylus wireless charger driver
+
+The OnePlus Pad 2 charges its magnetically attached stylus with a
+ConvenientPower CPS8601 wireless power transmitter on I2C, supplied by a
+PMIC boost that the Oplus ADSP firmware sets through pmic_glink owner
+32785. Port the parts of Oplus' oplus_cps8601.c needed to charge: set the
+boost, power up the chip and set the stock protection thresholds, then
+gate power transfer on the pen's packets, end-power events and the stock
+120 minute limit. Recharge after a full stop when userspace reports a pen
+battery level at or below 90 %.
+
+The chip keeps the firmware Android programmed into its MTP; firmware
+updates, Q calibration and the factory debug interfaces are not ported.
+Detection scanning stays on while the panel is off. The interrupt does not
+wake the system; events during sleep are handled after resume, once the
+I2C bus is back, waking the chip first if it no longer answers. After a
+removal during sleep while the pen was charging, the chip went quiet and
+dropped the event, so having to wake it while a pen is attached counts as
+a removal. After an attach during sleep only the address packet is left,
+without its check packet; ignore that address instead of stopping power
+transfer.
+
+Report the pen's BLE address from its packets in sysfs and in a change
+uevent so that userspace can bond the pen.
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index fac4db72e..bbbca5540 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -858,6 +858,18 @@ config CHARGER_SC8547A
+ 	  only reach the pumps when this driver is built in or the battery
+ 	  manager is a module.
+ 
++config CHARGER_CPS8601_PEN
++	tristate "ConvenientPower CPS8601 stylus wireless charger"
++	depends on I2C
++	depends on QCOM_PMIC_GLINK
++	depends on GPIOLIB
++	select REGMAP_I2C
++	help
++	  Say Y to charge the magnetically attached stylus of the OnePlus
++	  Pad 2 through its ConvenientPower CPS8601 wireless power
++	  transmitter, supplied by a PMIC boost that the ADSP controls over
++	  pmic_glink.
++
+ config CHARGER_BQ256XX
+ 	tristate "TI BQ256XX battery charger driver"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index d66cab7fa..66c81eb4c 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -106,6 +106,7 @@ obj-$(CONFIG_CHARGER_BQ257XX)	+= bq257xx_charger.o
+ obj-$(CONFIG_CHARGER_BQ25890)	+= bq25890_charger.o
+ obj-$(CONFIG_CHARGER_BQ25980)	+= bq25980_charger.o
+ obj-$(CONFIG_CHARGER_SC8547A)	+= sc8547a_charger.o
++obj-$(CONFIG_CHARGER_CPS8601_PEN)	+= cps8601_pen.o
+ obj-$(CONFIG_CHARGER_BQ25630)	+= bq25630_charger.o
+ obj-$(CONFIG_CHARGER_BQ256XX)	+= bq256xx_charger.o
+ obj-$(CONFIG_CHARGER_RK817)	+= rk817_charger.o
+diff --git a/drivers/power/supply/cps8601_pen.c b/drivers/power/supply/cps8601_pen.c
+new file mode 100644
+index 000000000..d036367ad
+--- /dev/null
++++ b/drivers/power/supply/cps8601_pen.c
+@@ -0,0 +1,859 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * ConvenientPower CPS8601 wireless power transmitter for the magnetically
++ * attached stylus of the OnePlus Pad 2. Based on Oplus' oplus_cps8601.c and
++ * oplus_wireless_pen_glink.c.
++ *
++ * The chip runs the power transfer from its own MTP firmware; this driver
++ * never reprograms it. The host supplies the chip from a PMIC boost that the
++ * ADSP sets over pmic_glink, switches it on, and gates power transfer with the
++ * inhibit line: transfer stops when the pen reports that it stopped charging,
++ * after a maximum charge time or on a protection end-power event. It resumes
++ * when the pen is attached again or, after a full stop, when userspace
++ * reports a pen battery level at or below the recharge threshold.
++ */
++
++#include <linux/bits.h>
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/jiffies.h>
++#include <linux/kobject.h>
++#include <linux/ktime.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/regmap.h>
++#include <linux/soc/qcom/pdr.h>
++#include <linux/soc/qcom/pmic_glink.h>
++#include <linux/workqueue.h>
++
++#define CPS8601_CHIP_ID			0x8601
++
++/* Registers: 16-bit addresses, multi-byte values little-endian */
++#define CPS8601_REG_CHIP_ID		0x0000	/* 2 bytes */
++#define CPS8601_REG_FW_VER		0x0002	/* 2 bytes */
++#define CPS8601_REG_INT_EN		0x0005	/* 2 bytes */
++#define CPS8601_REG_INT_FLAG		0x0007	/* 2 bytes */
++#define CPS8601_REG_INT_CLR		0x0009	/* 2 bytes */
++#define CPS8601_REG_CMD			0x000b
++#define CPS8601_REG_OCP_TH		0x0028	/* 2 bytes, mA */
++#define CPS8601_REG_OVP_TH		0x002a	/* 2 bytes, mV */
++#define CPS8601_REG_UVP_TH		0x002c	/* 2 bytes, mV */
++#define CPS8601_REG_FOD0_TH		0x002f	/* 2 bytes */
++#define CPS8601_REG_ADC_VIN		0x0034	/* 2 bytes, mV */
++#define CPS8601_REG_ADC_I_IN		0x0038	/* 2 bytes, mA */
++#define CPS8601_REG_EPT_CODE		0x003b
++#define CPS8601_REG_EPT_RSN		0x003e	/* 2 bytes */
++#define CPS8601_REG_PPP			0x0040	/* received packet */
++
++#define CPS8601_PPP_LEN			11
++
++/* Interrupt flags */
++#define CPS8601_INT_WAKEUP		BIT(0)
++#define CPS8601_INT_SSP			BIT(2)
++#define CPS8601_INT_ASK_PKT		BIT(5)
++#define CPS8601_INT_EPT			BIT(6)
++#define CPS8601_INT_RX_ATTACH		BIT(9)
++#define CPS8601_INT_RX_REMOVED		BIT(10)
++#define CPS8601_INT_MIS_LOC		BIT(13)
++
++#define CPS8601_CMD_RESET_SYS		BIT(5)
++
++/* End-power reasons */
++#define CPS8601_EPT_OCP			BIT(6)
++#define CPS8601_EPT_OVP			BIT(7)
++#define CPS8601_EPT_UVP			BIT(8)
++#define CPS8601_EPT_FOD			BIT(9)
++#define CPS8601_EPT_OTP			BIT(10)
++#define CPS8601_EPT_POCP		BIT(11)
++#define CPS8601_EPT_FAULT		(CPS8601_EPT_OCP | CPS8601_EPT_OVP | \
++					 CPS8601_EPT_FOD | CPS8601_EPT_OTP | \
++					 CPS8601_EPT_POCP)
++
++/* Packets from the pen */
++#define CPS8601_MAC_HEAD		0x48
++#define CPS8601_MAC_CMD_CHECK		0xc1
++#define CPS8601_MAC_CMD_ADDR1		0xb6
++#define CPS8601_MAC_CMD_ADDR2		0xb7
++#define CPS8601_POWER_HEAD		0x28
++#define CPS8601_POWER_CMD		0x17
++
++/* Stock thresholds (oplus-chg-23926.dtsi and driver defaults) */
++#define CPS8601_OCP_MA			500
++#define CPS8601_OVP_MV			12000
++#define CPS8601_UVP_MV			4000
++#define CPS8601_FOD			400
++#define CPS8601_RECHARGE_SOC		90
++#define CPS8601_MAX_CHARGE_MIN		120
++#define CPS8601_BOOST_MV		5800
++
++#define CPS8601_WAKE_WAIT_MS		2500
++#define CPS8601_ATTACH_CHECK_MS		5000
++
++/* Oplus ADSP service that sets the boost supplying the transmitter */
++#define CPS8601_GLINK_OWNER_HBOOST	32785
++#define CPS8601_GLINK_SET_HBOOST	0x10007
++#define CPS8601_GLINK_TIMEOUT_MS	2500
++#define CPS8601_BOOST_RETRIES		60
++#define CPS8601_BOOST_RETRY_MS		500
++
++struct cps8601_hboost_req {
++	struct pmic_glink_hdr hdr;
++	u8 vout;	/* (mV - 2000) / 50 */
++};
++
++struct cps8601_hboost_resp {
++	struct pmic_glink_hdr hdr;
++	__le32 ret_code;
++};
++
++enum cps8601_stop {
++	CPS8601_STOP_NONE,
++	CPS8601_STOP_FULL,	/* pen reported 100 % */
++	CPS8601_STOP_PEN,	/* pen asked to stop below 100 % */
++	CPS8601_STOP_TIMEOUT,
++	CPS8601_STOP_NO_RX,	/* no receiver answered after attach */
++	CPS8601_STOP_EPT,	/* end-power event, transfer still allowed */
++	CPS8601_STOP_UVP,	/* undervoltage, retried after the boost is set */
++	CPS8601_STOP_FAULT,	/* protection end-power event */
++};
++
++static const char * const cps8601_stop_names[] = {
++	[CPS8601_STOP_NONE]	= "none",
++	[CPS8601_STOP_FULL]	= "full",
++	[CPS8601_STOP_PEN]	= "stopped",
++	[CPS8601_STOP_TIMEOUT]	= "timeout",
++	[CPS8601_STOP_NO_RX]	= "no-receiver",
++	[CPS8601_STOP_EPT]	= "end-power",
++	[CPS8601_STOP_UVP]	= "undervoltage",
++	[CPS8601_STOP_FAULT]	= "fault",
++};
++
++struct cps8601 {
++	struct device *dev;
++	struct regmap *regmap;
++	int irq;
++
++	struct gpio_desc *enable_gpio;	/* power switch from the boost */
++	struct gpio_desc *wake_gpio;	/* keeps the chip awake for I2C */
++	struct gpio_desc *scan_gpio;	/* receiver detection */
++	struct gpio_desc *inhibit_gpio;	/* high: power transfer disallowed */
++
++	struct pmic_glink_client *glink;
++	struct mutex boost_lock;	/* one hboost request at a time */
++	struct completion boost_ack;
++	int boost_ret;
++
++	struct work_struct boost_work;
++	struct delayed_work attach_check_work;
++	struct delayed_work timeout_work;
++
++	struct mutex lock;		/* protects the state below */
++	bool ready;
++	bool near;			/* receiver attached */
++	bool present;			/* receiver answered */
++	bool reported;			/* presence uevent sent */
++	bool allowed;
++	enum cps8601_stop stop;
++	ktime_t charge_start;
++	u64 mac;
++	u32 mac_check;
++	int pen_soc;			/* from the pen's stop packet */
++	int capacity;			/* pen battery level from userspace */
++	u16 fw_version;
++};
++
++static int cps8601_read(struct cps8601 *chip, unsigned int reg, int len, u32 *val)
++{
++	unsigned int byte;
++	int i, ret;
++
++	*val = 0;
++	for (i = 0; i < len; i++) {
++		ret = regmap_read(chip->regmap, reg + i, &byte);
++		if (ret)
++			return ret;
++		*val |= byte << (8 * i);
++	}
++
++	return 0;
++}
++
++static int cps8601_write(struct cps8601 *chip, unsigned int reg, int len, u32 val)
++{
++	int i, ret;
++
++	for (i = 0; i < len; i++) {
++		ret = regmap_write(chip->regmap, reg + i, (val >> (8 * i)) & 0xff);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static void cps8601_glink_callback(const void *data, size_t len, void *priv)
++{
++	const struct cps8601_hboost_resp *resp = data;
++	struct cps8601 *chip = priv;
++
++	if (len < sizeof(*resp) ||
++	    le32_to_cpu(resp->hdr.opcode) != CPS8601_GLINK_SET_HBOOST)
++		return;
++
++	chip->boost_ret = le32_to_cpu(resp->ret_code) ? -EIO : 0;
++	complete(&chip->boost_ack);
++}
++
++static void cps8601_glink_pdr_notify(void *priv, int state)
++{
++	struct cps8601 *chip = priv;
++
++	/* The ADSP may have restarted; set the boost again. */
++	if (state == SERVREG_SERVICE_STATE_UP)
++		queue_work(system_dfl_long_wq, &chip->boost_work);
++}
++
++static int cps8601_set_boost(struct cps8601 *chip, unsigned int mv)
++{
++	struct cps8601_hboost_req req = {
++		.hdr.owner = cpu_to_le32(CPS8601_GLINK_OWNER_HBOOST),
++		.hdr.type = cpu_to_le32(PMIC_GLINK_REQ_RESP),
++		.hdr.opcode = cpu_to_le32(CPS8601_GLINK_SET_HBOOST),
++		.vout = (mv - 2000) / 50,
++	};
++	int ret;
++
++	guard(mutex)(&chip->boost_lock);
++	reinit_completion(&chip->boost_ack);
++	ret = pmic_glink_send(chip->glink, &req, sizeof(req));
++	if (ret)
++		return ret;
++
++	if (!wait_for_completion_timeout(&chip->boost_ack,
++					 msecs_to_jiffies(CPS8601_GLINK_TIMEOUT_MS)))
++		return -ETIMEDOUT;
++
++	return chip->boost_ret;
++}
++
++static void cps8601_allow(struct cps8601 *chip, bool allow)
++{
++	gpiod_set_value_cansleep(chip->inhibit_gpio, !allow);
++	chip->allowed = allow;
++}
++
++static void cps8601_stop(struct cps8601 *chip, enum cps8601_stop reason)
++{
++	cps8601_allow(chip, false);
++	chip->stop = reason;
++	dev_info(chip->dev, "power transfer stopped: %s\n",
++		 cps8601_stop_names[reason]);
++}
++
++static void cps8601_start_charge(struct cps8601 *chip)
++{
++	chip->charge_start = ktime_get_boottime();
++	chip->stop = CPS8601_STOP_NONE;
++	cps8601_allow(chip, true);
++	mod_delayed_work(system_dfl_wq, &chip->attach_check_work,
++			 msecs_to_jiffies(CPS8601_ATTACH_CHECK_MS));
++	mod_delayed_work(system_dfl_wq, &chip->timeout_work,
++			 secs_to_jiffies(CPS8601_MAX_CHARGE_MIN * 60));
++}
++
++static void cps8601_send_uevent(struct cps8601 *chip)
++{
++	char present[24], addr[32];
++	char *envp[] = { present, addr, NULL };
++
++	snprintf(present, sizeof(present), "PEN_PRESENT=%d", chip->present);
++	snprintf(addr, sizeof(addr), "PEN_ADDRESS=%pMR", &chip->mac);
++	kobject_uevent_env(&chip->dev->kobj, KOBJ_CHANGE, envp);
++}
++
++/*
++ * The pen sends its BLE address in two packets, nibble-scrambled, plus a
++ * check packet holding the XOR of the address halves.
++ */
++static u64 cps8601_decode_mac(const u8 *d)
++{
++	u8 a[6];
++
++	a[5] = (d[9] & 0x0f) << 4 | (d[4] & 0xf0) >> 4;
++	a[4] = (d[8] & 0x0f) << 4 | (d[3] & 0xf0) >> 4;
++	a[3] = (d[7] & 0x0f) << 4 | (d[2] & 0xf0) >> 4;
++	a[2] = (d[4] & 0x0f) << 4 | (d[9] & 0xf0) >> 4;
++	a[1] = (d[3] & 0x0f) << 4 | (d[8] & 0xf0) >> 4;
++	a[0] = (d[2] & 0x0f) << 4 | (d[7] & 0xf0) >> 4;
++
++	return (u64)a[5] << 40 | (u64)a[4] << 32 | (u64)a[3] << 24 |
++	       (u64)a[2] << 16 | (u64)a[1] << 8 | a[0];
++}
++
++static bool cps8601_mac_valid(u64 mac, u32 check)
++{
++	return (((mac >> 40) ^ (mac >> 16)) & 0xff) == ((check >> 16) & 0xff) &&
++	       (((mac >> 32) ^ (mac >> 8)) & 0xff) == ((check >> 8) & 0xff) &&
++	       (((mac >> 24) ^ mac) & 0xff) == (check & 0xff);
++}
++
++static void cps8601_handle_packet(struct cps8601 *chip)
++{
++	u8 d[CPS8601_PPP_LEN];
++	unsigned int val;
++	int i, ret;
++
++	for (i = 0; i < CPS8601_PPP_LEN; i++) {
++		ret = regmap_read(chip->regmap, CPS8601_REG_PPP + i, &val);
++		if (ret) {
++			dev_err(chip->dev, "failed to read packet: %d\n", ret);
++			return;
++		}
++		d[i] = val;
++	}
++
++	dev_dbg(chip->dev, "packet %*ph\n", CPS8601_PPP_LEN, d);
++
++	if (d[0] == CPS8601_MAC_HEAD && d[1] == CPS8601_MAC_CMD_CHECK)
++		chip->mac_check = d[4] << 16 | d[3] << 8 | d[2];
++
++	if (d[0] == CPS8601_MAC_HEAD && d[1] == CPS8601_MAC_CMD_ADDR1 &&
++	    d[5] == CPS8601_MAC_HEAD && d[6] == CPS8601_MAC_CMD_ADDR2) {
++		u64 mac = cps8601_decode_mac(d);
++
++		/*
++		 * Only the latest packet is kept: after an attach during system
++		 * sleep, the check packet is already overwritten.
++		 */
++		if (!chip->mac_check) {
++			dev_dbg(chip->dev, "pen address without check, ignored\n");
++			chip->present = true;
++			return;
++		}
++
++		if (!cps8601_mac_valid(mac, chip->mac_check)) {
++			dev_warn(chip->dev, "invalid pen address\n");
++			cps8601_stop(chip, CPS8601_STOP_NO_RX);
++			return;
++		}
++
++		chip->mac = mac;
++		chip->present = true;
++		dev_info(chip->dev, "pen %pMR attached\n", &chip->mac);
++		if (!chip->reported) {
++			chip->reported = true;
++			cps8601_send_uevent(chip);
++		}
++	}
++
++	if (d[0] == CPS8601_POWER_HEAD && d[1] == CPS8601_POWER_CMD) {
++		chip->pen_soc = d[2];
++		cps8601_stop(chip, chip->pen_soc == 100 ? CPS8601_STOP_FULL :
++							   CPS8601_STOP_PEN);
++	}
++}
++
++static void cps8601_handle_ept(struct cps8601 *chip)
++{
++	u32 rsn;
++	int ret;
++
++	ret = cps8601_read(chip, CPS8601_REG_EPT_RSN, 2, &rsn);
++	if (ret) {
++		dev_err(chip->dev, "failed to read end-power reason: %d\n", ret);
++		return;
++	}
++
++	dev_info(chip->dev, "end power, reason %#x\n", rsn);
++	chip->stop = CPS8601_STOP_EPT;
++
++	if (rsn & CPS8601_EPT_FAULT) {
++		cps8601_stop(chip, CPS8601_STOP_FAULT);
++	} else if (rsn & CPS8601_EPT_UVP) {
++		/* The boost may have dropped; set it again, then allow. */
++		cps8601_stop(chip, CPS8601_STOP_UVP);
++		queue_work(system_dfl_long_wq, &chip->boost_work);
++	}
++}
++
++static void cps8601_attached(struct cps8601 *chip)
++{
++	dev_dbg(chip->dev, "receiver attached\n");
++	chip->near = true;
++	cps8601_start_charge(chip);
++}
++
++static void cps8601_removed(struct cps8601 *chip)
++{
++	u32 cmd;
++
++	dev_dbg(chip->dev, "receiver removed\n");
++	cancel_delayed_work(&chip->attach_check_work);
++	cancel_delayed_work(&chip->timeout_work);
++
++	if (chip->reported) {
++		chip->present = false;
++		cps8601_send_uevent(chip);
++	}
++
++	if (chip->stop >= CPS8601_STOP_EPT &&
++	    !cps8601_read(chip, CPS8601_REG_CMD, 1, &cmd))
++		cps8601_write(chip, CPS8601_REG_CMD, 1, cmd | CPS8601_CMD_RESET_SYS);
++
++	chip->near = false;
++	chip->present = false;
++	chip->reported = false;
++	chip->mac = 0;
++	chip->mac_check = 0;
++	chip->stop = CPS8601_STOP_NONE;
++	cps8601_allow(chip, true);
++}
++
++static int cps8601_read_events(struct cps8601 *chip, u32 *flags, bool *woken)
++{
++	int i, ret;
++
++	*woken = false;
++	ret = cps8601_write(chip, CPS8601_REG_INT_EN, 2, 0xffff) ?:
++	      cps8601_read(chip, CPS8601_REG_INT_FLAG, 2, flags);
++	if (!ret)
++		return 0;
++
++	/*
++	 * The chip can stop answering before an event raised during system
++	 * sleep is read, as after a removal while it was charging the pen.
++	 */
++	gpiod_set_value_cansleep(chip->wake_gpio, 1);
++	for (i = 1; i <= 50; i++) {
++		msleep(20);
++		ret = cps8601_write(chip, CPS8601_REG_INT_EN, 2, 0xffff) ?:
++		      cps8601_read(chip, CPS8601_REG_INT_FLAG, 2, flags);
++		if (!ret) {
++			dev_dbg(chip->dev, "woke chip in %d ms\n", i * 20);
++			*woken = true;
++			return 0;
++		}
++	}
++
++	return ret;
++}
++
++static irqreturn_t cps8601_irq(int irq, void *data)
++{
++	struct cps8601 *chip = data;
++	bool woken;
++	u32 flags;
++	int ret;
++
++	guard(mutex)(&chip->lock);
++
++	ret = cps8601_read_events(chip, &flags, &woken);
++	if (ret) {
++		dev_err(chip->dev, "failed to read interrupt flags: %d\n", ret);
++		gpiod_set_value_cansleep(chip->wake_gpio, 0);
++		return IRQ_HANDLED;
++	}
++	cps8601_write(chip, CPS8601_REG_INT_CLR, 2, flags);
++
++	dev_dbg(chip->dev, "interrupt flags %#x\n", flags);
++
++	/*
++	 * The chip answers while it powers a receiver. Having to wake it with
++	 * a pen attached means the pen was removed during system sleep, and
++	 * the chip has dropped the removal event by then.
++	 */
++	if (woken && chip->near)
++		cps8601_removed(chip);
++
++	if (flags & CPS8601_INT_SSP)
++		chip->present = true;
++	if (flags & CPS8601_INT_RX_ATTACH)
++		cps8601_attached(chip);
++	if (flags & CPS8601_INT_RX_REMOVED)
++		cps8601_removed(chip);
++	if (flags & CPS8601_INT_ASK_PKT)
++		cps8601_handle_packet(chip);
++	if (flags & CPS8601_INT_EPT)
++		cps8601_handle_ept(chip);
++	if (flags & CPS8601_INT_MIS_LOC)
++		dev_dbg(chip->dev, "pen mislocated\n");
++
++	gpiod_set_value_cansleep(chip->wake_gpio, 0);
++
++	return IRQ_HANDLED;
++}
++
++static void cps8601_attach_check_work(struct work_struct *work)
++{
++	struct cps8601 *chip = container_of(to_delayed_work(work),
++					    struct cps8601, attach_check_work);
++
++	guard(mutex)(&chip->lock);
++	if (chip->near && !chip->present && chip->allowed)
++		cps8601_stop(chip, CPS8601_STOP_NO_RX);
++}
++
++static void cps8601_timeout_work(struct work_struct *work)
++{
++	struct cps8601 *chip = container_of(to_delayed_work(work),
++					    struct cps8601, timeout_work);
++	s64 elapsed;
++
++	guard(mutex)(&chip->lock);
++	if (!chip->near || !chip->allowed)
++		return;
++
++	elapsed = ktime_ms_delta(ktime_get_boottime(), chip->charge_start);
++	if (elapsed >= (s64)CPS8601_MAX_CHARGE_MIN * 60 * MSEC_PER_SEC)
++		cps8601_stop(chip, CPS8601_STOP_TIMEOUT);
++	else
++		mod_delayed_work(system_dfl_wq, &chip->timeout_work,
++				 msecs_to_jiffies(CPS8601_MAX_CHARGE_MIN * 60 *
++						  MSEC_PER_SEC - elapsed));
++}
++
++/* Power up the chip and set its protection thresholds, as stock does. */
++static int cps8601_chip_init(struct cps8601 *chip)
++{
++	u32 id = 0, ver;
++	int i, ret;
++
++	gpiod_set_value_cansleep(chip->enable_gpio, 1);
++	msleep(10);
++	gpiod_set_value_cansleep(chip->wake_gpio, 1);
++	msleep(CPS8601_WAKE_WAIT_MS);
++
++	for (i = 0; i < 5; i++) {
++		ret = cps8601_read(chip, CPS8601_REG_CHIP_ID, 2, &id);
++		if (!ret && id == CPS8601_CHIP_ID)
++			break;
++		msleep(100);
++	}
++	if (ret || id != CPS8601_CHIP_ID) {
++		ret = ret ?: -ENODEV;
++		dev_err(chip->dev, "chip not found: %d, id %#x\n", ret, id);
++		goto err_off;
++	}
++
++	ret = cps8601_read(chip, CPS8601_REG_FW_VER, 2, &ver);
++	if (ret)
++		goto err_off;
++	chip->fw_version = ver;
++
++	ret = cps8601_write(chip, CPS8601_REG_OCP_TH, 2, CPS8601_OCP_MA) ?:
++	      cps8601_write(chip, CPS8601_REG_UVP_TH, 2, CPS8601_UVP_MV) ?:
++	      cps8601_write(chip, CPS8601_REG_OVP_TH, 2, CPS8601_OVP_MV) ?:
++	      cps8601_write(chip, CPS8601_REG_FOD0_TH, 2, CPS8601_FOD);
++	if (ret) {
++		dev_err(chip->dev, "failed to set thresholds: %d\n", ret);
++		goto err_off;
++	}
++
++	gpiod_set_value_cansleep(chip->scan_gpio, 1);
++	enable_irq(chip->irq);
++	scoped_guard(mutex, &chip->lock) {
++		cps8601_allow(chip, true);
++		chip->ready = true;
++	}
++
++	gpiod_set_value_cansleep(chip->wake_gpio, 0);
++
++	/* Stock resets the chip by cycling its supply switch. */
++	gpiod_set_value_cansleep(chip->enable_gpio, 0);
++	msleep(50);
++	gpiod_set_value_cansleep(chip->enable_gpio, 1);
++	msleep(50);
++
++	dev_info(chip->dev, "CPS8601 firmware %#06x ready\n", chip->fw_version);
++	return 0;
++
++err_off:
++	gpiod_set_value_cansleep(chip->wake_gpio, 0);
++	gpiod_set_value_cansleep(chip->enable_gpio, 0);
++	return ret;
++}
++
++static void cps8601_boost_work(struct work_struct *work)
++{
++	struct cps8601 *chip = container_of(work, struct cps8601, boost_work);
++	int i, ret;
++
++	for (i = 0; i < CPS8601_BOOST_RETRIES; i++) {
++		ret = cps8601_set_boost(chip, CPS8601_BOOST_MV);
++		if (!ret)
++			break;
++		msleep(CPS8601_BOOST_RETRY_MS);
++	}
++	if (ret) {
++		dev_err(chip->dev, "failed to set boost: %d\n", ret);
++		return;
++	}
++
++	dev_dbg(chip->dev, "boost set to %d mV\n", CPS8601_BOOST_MV);
++
++	if (!READ_ONCE(chip->ready)) {
++		cps8601_chip_init(chip);
++		return;
++	}
++
++	/* Retry after an undervoltage end-power event. */
++	guard(mutex)(&chip->lock);
++	if (chip->near && !chip->allowed && chip->stop == CPS8601_STOP_UVP)
++		cps8601_start_charge(chip);
++}
++
++static ssize_t present_show(struct device *dev, struct device_attribute *attr,
++			    char *buf)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%d\n", chip->present);
++}
++static DEVICE_ATTR_RO(present);
++
++static ssize_t pen_address_show(struct device *dev,
++				struct device_attribute *attr, char *buf)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++
++	guard(mutex)(&chip->lock);
++	if (!chip->mac)
++		return sysfs_emit(buf, "\n");
++
++	return sysfs_emit(buf, "%pMR\n", &chip->mac);
++}
++static DEVICE_ATTR_RO(pen_address);
++
++static ssize_t status_show(struct device *dev, struct device_attribute *attr,
++			   char *buf)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++
++	guard(mutex)(&chip->lock);
++	if (!chip->ready)
++		return sysfs_emit(buf, "off\n");
++	if (!chip->near)
++		return sysfs_emit(buf, "idle\n");
++	if (chip->allowed)
++		return sysfs_emit(buf, "charging\n");
++
++	return sysfs_emit(buf, "%s\n", cps8601_stop_names[chip->stop]);
++}
++static DEVICE_ATTR_RO(status);
++
++static ssize_t pen_capacity_show(struct device *dev,
++				 struct device_attribute *attr, char *buf)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%d\n", chip->capacity);
++}
++
++static ssize_t pen_capacity_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t count)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++	int val, ret;
++
++	ret = kstrtoint(buf, 0, &val);
++	if (ret)
++		return ret;
++	if (val < 0 || val > 100)
++		return -EINVAL;
++
++	guard(mutex)(&chip->lock);
++	chip->capacity = val;
++	if (val <= CPS8601_RECHARGE_SOC && chip->near && !chip->allowed &&
++	    chip->stop == CPS8601_STOP_FULL) {
++		dev_info(chip->dev, "recharging at %d %%\n", val);
++		cps8601_start_charge(chip);
++	}
++
++	return count;
++}
++static DEVICE_ATTR_RW(pen_capacity);
++
++static ssize_t cps8601_adc_show(struct device *dev, char *buf, unsigned int reg)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++	u32 val = 0;
++	int ret;
++
++	guard(mutex)(&chip->lock);
++	if (chip->present) {
++		ret = cps8601_read(chip, reg, 2, &val);
++		if (ret)
++			return ret;
++	}
++
++	return sysfs_emit(buf, "%u\n", val);
++}
++
++static ssize_t tx_voltage_show(struct device *dev,
++			       struct device_attribute *attr, char *buf)
++{
++	return cps8601_adc_show(dev, buf, CPS8601_REG_ADC_VIN);
++}
++static DEVICE_ATTR_RO(tx_voltage);
++
++static ssize_t tx_current_show(struct device *dev,
++			       struct device_attribute *attr, char *buf)
++{
++	return cps8601_adc_show(dev, buf, CPS8601_REG_ADC_I_IN);
++}
++static DEVICE_ATTR_RO(tx_current);
++
++static ssize_t firmware_version_show(struct device *dev,
++				     struct device_attribute *attr, char *buf)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%#06x\n", chip->fw_version);
++}
++static DEVICE_ATTR_RO(firmware_version);
++
++static struct attribute *cps8601_attrs[] = {
++	&dev_attr_present.attr,
++	&dev_attr_pen_address.attr,
++	&dev_attr_status.attr,
++	&dev_attr_pen_capacity.attr,
++	&dev_attr_tx_voltage.attr,
++	&dev_attr_tx_current.attr,
++	&dev_attr_firmware_version.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(cps8601);
++
++/*
++ * Events during system sleep wait until the I2C bus is back: the edge is kept
++ * pending while the interrupt is disabled and replayed when it is enabled.
++ */
++static int cps8601_suspend(struct device *dev)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++
++	disable_irq(chip->irq);
++
++	return 0;
++}
++
++static int cps8601_resume(struct device *dev)
++{
++	struct cps8601 *chip = dev_get_drvdata(dev);
++
++	enable_irq(chip->irq);
++	/* The charge time limit counts sleep too. */
++	mod_delayed_work(system_dfl_wq, &chip->timeout_work, 0);
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(cps8601_pm_ops, cps8601_suspend, cps8601_resume);
++
++static const struct regmap_config cps8601_regmap_config = {
++	.reg_bits = 16,
++	.val_bits = 8,
++};
++
++static void cps8601_cancel_work(void *data)
++{
++	struct cps8601 *chip = data;
++
++	cancel_work_sync(&chip->boost_work);
++	cancel_delayed_work_sync(&chip->attach_check_work);
++	cancel_delayed_work_sync(&chip->timeout_work);
++}
++
++static int cps8601_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct cps8601 *chip;
++	int ret;
++
++	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
++	if (!chip)
++		return -ENOMEM;
++
++	chip->dev = dev;
++	chip->irq = client->irq;
++	i2c_set_clientdata(client, chip);
++	mutex_init(&chip->lock);
++	mutex_init(&chip->boost_lock);
++	init_completion(&chip->boost_ack);
++	INIT_WORK(&chip->boost_work, cps8601_boost_work);
++	INIT_DELAYED_WORK(&chip->attach_check_work, cps8601_attach_check_work);
++	INIT_DELAYED_WORK(&chip->timeout_work, cps8601_timeout_work);
++
++	chip->regmap = devm_regmap_init_i2c(client, &cps8601_regmap_config);
++	if (IS_ERR(chip->regmap))
++		return PTR_ERR(chip->regmap);
++
++	chip->enable_gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
++	if (IS_ERR(chip->enable_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->enable_gpio),
++				     "failed to get enable GPIO\n");
++	chip->wake_gpio = devm_gpiod_get(dev, "wake", GPIOD_OUT_LOW);
++	if (IS_ERR(chip->wake_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->wake_gpio),
++				     "failed to get wake GPIO\n");
++	chip->scan_gpio = devm_gpiod_get(dev, "scan", GPIOD_OUT_LOW);
++	if (IS_ERR(chip->scan_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->scan_gpio),
++				     "failed to get scan GPIO\n");
++	chip->inhibit_gpio = devm_gpiod_get(dev, "inhibit", GPIOD_OUT_HIGH);
++	if (IS_ERR(chip->inhibit_gpio))
++		return dev_err_probe(dev, PTR_ERR(chip->inhibit_gpio),
++				     "failed to get inhibit GPIO\n");
++
++	if (chip->irq <= 0)
++		return dev_err_probe(dev, -EINVAL, "no interrupt\n");
++
++	ret = devm_add_action_or_reset(dev, cps8601_cancel_work, chip);
++	if (ret)
++		return ret;
++
++	ret = devm_request_threaded_irq(dev, chip->irq, NULL, cps8601_irq,
++					IRQF_ONESHOT | IRQF_NO_AUTOEN,
++					"cps8601", chip);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request interrupt\n");
++
++	chip->glink = devm_pmic_glink_client_alloc_external(dev,
++				CPS8601_GLINK_OWNER_HBOOST,
++				cps8601_glink_callback,
++				cps8601_glink_pdr_notify, chip);
++	if (IS_ERR(chip->glink))
++		return dev_err_probe(dev, PTR_ERR(chip->glink),
++				     "failed to register pmic_glink client\n");
++
++	/* Sets the boost and initializes the chip once the ADSP is up. */
++	pmic_glink_client_register(chip->glink);
++
++	return 0;
++}
++
++static const struct of_device_id cps8601_of_match[] = {
++	{ .compatible = "convenientpower,cps8601" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, cps8601_of_match);
++
++static struct i2c_driver cps8601_driver = {
++	.driver = {
++		.name = "cps8601-pen",
++		.of_match_table = cps8601_of_match,
++		.dev_groups = cps8601_groups,
++		.pm = pm_sleep_ptr(&cps8601_pm_ops),
++	},
++	.probe = cps8601_probe,
++};
++module_i2c_driver(cps8601_driver);
++
++MODULE_DESCRIPTION("ConvenientPower CPS8601 stylus wireless charger");
++MODULE_LICENSE("GPL");
