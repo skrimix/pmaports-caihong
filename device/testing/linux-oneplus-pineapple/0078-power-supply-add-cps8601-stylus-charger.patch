@@ -16,10 +16,11 @@ Detection scanning stays on while the panel is off. The interrupt does not
 wake the system; events during sleep are handled after resume, once the
 I2C bus is back, waking the chip first if it no longer answers. After a
 removal during sleep while the pen was charging, the chip went quiet and
-dropped the event, so having to wake it while a pen is attached counts as
-a removal. After an attach during sleep only the address packet is left,
-without its check packet; ignore that address instead of stopping power
-transfer.
+dropped the event, so having to wake it for the first event after resume
+while a pen is attached counts as a removal. A removal read together with
+an attach is handled first, as the pen was put back. After an attach
+during sleep only the address packet is left, without its check packet;
+ignore that address instead of stopping power transfer.
 
 Report the pen's BLE address from its packets in sysfs and in a change
 uevent so that userspace can bond the pen.
@@ -64,7 +65,7 @@ new file mode 100644
 index 000000000..d036367ad
 --- /dev/null
 +++ b/drivers/power/supply/cps8601_pen.c
-@@ -0,0 +1,859 @@
+@@ -0,0 +1,885 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * ConvenientPower CPS8601 wireless power transmitter for the magnetically
@@ -86,6 +87,7 @@ index 000000000..d036367ad
 +#include <linux/device.h>
 +#include <linux/gpio/consumer.h>
 +#include <linux/i2c.h>
++#include <linux/if_ether.h>
 +#include <linux/interrupt.h>
 +#include <linux/jiffies.h>
 +#include <linux/kobject.h>
@@ -171,6 +173,7 @@ index 000000000..d036367ad
 +struct cps8601_hboost_req {
 +	struct pmic_glink_hdr hdr;
 +	u8 vout;	/* (mV - 2000) / 50 */
++	u8 reserved[3];	/* stock sends the padded 16 bytes */
 +};
 +
 +struct cps8601_hboost_resp {
@@ -223,12 +226,14 @@ index 000000000..d036367ad
 +	bool ready;
 +	bool near;			/* receiver attached */
 +	bool present;			/* receiver answered */
-+	bool reported;			/* presence uevent sent */
++	bool reported;			/* address valid, presence uevent sent */
 +	bool allowed;
++	bool resumed;			/* no interrupt handled since resume */
 +	enum cps8601_stop stop;
 +	ktime_t charge_start;
-+	u64 mac;
-+	u32 mac_check;
++	u8 mac[ETH_ALEN];		/* least significant byte first */
++	u8 mac_check[3];
++	bool has_mac_check;
 +	int pen_soc;			/* from the pen's stop packet */
 +	int capacity;			/* pen battery level from userspace */
 +	u16 fw_version;
@@ -339,7 +344,7 @@ index 000000000..d036367ad
 +	char *envp[] = { present, addr, NULL };
 +
 +	snprintf(present, sizeof(present), "PEN_PRESENT=%d", chip->present);
-+	snprintf(addr, sizeof(addr), "PEN_ADDRESS=%pMR", &chip->mac);
++	snprintf(addr, sizeof(addr), "PEN_ADDRESS=%pMR", chip->mac);
 +	kobject_uevent_env(&chip->dev->kobj, KOBJ_CHANGE, envp);
 +}
 +
@@ -347,26 +352,25 @@ index 000000000..d036367ad
 + * The pen sends its BLE address in two packets, nibble-scrambled, plus a
 + * check packet holding the XOR of the address halves.
 + */
-+static u64 cps8601_decode_mac(const u8 *d)
++static void cps8601_decode_mac(const u8 *d, u8 *mac)
 +{
-+	u8 a[6];
-+
-+	a[5] = (d[9] & 0x0f) << 4 | (d[4] & 0xf0) >> 4;
-+	a[4] = (d[8] & 0x0f) << 4 | (d[3] & 0xf0) >> 4;
-+	a[3] = (d[7] & 0x0f) << 4 | (d[2] & 0xf0) >> 4;
-+	a[2] = (d[4] & 0x0f) << 4 | (d[9] & 0xf0) >> 4;
-+	a[1] = (d[3] & 0x0f) << 4 | (d[8] & 0xf0) >> 4;
-+	a[0] = (d[2] & 0x0f) << 4 | (d[7] & 0xf0) >> 4;
-+
-+	return (u64)a[5] << 40 | (u64)a[4] << 32 | (u64)a[3] << 24 |
-+	       (u64)a[2] << 16 | (u64)a[1] << 8 | a[0];
++	mac[5] = (d[9] & 0x0f) << 4 | (d[4] & 0xf0) >> 4;
++	mac[4] = (d[8] & 0x0f) << 4 | (d[3] & 0xf0) >> 4;
++	mac[3] = (d[7] & 0x0f) << 4 | (d[2] & 0xf0) >> 4;
++	mac[2] = (d[4] & 0x0f) << 4 | (d[9] & 0xf0) >> 4;
++	mac[1] = (d[3] & 0x0f) << 4 | (d[8] & 0xf0) >> 4;
++	mac[0] = (d[2] & 0x0f) << 4 | (d[7] & 0xf0) >> 4;
 +}
 +
-+static bool cps8601_mac_valid(u64 mac, u32 check)
++static bool cps8601_mac_valid(const u8 *mac, const u8 *check)
 +{
-+	return (((mac >> 40) ^ (mac >> 16)) & 0xff) == ((check >> 16) & 0xff) &&
-+	       (((mac >> 32) ^ (mac >> 8)) & 0xff) == ((check >> 8) & 0xff) &&
-+	       (((mac >> 24) ^ mac) & 0xff) == (check & 0xff);
++	int i;
++
++	for (i = 0; i < 3; i++)
++		if ((mac[i] ^ mac[i + 3]) != check[i])
++			return false;
++
++	return true;
 +}
 +
 +static void cps8601_handle_packet(struct cps8601 *chip)
@@ -386,18 +390,22 @@ index 000000000..d036367ad
 +
 +	dev_dbg(chip->dev, "packet %*ph\n", CPS8601_PPP_LEN, d);
 +
-+	if (d[0] == CPS8601_MAC_HEAD && d[1] == CPS8601_MAC_CMD_CHECK)
-+		chip->mac_check = d[4] << 16 | d[3] << 8 | d[2];
++	if (d[0] == CPS8601_MAC_HEAD && d[1] == CPS8601_MAC_CMD_CHECK) {
++		memcpy(chip->mac_check, &d[2], sizeof(chip->mac_check));
++		chip->has_mac_check = true;
++	}
 +
 +	if (d[0] == CPS8601_MAC_HEAD && d[1] == CPS8601_MAC_CMD_ADDR1 &&
 +	    d[5] == CPS8601_MAC_HEAD && d[6] == CPS8601_MAC_CMD_ADDR2) {
-+		u64 mac = cps8601_decode_mac(d);
++		u8 mac[ETH_ALEN];
++
++		cps8601_decode_mac(d, mac);
 +
 +		/*
 +		 * Only the latest packet is kept: after an attach during system
 +		 * sleep, the check packet is already overwritten.
 +		 */
-+		if (!chip->mac_check) {
++		if (!chip->has_mac_check) {
 +			dev_dbg(chip->dev, "pen address without check, ignored\n");
 +			chip->present = true;
 +			return;
@@ -409,9 +417,9 @@ index 000000000..d036367ad
 +			return;
 +		}
 +
-+		chip->mac = mac;
++		memcpy(chip->mac, mac, sizeof(chip->mac));
 +		chip->present = true;
-+		dev_info(chip->dev, "pen %pMR attached\n", &chip->mac);
++		dev_info(chip->dev, "pen %pMR attached\n", chip->mac);
 +		if (!chip->reported) {
 +			chip->reported = true;
 +			cps8601_send_uevent(chip);
@@ -452,6 +460,9 @@ index 000000000..d036367ad
 +{
 +	dev_dbg(chip->dev, "receiver attached\n");
 +	chip->near = true;
++	/* Drop anything left from a pen whose removal was missed. */
++	chip->present = false;
++	chip->has_mac_check = false;
 +	cps8601_start_charge(chip);
 +}
 +
@@ -475,8 +486,7 @@ index 000000000..d036367ad
 +	chip->near = false;
 +	chip->present = false;
 +	chip->reported = false;
-+	chip->mac = 0;
-+	chip->mac_check = 0;
++	chip->has_mac_check = false;
 +	chip->stop = CPS8601_STOP_NONE;
 +	cps8601_allow(chip, true);
 +}
@@ -513,11 +523,14 @@ index 000000000..d036367ad
 +static irqreturn_t cps8601_irq(int irq, void *data)
 +{
 +	struct cps8601 *chip = data;
-+	bool woken;
++	bool woken, resumed;
 +	u32 flags;
 +	int ret;
 +
 +	guard(mutex)(&chip->lock);
++
++	resumed = chip->resumed;
++	chip->resumed = false;
 +
 +	ret = cps8601_read_events(chip, &flags, &woken);
 +	if (ret) {
@@ -530,19 +543,20 @@ index 000000000..d036367ad
 +	dev_dbg(chip->dev, "interrupt flags %#x\n", flags);
 +
 +	/*
-+	 * The chip answers while it powers a receiver. Having to wake it with
-+	 * a pen attached means the pen was removed during system sleep, and
-+	 * the chip has dropped the removal event by then.
++	 * The chip answers while it powers a receiver. Having to wake it for
++	 * the first event after system sleep with a pen attached means the pen
++	 * was removed during sleep, and the chip has dropped the removal event
++	 * by then.
++	 *
++	 * The flags do not keep the order of events. A removal read together
++	 * with an attach happened during sleep; assume the pen was put back.
 +	 */
-+	if (woken && chip->near)
++	if ((flags & CPS8601_INT_RX_REMOVED) || (resumed && woken && chip->near))
 +		cps8601_removed(chip);
-+
-+	if (flags & CPS8601_INT_SSP)
-+		chip->present = true;
 +	if (flags & CPS8601_INT_RX_ATTACH)
 +		cps8601_attached(chip);
-+	if (flags & CPS8601_INT_RX_REMOVED)
-+		cps8601_removed(chip);
++	if ((flags & CPS8601_INT_SSP) && chip->near)
++		chip->present = true;
 +	if (flags & CPS8601_INT_ASK_PKT)
 +		cps8601_handle_packet(chip);
 +	if (flags & CPS8601_INT_EPT)
@@ -668,10 +682,17 @@ index 000000000..d036367ad
 +		return;
 +	}
 +
-+	/* Retry after an undervoltage end-power event. */
++	/*
++	 * Retry after an undervoltage end-power event. Like stock, keep the
++	 * charge start time; the time limit check may have run while transfer
++	 * was stopped, so run it again.
++	 */
 +	guard(mutex)(&chip->lock);
-+	if (chip->near && !chip->allowed && chip->stop == CPS8601_STOP_UVP)
-+		cps8601_start_charge(chip);
++	if (chip->near && !chip->allowed && chip->stop == CPS8601_STOP_UVP) {
++		chip->stop = CPS8601_STOP_NONE;
++		cps8601_allow(chip, true);
++		mod_delayed_work(system_dfl_wq, &chip->timeout_work, 0);
++	}
 +}
 +
 +static ssize_t present_show(struct device *dev, struct device_attribute *attr,
@@ -689,10 +710,10 @@ index 000000000..d036367ad
 +	struct cps8601 *chip = dev_get_drvdata(dev);
 +
 +	guard(mutex)(&chip->lock);
-+	if (!chip->mac)
++	if (!chip->reported)
 +		return sysfs_emit(buf, "\n");
 +
-+	return sysfs_emit(buf, "%pMR\n", &chip->mac);
++	return sysfs_emit(buf, "%pMR\n", chip->mac);
 +}
 +static DEVICE_ATTR_RO(pen_address);
 +
@@ -814,6 +835,8 @@ index 000000000..d036367ad
 +{
 +	struct cps8601 *chip = dev_get_drvdata(dev);
 +
++	scoped_guard(mutex, &chip->lock)
++		chip->resumed = true;
 +	enable_irq(chip->irq);
 +	/* The charge time limit counts sleep too. */
 +	mod_delayed_work(system_dfl_wq, &chip->timeout_work, 0);
@@ -828,13 +851,17 @@ index 000000000..d036367ad
 +	.val_bits = 8,
 +};
 +
-+static void cps8601_cancel_work(void *data)
++/*
++ * Runs before the pmic_glink client and the interrupt are released. Disabled
++ * work is not queued again by their callbacks, so none can outlive them.
++ */
++static void cps8601_disable_work(void *data)
 +{
 +	struct cps8601 *chip = data;
 +
-+	cancel_work_sync(&chip->boost_work);
-+	cancel_delayed_work_sync(&chip->attach_check_work);
-+	cancel_delayed_work_sync(&chip->timeout_work);
++	disable_work_sync(&chip->boost_work);
++	disable_delayed_work_sync(&chip->attach_check_work);
++	disable_delayed_work_sync(&chip->timeout_work);
 +}
 +
 +static int cps8601_probe(struct i2c_client *client)
@@ -881,10 +908,6 @@ index 000000000..d036367ad
 +	if (chip->irq <= 0)
 +		return dev_err_probe(dev, -EINVAL, "no interrupt\n");
 +
-+	ret = devm_add_action_or_reset(dev, cps8601_cancel_work, chip);
-+	if (ret)
-+		return ret;
-+
 +	ret = devm_request_threaded_irq(dev, chip->irq, NULL, cps8601_irq,
 +					IRQF_ONESHOT | IRQF_NO_AUTOEN,
 +					"cps8601", chip);
@@ -898,6 +921,10 @@ index 000000000..d036367ad
 +	if (IS_ERR(chip->glink))
 +		return dev_err_probe(dev, PTR_ERR(chip->glink),
 +				     "failed to register pmic_glink client\n");
++
++	ret = devm_add_action_or_reset(dev, cps8601_disable_work, chip);
++	if (ret)
++		return ret;
 +
 +	/* Sets the boost and initializes the chip once the ADSP is up. */
 +	pmic_glink_client_register(chip->glink);
