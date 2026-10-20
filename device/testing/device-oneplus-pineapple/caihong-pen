@@ -5,6 +5,10 @@ The pen sends nothing to the touch controller until it receives the serial-numbe
 query; ipemanager on Android sends it after every connection. The NT36532 pen mode
 follows the pen firmware vendor, as in ipemanager (PencilBleManager.t0).
 
+Handwriting feedback (the pen vibrating while it writes) is turned off on every
+connection. ipemanager sends its own setting on every connection too, and Linux has
+no app that sets the drawing tool the feedback imitates.
+
 Like ipemanager, also bond a pen when the wireless charger reports it attached and
 BlueZ does not know it, and pass the pen battery level to the charger, which needs
 it to resume charging after the pen reported full. BlueZ reconnects bonded pens by
@@ -32,6 +36,8 @@ OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
 COMMAND_UUID = "18093046-2a69-11ec-8d3d-0242ac130003"
 FIRMWARE_QUERY = [0x2C, 0x06, 0x01, 0x05]
 SERIAL_QUERY = [0x2C, 0x53, 0x01]
+# Handwriting feedback: 2c 94 02 <tool 0-3> <strength 1-5, 0 = off>.
+FEEDBACK_OFF = [0x2C, 0x94, 0x02, 0x00, 0x00]
 # ipemanager's order; any other firmware gets type 3.
 PEN_TYPES = [("4D45.03", 3), ("4D45.05", 6), ("4D45.04", 5), ("4857", 1), ("5357.01", 4), ("4D45", 2)]
 PEN_TYPE = "/sys/bus/spi/drivers/novatek-nt36532-ts/*/pen_type"
@@ -239,6 +245,7 @@ class PenManager:
             write_sysfs(PEN_CAPACITY, int(battery["Percentage"]))
         try:
             self.command(device).StartNotify()
+            self.write(device, FEEDBACK_OFF)
             self.write(device, FIRMWARE_QUERY)
         except dbus.exceptions.DBusException as e:
             print(f"{device}: {e.get_dbus_message()}", flush=True)
