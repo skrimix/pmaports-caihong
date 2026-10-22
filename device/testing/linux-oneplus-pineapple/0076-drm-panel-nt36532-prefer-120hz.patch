@@ -1,0 +1,119 @@
+Subject: [PATCH] drm/panel: nt36532 - prefer 120 Hz, offer 90 and 60 Hz
+
+The pen does not respond at 144 Hz; Android drops to 120 Hz while a pen
+is connected. Make the 120 Hz mode (OEM timing@0 porches, the same
+hs_rate) the first and preferred one, keep 144 Hz, and enable the 90 and
+60 Hz modes from the OEM's DFPS list. The pen works at 120 and 60 Hz,
+which use the same panel registers (b2 91, b3 40), but not at 144 or
+90 Hz. The 50, 48 and 30 Hz modes stay disabled. The enable fallback
+follows the first mode instead of assuming 144 Hz.
+
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -445,7 +445,7 @@
+         pinfo->connector->state->crtc && pinfo->connector->state->crtc->state) {
+         pinfo->active_vrefresh = drm_mode_vrefresh(&pinfo->connector->state->crtc->state->adjusted_mode);
+     } else {
+-        pinfo->active_vrefresh = 144; /* Failsafe */
++        pinfo->active_vrefresh = drm_mode_vrefresh(&pinfo->desc->modes[0]); /* Failsafe */
+     }
+ 
+     /* The DSI high-speed link is now alive. Safe to send DCS commands. */
+@@ -1068,20 +1068,20 @@
+ }
+ 
+ static const struct drm_display_mode csot_display_modes[] = {
+-    // /* 120 Hz (Preferred Default) - Base Clock */
+-    // {
+-    //     .flags = 0,
+-    //     .name = "3000x2120@120vid",
+-    //     .clock = (3000 + 236 + 40 + 200) * (2120 + 26 + 2 + 208) * 120 / 1000,
+-    //     .hdisplay = 3000,
+-    //     .hsync_start = 3000 + 236,
+-    //     .hsync_end = 3000 + 236 + 40,
+-    //     .htotal = 3000 + 236 + 40 + 200,
+-    //     .vdisplay = 2120,
+-    //     .vsync_start = 2120 + 26,
+-    //     .vsync_end = 2120 + 26 + 2,
+-    //     .vtotal = 2120 + 26 + 2 + 208,
+-    // },
++    /* 120 Hz - OEM timing@0. Preferred: the pen works only at 120, 60 and 30 Hz. */
++    {
++        .flags = 0,
++        .name = "3000x2120@120vid",
++        .clock = (3000 + 236 + 40 + 200) * (2120 + 26 + 2 + 208) * 120 / 1000,
++        .hdisplay = 3000,
++        .hsync_start = 3000 + 236,
++        .hsync_end = 3000 + 236 + 40,
++        .htotal = 3000 + 236 + 40 + 200,
++        .vdisplay = 2120,
++        .vsync_start = 2120 + 26,
++        .vsync_end = 2120 + 26 + 2,
++        .vtotal = 2120 + 26 + 2 + 208,
++    },
+     /* 144 Hz - High Speed Clock (Unique Horizontal Timings) */
+     {
+         .flags = 0,
+@@ -1096,34 +1096,34 @@
+         .vsync_end = 2120 + 26 + 2,
+         .vtotal = 2120 + 26 + 2 + 208,
+     },
+-    // /* 90 Hz - VFP Stretch */
+-    // {
+-    //     .flags = 0,
+-    //     .name = "3000x2120@90vid",
+-    //     .clock = (3000 + 236 + 40 + 200) * (2120 + 811 + 2 + 208) * 90 / 1000,
+-    //     .hdisplay = 3000,
+-    //     .hsync_start = 3000 + 236,
+-    //     .hsync_end = 3000 + 236 + 40,
+-    //     .htotal = 3000 + 236 + 40 + 200,
+-    //     .vdisplay = 2120,
+-    //     .vsync_start = 2120 + 811,
+-    //     .vsync_end = 2120 + 811 + 2,
+-    //     .vtotal = 2120 + 811 + 2 + 208,
+-    // },
+-    // /* 60 Hz - VFP Stretch */
+-    // {
+-    //     .flags = 0,
+-    //     .name = "3000x2120@60vid",
+-    //     .clock = (3000 + 236 + 40 + 200) * (2120 + 2382 + 2 + 208) * 60 / 1000,
+-    //     .hdisplay = 3000,
+-    //     .hsync_start = 3000 + 236,
+-    //     .hsync_end = 3000 + 236 + 40,
+-    //     .htotal = 3000 + 236 + 40 + 200,
+-    //     .vdisplay = 2120,
+-    //     .vsync_start = 2120 + 2382,
+-    //     .vsync_end = 2120 + 2382 + 2,
+-    //     .vtotal = 2120 + 2382 + 2 + 208,
+-    // },
++    /* 90 Hz - VFP Stretch. No pen input, as at 144 Hz. */
++    {
++        .flags = 0,
++        .name = "3000x2120@90vid",
++        .clock = (3000 + 236 + 40 + 200) * (2120 + 811 + 2 + 208) * 90 / 1000,
++        .hdisplay = 3000,
++        .hsync_start = 3000 + 236,
++        .hsync_end = 3000 + 236 + 40,
++        .htotal = 3000 + 236 + 40 + 200,
++        .vdisplay = 2120,
++        .vsync_start = 2120 + 811,
++        .vsync_end = 2120 + 811 + 2,
++        .vtotal = 2120 + 811 + 2 + 208,
++    },
++    /* 60 Hz - VFP Stretch */
++    {
++        .flags = 0,
++        .name = "3000x2120@60vid",
++        .clock = (3000 + 236 + 40 + 200) * (2120 + 2382 + 2 + 208) * 60 / 1000,
++        .hdisplay = 3000,
++        .hsync_start = 3000 + 236,
++        .hsync_end = 3000 + 236 + 40,
++        .htotal = 3000 + 236 + 40 + 200,
++        .vdisplay = 2120,
++        .vsync_start = 2120 + 2382,
++        .vsync_end = 2120 + 2382 + 2,
++        .vtotal = 2120 + 2382 + 2 + 208,
++    },
+     // /* 50 Hz - VFP Stretch */
+     // {
+     //     .flags = 0,

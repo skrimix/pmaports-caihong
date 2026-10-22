@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=29
+pkgrel=40
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -52,6 +52,8 @@ source="
 	0010-drm-panel-nt36532-mirror-nt36523-dsi-configuration.patch
 	0011-drivers-gpu-msm-adjust_mode_clk_for_opd2403.patch
 	0013-ktz8866-patched-slave.patch
+	0014-drivers-gpu-msm-quad-pipe_patch4.patch
+	0017-drivers-gpu-drm-msm-dsi-fix-dsc-pic_width.patch
 	0018-drivers-input-touchscreen-add-nt36532.patch
 	0019-drivers-power-supply-battmgr.patch
 	0021-input-novatek-nt36532-watchdog-recovery.patch
@@ -99,10 +101,11 @@ source="
 	0073-power-supply-qcom-battmgr-acknowledge-power-role-and-hard-reset.patch
 	0074-arm64-dts-qcom-sm8650-minidump-destination.patch
 	0075-input-novatek-nt36532-pen.patch
-	0076-drm-panel-nt36532-run-at-120hz.patch
+	0076-drm-panel-nt36532-prefer-120hz.patch
 	0077-soc-qcom-pmic_glink-allow-external-clients.patch
 	0078-power-supply-add-cps8601-stylus-charger.patch
 	0079-arm64-dts-qcom-caihong-stylus-charger.patch
+	0080-drm-msm-dpu-disable-the-slave-encoder-before-the-master.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -159,6 +162,8 @@ c965e01ccf7e2ebc05b29a3e9b89a6eb44afe2470e277717a7310879ba8be49452706d618d54bc1b
 a33243f3ae883b80c184e7d74ec788acfe1265ac0af3246a4a85af92ead9193db3e9ef19db8c5db88ce40b8a56153cf9be71d8e4a8423603da78a56e978b5b50  0010-drm-panel-nt36532-mirror-nt36523-dsi-configuration.patch
 693517b5ba97d0e64888fb209e13534c1cda486925c767bb027f6e1308fbb14dad2d0c65aa2fdd70bdda6f2d8513b762b8e6f39837b0cebaa44f2c793acbaef9  0011-drivers-gpu-msm-adjust_mode_clk_for_opd2403.patch
 f42a313b3ad69e24041e99590186ba9a7a15f7b50c26208a7aa154e736050445194ff6054433cab20912f0917b6c359b02725f66a90ad905b2529600ae37489d  0013-ktz8866-patched-slave.patch
+86864d012cd552e6f15bd0040716b44ceaf27dc7238566c2491d2c5218a0ad2704e227cab39851af0cf963fee5f8dddf670b1db90a65805da1ca3c3da66824e8  0014-drivers-gpu-msm-quad-pipe_patch4.patch
+3b66eb49dd0e2294546af1a2ad7d7bd32de8e775dbe62d12c43b320b021e10bf291cefa97733dc6ae5779262df01fe2215e51efae084a41278e7a978291555cd  0017-drivers-gpu-drm-msm-dsi-fix-dsc-pic_width.patch
 84ee322a60641bf70838bc5b082b2446f68a8e190d088f443cecceecc5ef06f855b165892e6277eb27a6d500339c56161cda6440b672bea2f57a1772e897cdd6  0018-drivers-input-touchscreen-add-nt36532.patch
 4e19e09df3815bde2582bca7f8db665f585ec09a93004baaafbeef5d3728a68dc7f4e16516605a3d340601937a518dc6cddd67dee47c35518d1f9d72fb5c7433  0019-drivers-power-supply-battmgr.patch
 d3f3c505af4d6196e99beb52587d8e999cb0b1b6e6cfa1e2b2bb5888600406a26e8f82a02ff53961dc4daf152c8974dc8a9f4e4a43d4703296fdda0fc47e6d30  0021-input-novatek-nt36532-watchdog-recovery.patch
@@ -206,10 +211,11 @@ b08f656257ce9c630f45cfedaa276dd15d511d1cf69f10cf7706fca222655ec3ac81e954fc278478
 1a90ce9156cb3c35eaa264a128084d717715f3224391f3809ab9a9a6135d0056e0f92b25bab3c2a5d8247d3a32da3099ecd924cdd9d0b05fbc0ed566827b1f09  0073-power-supply-qcom-battmgr-acknowledge-power-role-and-hard-reset.patch
 cfaf74ef233612b6a4219bde741744285f450ee4d60a6588cd80ec5b20c4a0428f7a33545fa594059d72fcbb65299280963713c20d2919464280b754b0898a24  0074-arm64-dts-qcom-sm8650-minidump-destination.patch
 d3ddcc0caaf916549198261dc4839b0881d32ca1c44fa70754ddb88542654800690091175fc599c954aaea7fb00fd753bc02b7a85bad967421dba7b008ac1173  0075-input-novatek-nt36532-pen.patch
-6842c52da9dd66e9345d9e234547d6ebe7f87d856d49131f6fe37e2fcc259faed0d249dda3a9a79eac5f9bd243da51b5fd70708d2bd2bf050e17ce403af0cf30  0076-drm-panel-nt36532-run-at-120hz.patch
+c51fecf6edd3af3eff83f9775c8424a8304ae567da59d2ec0e00a1e514aed497da70bda165435a10de9e71edd1586e2eb5d3576240940a670d68349f10958a61  0076-drm-panel-nt36532-prefer-120hz.patch
 9196e4123432035afc7cda1d819fc0b90d3a3bb8b4ca6d5b7055ab68a4496e4977b9f9691b0f695fc4cb45952c6b3a6bf0bfc3546a16e2a913dc75e34f08d092  0077-soc-qcom-pmic_glink-allow-external-clients.patch
 8fff0bd18b17335e5430967892f13273496c8287cd7a48dfa02b426ae4a7d039922f44549ced9086d5f0d7df8d37e0978597087526bc46496615de62cf4169e9  0078-power-supply-add-cps8601-stylus-charger.patch
 dab91ff65311b67b06b3de985d4d990b34579ef1b0a9104bea6e82e5405b0a1afb839f5b00994767113445786485afc33aa3b33b668039605445d8f02994f62b  0079-arm64-dts-qcom-caihong-stylus-charger.patch
+2ff17bcd1c6eec58e168dfcfdf3a7eefc73fc96db2688c7e537a63e3376d7372acbb62fa5a4709dada7fe7a723f0ea53fc0076629192a3cdb3deda9e137f99ff  0080-drm-msm-dpu-disable-the-slave-encoder-before-the-master.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 90f881d5278f010f2c87737464076dafac2d262af4b72247d287c294e218e92ab10ce25fffaebff8fbbea178a68817d04e51e30672f020892dd0ae1206ddefc4  config-oneplus-pineapple.aarch64
 "
