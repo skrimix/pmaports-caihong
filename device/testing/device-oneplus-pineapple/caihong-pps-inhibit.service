@@ -1,8 +1,0 @@
-[Unit]
-Description=Block system sleep during PPS fast charging
-After=systemd-logind.service
-
-[Service]
-ExecStart=/usr/bin/systemd-inhibit --what=sleep --mode=block --who="PPS charging" --why="Fast charging needs the system awake" /usr/bin/sleep infinity
-Restart=on-failure
-RestartSec=5

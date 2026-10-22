@@ -1,0 +1,756 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] power: supply: qcom_battmgr: add OnePlus Pad 2 ordinary charging
+
+The ADSP charger firmware charges at a few hundred mA until the host
+writes the charge current, whatever the charger offers. Between PPS
+sessions, follow the OEM Android wired policy: set the charge current
+from the board's table for the charger type and battery temperature
+region, request fixed 9 V from a PD adapter that offers it, and raise the
+input current limit in the OEM steps while VBUS holds (SDP 500 mA, CDP
+1500 mA, DCP and PD 2000 mA, capped at the PDO's current). A PPS session
+starts from fixed 5 V as before.
+
+As Android does with its wired wakelock, hold a wakeup source while a
+charger is attached; sysfs charging_active reads 1 meanwhile, with a
+uevent on each change, so that userspace can inhibit system sleep. A
+suspend that ignores the inhibitor returns to 5 V at a low charge current
+until resume. debugfs pps_control shows the applied limits.
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index f01ee781c..3275326f2 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -145,6 +145,7 @@ enum qcom_battmgr_variant {
+ #define OPLUS_USB_SET_PPS_CURR 35
+ /* USBIN presence, the OEM PPS detach signal: USB_ONLINE drops while the contract changes */
+ #define OPLUS_USB_IN_STATUS 50
++#define OPLUS_USB_VBUS_COLLAPSE 14
+ #define OPLUS_BATT_SET_PDO 25
+ 
+ #define OPLUS_USB_OTG_AP_ENABLE 17
+@@ -364,6 +365,7 @@ struct qcom_battmgr_usb {
+ 	unsigned int current_limit;
+ 	unsigned int usb_type;
+ 	bool in_status;
++	bool vbus_collapse;
+ };
+ 
+ struct qcom_battmgr_wireless {
+@@ -379,6 +381,27 @@ struct qcom_battmgr_wireless {
+ 
+ struct qcom_battmgr_pps_gear;
+ 
++#define WIRED_T_NUM	10
++
++/* Ordinary charging between PPS sessions; protected by the PPS lock. */
++struct qcom_battmgr_wired {
++	struct wakeup_source *ws;
++	bool active;		/* charging_active: a charger is attached */
++	bool stale;		/* firmware state may have changed: apply again */
++	int mode;		/* -1 until applied */
++	int region;		/* WIRED_T_NUM until applied */
++	int thr_dc[WIRED_T_NUM - 1];
++	int temp_dc;
++	int fcc_ma;		/* last written, -1 if unknown */
++	int icl_ma;		/* input current limit set, -1 if unknown */
++	int icl_target_ma;	/* -1 to set the limit again */
++	int vbus_mv;		/* fixed PDO requested */
++	bool caps;		/* PDO currents read for this charger */
++	int pdo_5v_ma, pdo_9v_ma;
++	unsigned int boost_retries;
++	bool boost_off;		/* no 9 V until the charger is removed */
++};
++
+ struct qcom_battmgr_pps {
+ 	bool enabled;
+ 	/* Session state; taken before the request lock. */
+@@ -431,6 +454,7 @@ struct qcom_battmgr_pps {
+ 	struct sc8547a_sample cp_sample[PPS_CP_NUM];
+ 	const char *result;
+ 	int result_err;
++	struct qcom_battmgr_wired wired;
+ };
+ 
+ struct qcom_battmgr {
+@@ -2319,6 +2343,502 @@ static int qcom_battmgr_pps_get_resources(struct qcom_battmgr *battmgr)
+ 	return 0;
+ }
+ 
++/*
++ * OnePlus Pad 2 ordinary charging through the PMIC buck, following the OEM
++ * wired policy (oplus_chg_wired.c with the board's oplus,wired spec and the
++ * input current steps of oplus_hal_adsp.c). The firmware charges at a few
++ * hundred mA until the charge current is written. Between PPS sessions, set
++ * it for the charger type and battery temperature region, request fixed
++ * 9 V from a PD adapter that offers it, and raise the input current limit
++ * in steps while VBUS holds.
++ */
++#define WIRED_5V_MV		5000
++#define WIRED_9V_MV		9000
++#define WIRED_9V_MIN_MV		7500	/* PDQC_BUCK_VBUS_THR */
++#define WIRED_STEP_ICL_MA	500	/* PDQC_BUCK_DEF_CURR_MA, before a voltage change */
++#define WIRED_BOOST_RETRIES	3	/* PD_RETRY_COUNT_MAX, 1 s apart */
++#define WIRED_PD_ICL_MAX_MA	2000	/* oplus_spec,pd-iclmax-ma */
++#define WIRED_TEMP_HYST_DC	20	/* BATT_TEMP_HYST */
++/*
++ * Linux only: Android holds a wakelock while a charger is attached. If a
++ * suspend ignores the sleep inhibitor, charge at a low rate until resume,
++ * since temperature regions are not followed during sleep.
++ */
++#define WIRED_SUSPEND_FCC_MA	500
++
++enum qcom_battmgr_wired_mode {
++	WIRED_MODE_UNKNOWN,
++	WIRED_MODE_SDP,
++	WIRED_MODE_CDP,
++	WIRED_MODE_DCP,
++	WIRED_MODE_PD,
++	WIRED_MODE_NUM,
++};
++
++static const char * const qcom_battmgr_wired_mode_names[] = {
++	[WIRED_MODE_UNKNOWN] = "unknown",
++	[WIRED_MODE_SDP] = "SDP",
++	[WIRED_MODE_CDP] = "CDP",
++	[WIRED_MODE_DCP] = "DCP",
++	[WIRED_MODE_PD] = "PD",
++};
++
++/* oplus_spec,input-power-mw */
++static const u16 qcom_battmgr_wired_power_mw[WIRED_MODE_NUM] = {
++	[WIRED_MODE_UNKNOWN] = 2500,
++	[WIRED_MODE_SDP] = 2500,
++	[WIRED_MODE_CDP] = 7500,
++	[WIRED_MODE_DCP] = 10000,
++	[WIRED_MODE_PD] = 18000,
++};
++
++/*
++ * The OEM's temperature regions. This board's seven oplus_spec,batt-them-thr
++ * values (spec version 3.6) leave little-cold-high and normal-high empty,
++ * which also limits the hysteresis to the boundaries it applies to.
++ */
++enum qcom_battmgr_wired_region {
++	WIRED_T_COLD,
++	WIRED_T_LITTLE_COLD,
++	WIRED_T_LITTLE_COLD_HIGH,
++	WIRED_T_COOL,
++	WIRED_T_LITTLE_COOL,
++	WIRED_T_PRE_NORMAL,
++	WIRED_T_NORMAL,
++	WIRED_T_NORMAL_HIGH,
++	WIRED_T_WARM,
++	WIRED_T_HOT,
++};
++
++static const char * const qcom_battmgr_wired_region_names[WIRED_T_NUM] = {
++	[WIRED_T_COLD] = "cold",
++	[WIRED_T_LITTLE_COLD] = "little-cold",
++	[WIRED_T_LITTLE_COLD_HIGH] = "little-cold-high",
++	[WIRED_T_COOL] = "cool",
++	[WIRED_T_LITTLE_COOL] = "little-cool",
++	[WIRED_T_PRE_NORMAL] = "pre-normal",
++	[WIRED_T_NORMAL] = "normal",
++	[WIRED_T_NORMAL_HIGH] = "normal-high",
++	[WIRED_T_WARM] = "warm",
++	[WIRED_T_HOT] = "hot",
++};
++
++/* Upper region boundaries in 0.1 C, on the common shell selection */
++static const int qcom_battmgr_wired_thr_dc[WIRED_T_NUM - 1] = {
++	-100, 0, 0, 50, 120, 160, 450, 450, 530,
++};
++
++/* oplus_spec,fccmax-ma-lv, equal to -hv on this board */
++static const u16 qcom_battmgr_wired_fcc_ma[WIRED_MODE_NUM][WIRED_T_NUM] = {
++	[WIRED_MODE_UNKNOWN] =	{ 0, 1200, 1200, 2200, 2200, 2200, 2200, 2200, 2200, 0 },
++	[WIRED_MODE_SDP] =	{ 0,  600,  600,  600,  600,  600,  600,  600,  600, 0 },
++	[WIRED_MODE_CDP] =	{ 0, 1200, 1200, 1600, 1600, 1600, 1600, 1600, 1600, 0 },
++	[WIRED_MODE_DCP] =	{ 0, 1200, 1200, 2200, 2200, 2200, 2200, 2200, 2200, 0 },
++	[WIRED_MODE_PD] =	{ 0, 1200, 1200, 4000, 4000, 4000, 4000, 4000, 2200, 0 },
++};
++
++/*
++ * oplus_chg_set_input_current(): each step, the step kept if VBUS sags at
++ * it, and whether the limit may stay there.
++ */
++static const struct {
++	u16 ma;
++	u8 back;
++	bool stop;
++} qcom_battmgr_wired_icl_steps[] = {
++	{ 500, 0, true }, { 900, 0, true }, { 1200, 1, true }, { 1350, 2, false },
++	{ 1500, 2, true }, { 1750, 2, false }, { 2000, 4, true },
++};
++
++static int qcom_battmgr_wired_mode(unsigned int usb_type)
++{
++	switch (usb_type) {
++	case POWER_SUPPLY_USB_TYPE_SDP:
++		return WIRED_MODE_SDP;
++	case POWER_SUPPLY_USB_TYPE_CDP:
++		return WIRED_MODE_CDP;
++	case POWER_SUPPLY_USB_TYPE_DCP:
++	case POWER_SUPPLY_USB_TYPE_ACA:
++	case POWER_SUPPLY_USB_TYPE_C:
++	case POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID:
++		return WIRED_MODE_DCP;
++	case POWER_SUPPLY_USB_TYPE_PD:
++	case POWER_SUPPLY_USB_TYPE_PD_DRP:
++	case POWER_SUPPLY_USB_TYPE_PD_PPS:
++		return WIRED_MODE_PD;
++	default:
++		return WIRED_MODE_UNKNOWN;
++	}
++}
++
++/* Forget the firmware state, e.g. after a charger change or PPS session. */
++static void qcom_battmgr_wired_reset(struct qcom_battmgr_wired *w)
++{
++	w->fcc_ma = w->icl_ma = w->icl_target_ma = -1;
++	w->vbus_mv = WIRED_5V_MV;
++}
++
++static void qcom_battmgr_wired_set_active(struct qcom_battmgr *battmgr, bool active)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++
++	if (w->active == active)
++		return;
++	WRITE_ONCE(w->active, active);
++	if (active)
++		__pm_stay_awake(w->ws);
++	else
++		__pm_relax(w->ws);
++	kobject_uevent(&battmgr->dev->kobj, KOBJ_CHANGE);
++}
++
++static void qcom_battmgr_wired_attach(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++
++	qcom_battmgr_wired_reset(w);
++	w->mode = -1;
++	w->region = WIRED_T_NUM;
++	memcpy(w->thr_dc, qcom_battmgr_wired_thr_dc, sizeof(w->thr_dc));
++	w->caps = w->boost_off = false;
++	w->boost_retries = 0;
++	qcom_battmgr_wired_set_active(battmgr, true);
++}
++
++static int qcom_battmgr_wired_set(struct qcom_battmgr *battmgr, int opcode, int property,
++				  u32 value)
++{
++	int ret;
++
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_request_property(battmgr, opcode, property, value);
++	mutex_unlock(&battmgr->lock);
++	return ret;
++}
++
++static int qcom_battmgr_wired_set_icl(struct qcom_battmgr *battmgr, int ma)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++	int ret;
++
++	ret = qcom_battmgr_wired_set(battmgr, BATTMGR_USB_PROPERTY_SET, USB_INPUT_CURR_LIMIT,
++				     ma * 1000);
++	w->icl_ma = ret ? -1 : ma;
++	return ret;
++}
++
++static int qcom_battmgr_wired_read_vbus(struct qcom_battmgr *battmgr, int *mv, bool *collapse)
++{
++	int ret;
++
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET,
++					    OPLUS_USB_VBUS_COLLAPSE, 0) ?:
++	      qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_VOLT_NOW, 0);
++	*mv = battmgr->usb.voltage_now / 1000;
++	*collapse = battmgr->usb.vbus_collapse;
++	mutex_unlock(&battmgr->lock);
++	return ret;
++}
++
++/* Set @ma, wait 50 ms and check VBUS against @aicl_mv, as the OEM steps do. */
++static int qcom_battmgr_wired_icl_step(struct qcom_battmgr *battmgr, int ma, int aicl_mv,
++				       bool *sag)
++{
++	bool collapse;
++	int mv, ret;
++
++	ret = qcom_battmgr_wired_set_icl(battmgr, ma);
++	if (ret)
++		return ret;
++	usleep_range(50000, 51000);
++	ret = qcom_battmgr_wired_read_vbus(battmgr, &mv, &collapse);
++	if (ret)
++		return ret;
++	*sag = collapse || mv < aicl_mv;
++	return 0;
++}
++
++/* Raise the input current limit towards @target_ma while VBUS holds. */
++static int qcom_battmgr_wired_ramp(struct qcom_battmgr *battmgr, int mode, int target_ma,
++				   int vbat_mv)
++{
++	int aicl_mv = vbat_mv > 4100 ? 4550 : 4500;
++	bool sag = false;
++	unsigned int i, j;
++	int ma, ret;
++
++	/* oplus,usb_aicl_enhance: oplus_chg_usb_set_input_current() in 100 mA steps */
++	if (mode == WIRED_MODE_SDP || mode == WIRED_MODE_CDP || mode == WIRED_MODE_UNKNOWN) {
++		if (mode == WIRED_MODE_SDP)
++			aicl_mv = 4620;	/* USB_SW_AICL_POINT */
++		for (ma = 100; ma <= target_ma; ma += 100) {
++			ret = qcom_battmgr_wired_icl_step(battmgr, ma, aicl_mv, &sag);
++			if (ret)
++				return ret;
++			if (sag)
++				return qcom_battmgr_wired_set_icl(battmgr, max(ma - 100, 100));
++		}
++		return 0;
++	}
++
++	if (target_ma < qcom_battmgr_wired_icl_steps[0].ma)
++		return qcom_battmgr_wired_set_icl(battmgr, 300);
++	for (i = 0; i < ARRAY_SIZE(qcom_battmgr_wired_icl_steps); i++) {
++		ret = qcom_battmgr_wired_icl_step(battmgr, qcom_battmgr_wired_icl_steps[i].ma,
++						  aicl_mv, &sag);
++		if (ret)
++			return ret;
++		if (sag) {
++			j = qcom_battmgr_wired_icl_steps[i].back;
++			return qcom_battmgr_wired_set_icl(battmgr, qcom_battmgr_wired_icl_steps[j].ma);
++		}
++		if (!qcom_battmgr_wired_icl_steps[i].stop)
++			continue;
++		for (j = i + 1; j < ARRAY_SIZE(qcom_battmgr_wired_icl_steps); j++)
++			if (qcom_battmgr_wired_icl_steps[j].stop)
++				break;
++		if (j == ARRAY_SIZE(qcom_battmgr_wired_icl_steps) ||
++		    qcom_battmgr_wired_icl_steps[j].ma > target_ma)
++			break;
++	}
++
++	return 0;
++}
++
++/* oplus_comm_get_temp_region() and oplus_comm_temp_thr_update() */
++static void qcom_battmgr_wired_region(struct qcom_battmgr_wired *w, int temp_dc)
++{
++	int region;
++
++	for (region = 0; region < WIRED_T_HOT; region++)
++		if (temp_dc < w->thr_dc[region])
++			break;
++	if (region == w->region)
++		return;
++
++	memcpy(w->thr_dc, qcom_battmgr_wired_thr_dc, sizeof(w->thr_dc));
++	if (w->region - region == 1 && region < WIRED_T_WARM)
++		w->thr_dc[region] += WIRED_TEMP_HYST_DC;
++	else if (region - w->region == 1 && region > WIRED_T_LITTLE_COLD)
++		w->thr_dc[w->region] -= WIRED_TEMP_HYST_DC;
++	w->region = region;
++}
++
++/* oplus_get_max_current_from_fixed_pdo(): the first fixed PDO at or above @mv */
++static int qcom_battmgr_wired_pdo_ma(struct qcom_battmgr *battmgr, unsigned int mv, bool exact)
++{
++	unsigned int i;
++	u32 pdo;
++
++	for (i = 2; i < 9 && i < battmgr->pps_data_size / sizeof(__le32); i++) {
++		pdo = le32_to_cpu(battmgr->pps_data[i]);
++		if (!pdo || pdo_type(pdo) != PDO_TYPE_FIXED || pdo_fixed_voltage(pdo) < mv)
++			continue;
++		if (exact && pdo_fixed_voltage(pdo) != mv)
++			return 0;
++		return pdo_max_current(pdo);
++	}
++
++	return 0;
++}
++
++static int qcom_battmgr_wired_read_caps(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++	struct qcom_battmgr_pps_request caps = {
++		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_BATTMGR),
++		.hdr.type = cpu_to_le32(PMIC_GLINK_REQ_RESP),
++		.hdr.opcode = cpu_to_le32(OPLUS_PPS_READ_BUFFER),
++		.data_size = cpu_to_le32(sizeof(battmgr->pps_data)),
++	};
++	int ret;
++
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_request(battmgr, &caps, sizeof(caps));
++	if (!ret) {
++		w->pdo_5v_ma = qcom_battmgr_wired_pdo_ma(battmgr, WIRED_5V_MV, false);
++		/* Only a 9 V PDO itself, rather than whatever the firmware picks above it. */
++		w->pdo_9v_ma = qcom_battmgr_wired_pdo_ma(battmgr, WIRED_9V_MV, true);
++		w->caps = true;
++	}
++	mutex_unlock(&battmgr->lock);
++	return ret;
++}
++
++/* The OEM's PD buck: lower the input limit, then request fixed 5 V. */
++static int qcom_battmgr_wired_buck(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++	int ret;
++
++	if (w->vbus_mv == WIRED_5V_MV)
++		return 0;
++	ret = qcom_battmgr_wired_set_icl(battmgr, WIRED_STEP_ICL_MA) ?:
++	      qcom_battmgr_wired_set(battmgr, BATTMGR_BAT_PROPERTY_SET, OPLUS_BATT_SET_PDO,
++				     WIRED_5V_MV);
++	w->vbus_mv = WIRED_5V_MV;
++	w->icl_target_ma = -1;
++	if (ret)
++		dev_err(battmgr->dev, "charging: failed to request 5 V: %d\n", ret);
++	else
++		dev_info(battmgr->dev, "charging: requested 5 V\n");
++	return ret;
++}
++
++/*
++ * oplus_wired_pd_config_work() boost: lower the input limit, request fixed
++ * 9 V and check VBUS. -EAGAIN asks for a retry in 1 s.
++ */
++static int qcom_battmgr_wired_boost(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++	bool collapse;
++	int i, mv = 0, ret;
++
++	w->icl_target_ma = -1;
++	ret = qcom_battmgr_wired_set_icl(battmgr, WIRED_STEP_ICL_MA) ?:
++	      qcom_battmgr_wired_set(battmgr, BATTMGR_BAT_PROPERTY_SET, OPLUS_BATT_SET_PDO,
++				     WIRED_9V_MV);
++	for (i = 0; i < 10 && !ret; i++) {
++		msleep(100);
++		ret = qcom_battmgr_wired_read_vbus(battmgr, &mv, &collapse);
++		if (!ret && mv >= WIRED_9V_MIN_MV)
++			break;
++	}
++	if (!ret && mv >= WIRED_9V_MIN_MV) {
++		w->vbus_mv = WIRED_9V_MV;
++		w->boost_retries = 0;
++		dev_info(battmgr->dev, "charging: 9 V, VBUS %d mV\n", mv);
++		return 0;
++	}
++
++	if (++w->boost_retries < WIRED_BOOST_RETRIES)
++		return -EAGAIN;
++	w->boost_off = true;
++	dev_err(battmgr->dev, "charging: 9 V request failed: %d, VBUS %d mV\n", ret, mv);
++	return ret ?: -EIO;
++}
++
++/*
++ * Apply the policy to the attached charger while no PPS session runs.
++ * Returns a delay in ms for an early poll, or 0.
++ */
++static unsigned int qcom_battmgr_wired_update(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_pps *pps = &battmgr->pps;
++	struct qcom_battmgr_wired *w = &pps->wired;
++	int mode, region, fcc, target, vbat_mv, vbus_mv, ret;
++	unsigned int delay = 0;
++	bool collapse;
++
++	if (battmgr->oplus_otg_state || pps->blocked)
++		return 0;
++	if (READ_ONCE(w->stale)) {
++		WRITE_ONCE(w->stale, false);
++		qcom_battmgr_wired_reset(w);
++	}
++
++	mode = qcom_battmgr_wired_mode(battmgr->usb.usb_type);
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_VOLT_NOW, 0) ?:
++	      qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_TEMP, 0) ?:
++	      qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_VOLT_NOW, 0);
++	vbat_mv = battmgr->status.voltage_now / 1000;
++	vbus_mv = battmgr->usb.voltage_now / 1000;
++	/* The OEM regions follow the common shell selection; a charger is attached. */
++	w->temp_dc = qcom_battmgr_shell_selected(battmgr, battmgr->status.temperature) ?
++		     battmgr->shell_temperature / 100 : battmgr->status.temperature;
++	mutex_unlock(&battmgr->lock);
++	if (ret)
++		goto err;
++
++	region = w->region;
++	qcom_battmgr_wired_region(w, w->temp_dc);
++	if (mode != w->mode) {
++		w->mode = mode;
++		w->caps = false;
++		w->icl_target_ma = -1;
++	}
++	if (mode == WIRED_MODE_PD && !w->caps) {
++		ret = qcom_battmgr_wired_read_caps(battmgr);
++		if (ret)
++			goto err;
++	}
++	/* The adapter left 9 V, e.g. after a hard reset. */
++	if (w->vbus_mv == WIRED_9V_MV && vbus_mv < WIRED_9V_MIN_MV) {
++		dev_info(battmgr->dev, "charging: VBUS %d mV at 9 V\n", vbus_mv);
++		w->vbus_mv = WIRED_5V_MV;
++		w->icl_target_ma = -1;
++	}
++
++	/* Before the input limit: its steps only see a sag under load. */
++	fcc = qcom_battmgr_wired_fcc_ma[mode][w->region];
++	if (fcc != w->fcc_ma) {
++		ret = qcom_battmgr_wired_set(battmgr, BATTMGR_BAT_PROPERTY_SET,
++					     BATT_CHG_CTRL_LIM, fcc * 1000);
++		if (ret)
++			goto err;
++		w->fcc_ma = fcc;
++	}
++
++	if (mode == WIRED_MODE_PD && w->vbus_mv != WIRED_9V_MV && !w->boost_off &&
++	    w->pdo_9v_ma) {
++		ret = qcom_battmgr_wired_boost(battmgr);
++		if (ret == -EAGAIN)
++			delay = 1000;
++	}
++
++	/* oplus_wired_current_set() with the fixed PDO's current (common-charge-icl) */
++	target = qcom_battmgr_wired_power_mw[mode] * 1000 / w->vbus_mv;
++	if (mode == WIRED_MODE_PD) {
++		target = min(target, WIRED_PD_ICL_MAX_MA);
++		if (w->vbus_mv == WIRED_9V_MV)
++			target = min(target, w->pdo_9v_ma);
++		else if (w->pdo_5v_ma)
++			target = min(target, w->pdo_5v_ma);
++	}
++	if (target != w->icl_target_ma) {
++		ret = qcom_battmgr_wired_ramp(battmgr, mode, target, vbat_mv);
++		if (ret)
++			goto err;
++		w->icl_target_ma = target;
++		ret = qcom_battmgr_wired_read_vbus(battmgr, &vbus_mv, &collapse);
++		dev_info(battmgr->dev,
++			 "charging: %s at %d mV: input %d/%d mA, charge %d mA (%s, %d), VBUS %d mV\n",
++			 qcom_battmgr_wired_mode_names[mode], w->vbus_mv, w->icl_ma, target,
++			 w->fcc_ma, qcom_battmgr_wired_region_names[w->region], w->temp_dc,
++			 ret ? -1 : vbus_mv);
++	} else if (w->region != region) {
++		dev_info(battmgr->dev, "charging: %s, %d: charge %d mA\n",
++			 qcom_battmgr_wired_region_names[w->region], w->temp_dc, w->fcc_ma);
++	}
++
++	return delay;
++
++err:
++	dev_err(battmgr->dev, "charging: failed to apply limits: %d\n", ret);
++	/* Unknown state: try again from the start. */
++	qcom_battmgr_wired_reset(w);
++	return PPS_IDLE_POLL_MS;
++}
++
++/* Before system sleep or reboot; resume applies the policy again. */
++static void qcom_battmgr_wired_block(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++	int ret;
++
++	if (!w->active || battmgr->oplus_otg_state || !battmgr->service_up)
++		return;
++	qcom_battmgr_wired_buck(battmgr);
++	if (w->fcc_ma < 0 || w->fcc_ma > WIRED_SUSPEND_FCC_MA) {
++		ret = qcom_battmgr_wired_set(battmgr, BATTMGR_BAT_PROPERTY_SET, BATT_CHG_CTRL_LIM,
++					     WIRED_SUSPEND_FCC_MA * 1000);
++		w->fcc_ma = ret ? -1 : WIRED_SUSPEND_FCC_MA;
++	}
++}
++
+ /* Find the strongest APDO covering the 5.5 V start and the 11 V ceiling. */
+ static int qcom_battmgr_pps_find_apdo(struct qcom_battmgr *battmgr, int *max_mv,
+ 				      unsigned int *max_ma)
+@@ -2426,6 +2946,8 @@ static int qcom_battmgr_pps_enter(struct qcom_battmgr *battmgr)
+ 	pps->wait_reason = NULL;
+ 
+ 	/* oplus_pps_switch_to_normal(): start from fixed 5 V, then read caps. */
++	qcom_battmgr_wired_buck(battmgr);
++	qcom_battmgr_wired_reset(&pps->wired);
+ 	pps->contract = true;
+ 	mutex_lock(&battmgr->lock);
+ 	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
+@@ -2503,6 +3025,7 @@ static int qcom_battmgr_pps_enter(struct qcom_battmgr *battmgr)
+ static void qcom_battmgr_pps_idle(struct qcom_battmgr *battmgr)
+ {
+ 	struct qcom_battmgr_pps *pps = &battmgr->pps;
++	unsigned int delay;
+ 	bool present;
+ 	int ret;
+ 
+@@ -2531,22 +3054,33 @@ static void qcom_battmgr_pps_idle(struct qcom_battmgr *battmgr)
+ 			dev_info(battmgr->dev, "PPS: charger removed\n");
+ 		pps->attached = pps->attached_pps = pps->done = pps->ibat_recovery = false;
+ 		pps->absent_count = 0;
++		qcom_battmgr_wired_set_active(battmgr, false);
+ 		return;
+ 	}
+ 	pps->absent_count = 0;
+ 	if (!pps->attached) {
+ 		pps->attached = true;
+ 		pps->wait_reason = NULL;
++		qcom_battmgr_wired_attach(battmgr);
+ 	}
+ 	if (battmgr->usb.usb_type == POWER_SUPPLY_USB_TYPE_PD_PPS)
+ 		pps->attached_pps = true;
++	/* VBUS from our own OTG output is not a charger. */
++	qcom_battmgr_wired_set_active(battmgr, !battmgr->oplus_otg_state);
+ 
+ 	mod_delayed_work(system_dfl_wq, &pps->work, msecs_to_jiffies(PPS_IDLE_POLL_MS));
+-	if (pps->done || !pps->allowed || battmgr->usb.usb_type != POWER_SUPPLY_USB_TYPE_PD_PPS)
+-		return;
+-	ret = qcom_battmgr_pps_enter(battmgr);
+-	if (ret && ret != -EPERM && ret != -EAGAIN && pps->state == PPS_IDLE)
+-		dev_err(battmgr->dev, "PPS: failed to check the battery: %d\n", ret);
++	if (!pps->done && pps->allowed &&
++	    battmgr->usb.usb_type == POWER_SUPPLY_USB_TYPE_PD_PPS) {
++		ret = qcom_battmgr_pps_enter(battmgr);
++		if (ret && ret != -EPERM && ret != -EAGAIN && pps->state == PPS_IDLE)
++			dev_err(battmgr->dev, "PPS: failed to check the battery: %d\n", ret);
++		if (pps->state != PPS_IDLE)
++			return;
++	}
++	/* Ordinary charging until a session starts */
++	delay = qcom_battmgr_wired_update(battmgr);
++	if (delay)
++		mod_delayed_work(system_dfl_wq, &pps->work, msecs_to_jiffies(delay));
+ }
+ 
+ static void qcom_battmgr_pps_worker(struct work_struct *work)
+@@ -2634,6 +3168,8 @@ static void qcom_battmgr_pps_block(struct qcom_battmgr *battmgr, bool block, con
+ 	pps->blocked = block;
+ 	if (block && pps->state != PPS_IDLE && pps->state != PPS_VERIFY)
+ 		qcom_battmgr_pps_exit(battmgr, reason, 0, true);
++	if (block)
++		qcom_battmgr_wired_block(battmgr);
+ 	if (!block)
+ 		mod_delayed_work(system_dfl_wq, &pps->work, 0);
+ 	mutex_unlock(&pps->lock);
+@@ -2673,6 +3209,13 @@ static void qcom_battmgr_pps_kick(struct qcom_battmgr *battmgr)
+ 		mod_delayed_work(system_dfl_wq, &battmgr->pps.work, 0);
+ }
+ 
++/* Something else changed the input limit or the firmware restarted. */
++static void qcom_battmgr_wired_stale(struct qcom_battmgr *battmgr)
++{
++	WRITE_ONCE(battmgr->pps.wired.stale, true);
++	qcom_battmgr_pps_kick(battmgr);
++}
++
+ static ssize_t pps_charging_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	struct qcom_battmgr *battmgr = dev_get_drvdata(dev);
+@@ -2715,9 +3258,20 @@ static ssize_t pps_active_show(struct device *dev, struct device_attribute *attr
+ }
+ static DEVICE_ATTR_RO(pps_active);
+ 
++/* 1 while a charger is attached; changes come with a uevent. */
++static ssize_t charging_active_show(struct device *dev, struct device_attribute *attr,
++				    char *buf)
++{
++	struct qcom_battmgr *battmgr = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%d\n", READ_ONCE(battmgr->pps.wired.active));
++}
++static DEVICE_ATTR_RO(charging_active);
++
+ static struct attribute *qcom_battmgr_pps_attrs[] = {
+ 	&dev_attr_pps_charging.attr,
+ 	&dev_attr_pps_active.attr,
++	&dev_attr_charging_active.attr,
+ 	NULL,
+ };
+ static const struct attribute_group qcom_battmgr_pps_group = {
+@@ -2755,6 +3309,14 @@ static int qcom_battmgr_pps_control_show(struct seq_file *seq, void *unused)
+ 		seq_printf(seq, "curve: %s, ladder %d, gear %u/%u: %u mA to %u mV\n",
+ 			   qcom_battmgr_pps_range_names[pps->range], pps->ladder, pps->gear,
+ 			   pps->gears, pps->curve[pps->gear].ma, pps->curve[pps->gear].mv);
++	seq_printf(seq, "charging: active %d mode %s region %s (%d) fcc %d mA input %d/%d mA vbus %d mV pdo 5V %d mA 9V %d mA boost retries %u off %d\n",
++		   pps->wired.active,
++		   pps->wired.mode >= 0 ? qcom_battmgr_wired_mode_names[pps->wired.mode] : "none",
++		   pps->wired.region < WIRED_T_NUM ?
++		   qcom_battmgr_wired_region_names[pps->wired.region] : "none",
++		   pps->wired.temp_dc, pps->wired.fcc_ma, pps->wired.icl_ma,
++		   pps->wired.icl_target_ma, pps->wired.vbus_mv, pps->wired.pdo_5v_ma,
++		   pps->wired.pdo_9v_ma, pps->wired.boost_retries, pps->wired.boost_off);
+ 	for (i = 0; i < PPS_CP_NUM; i++)
+ 		seq_printf(seq, "pump %d: 06=0x%02x 07=0x%02x 0e=0x%02x vbus %d mV ibus %d mA vout %d mV tdie %d\n",
+ 			   i, pps->cp_sample[i].status, pps->cp_sample[i].ctrl,
+@@ -2840,6 +3402,7 @@ static void qcom_battmgr_pps_remove(void *data)
+ 	for (i = 0; i < PPS_THERM_NUM; i++)
+ 		if (pps->therm[i])
+ 			iio_channel_release(pps->therm[i]);
++	wakeup_source_unregister(pps->wired.ws);
+ 	wakeup_source_unregister(pps->ws);
+ }
+ 
+@@ -2859,6 +3422,14 @@ static int qcom_battmgr_pps_init(struct qcom_battmgr *battmgr, struct dentry *de
+ 	pps->ws = wakeup_source_register(battmgr->dev, "caihong_pps");
+ 	if (!pps->ws)
+ 		return -ENOMEM;
++	pps->wired.ws = wakeup_source_register(battmgr->dev, "caihong_charger");
++	if (!pps->wired.ws) {
++		wakeup_source_unregister(pps->ws);
++		return -ENOMEM;
++	}
++	pps->wired.mode = -1;
++	pps->wired.region = WIRED_T_NUM;
++	qcom_battmgr_wired_reset(&pps->wired);
+ 	pps->enabled = true;
+ 
+ 	file = debugfs_create_file("pps_control", 0600, debugfs, battmgr,
+@@ -2872,12 +3443,14 @@ static int qcom_battmgr_pps_init(struct qcom_battmgr *battmgr, struct dentry *de
+ 	pps->reboot_nb.notifier_call = qcom_battmgr_pps_reboot_notify;
+ 	ret = register_pm_notifier(&pps->pm_nb);
+ 	if (ret) {
++		wakeup_source_unregister(pps->wired.ws);
+ 		wakeup_source_unregister(pps->ws);
+ 		return ret;
+ 	}
+ 	ret = register_reboot_notifier(&pps->reboot_nb);
+ 	if (ret) {
+ 		unregister_pm_notifier(&pps->pm_nb);
++		wakeup_source_unregister(pps->wired.ws);
+ 		wakeup_source_unregister(pps->ws);
+ 		return ret;
+ 	}
+@@ -2943,6 +3516,7 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
+ 		dev_err(battmgr->dev, "OnePlus OTG %s failed: %d\n",
+ 			enable ? "enable" : "disable", ret);
+ 	mutex_unlock(&battmgr->lock);
++	qcom_battmgr_wired_stale(battmgr);
+ }
+ 
+ static void qcom_battmgr_oplus_update_usb_state_worker(struct work_struct *work)
+@@ -3390,6 +3964,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+ 		case OPLUS_USB_IN_STATUS:
+ 			battmgr->usb.in_status = le32_to_cpu(resp->intval.value);
+ 			break;
++		case OPLUS_USB_VBUS_COLLAPSE:
++			battmgr->usb.vbus_collapse = le32_to_cpu(resp->intval.value);
++			break;
+ 		default:
+ 			dev_warn(battmgr->dev, "unknown property %#x\n", property);
+ 			battmgr->error = -EOPNOTSUPP;
+@@ -3492,7 +4069,7 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
+ 		battmgr->service_up = true;
+ 		schedule_work(&battmgr->enable_work);
+ 		/* A charger may already be attached. */
+-		qcom_battmgr_pps_kick(battmgr);
++		qcom_battmgr_wired_stale(battmgr);
+ 	} else {
+ 		battmgr->service_up = false;
+ 	}

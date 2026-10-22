@@ -1,4 +1,0 @@
-# System suspend ends a PPS fast-charging session; block sleep while one runs.
-# The kernel sends a change uevent on the battery manager whenever pps_active changes.
-ACTION=="add|change", SUBSYSTEM=="auxiliary", ATTR{pps_active}=="1", RUN+="/usr/bin/systemctl --no-block start caihong-pps-inhibit.service"
-ACTION=="add|change", SUBSYSTEM=="auxiliary", ATTR{pps_active}=="0", RUN+="/usr/bin/systemctl --no-block stop caihong-pps-inhibit.service"

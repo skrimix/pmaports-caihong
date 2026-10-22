@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=47
+pkgrel=49
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -55,8 +55,8 @@ source="
 	caihong-sensors.service
 	caihong-shell-back
 	caihong-shell-back.service
-	caihong-pps-inhibit.service
-	81-caihong-pps-inhibit.rules
+	caihong-charging-inhibit.service
+	81-caihong-charging-inhibit.rules
 	caihong-minidump
 	caihong-minidump-save.service
 	caihong-pen
@@ -97,10 +97,10 @@ package() {
 		"$pkgdir/usr/libexec/caihong-shell-back"
 	install -Dm644 "$srcdir/caihong-shell-back.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-shell-back.service"
-	install -Dm644 "$srcdir/caihong-pps-inhibit.service" \
-		"$pkgdir/usr/lib/systemd/system/caihong-pps-inhibit.service"
-	install -Dm644 "$srcdir/81-caihong-pps-inhibit.rules" \
-		"$pkgdir/usr/lib/udev/rules.d/81-caihong-pps-inhibit.rules"
+	install -Dm644 "$srcdir/caihong-charging-inhibit.service" \
+		"$pkgdir/usr/lib/systemd/system/caihong-charging-inhibit.service"
+	install -Dm644 "$srcdir/81-caihong-charging-inhibit.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/81-caihong-charging-inhibit.rules"
 	install -Dm755 "$srcdir/caihong-minidump" "$pkgdir/usr/bin/caihong-minidump"
 	install -Dm644 "$srcdir/caihong-minidump-save.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-minidump-save.service"
@@ -157,8 +157,8 @@ f3a1b96f12f2a6f06f2e00d410b01ee7a12cfa19ae0982f97479c8e303a68dfe7af8b14bc5b8ebe5
 1f36e58c28c0e0757fc3a2b53ceb45c8bc2dd3625e314a6bd24fb0bdd78cf20b79b673f9647885634fb6c2989a7b42d87501868fd7f32f9e23baf5a4df2739b4  caihong-sensors.service
 0395f27517caaa92dd781a01bcfe659a8a65ef6d9a9dc6971191715fe6e35381b6e63f1194a36fafe466e592188921a8957ffd012c5e32b72470ee95c54f436f  caihong-shell-back
 33a25ad5dd369fafd527626eb7e22e886c104664402d972fad7439609337dfc5ab5e7d7127871eb3a7f50ce5634aa0b3f3395f927baa27452fde1f7c0379c270  caihong-shell-back.service
-977aa3fcf823d9dbcf0a3eb3a8703d4a54d7dd175b8a79715b60b0ef602a05892348db40fe3c4b1eb83a70948eec5a0d3310f0d829d22c904ac342111e9d2d28  caihong-pps-inhibit.service
-699cecb9dda387af46365ad8357b9e195542df79eee64b38263f8a928bcfe120ff4a66931fd83cfa0dc62277a7d2fda25b1f68d742a7d816cd8cc8a76466e3c9  81-caihong-pps-inhibit.rules
+aba868c8cfde8a26720c6ddd41b6a4c25b01975319cb52f28898598ca550a8fcaf5103d66b52a58d76379e98667424a38bcc2619ba401d8ecd31acd08a4de820  caihong-charging-inhibit.service
+795c237bc7914c9ae049bce98937548beaaf75ca48fc66bb3d7a6c8b24779eebfb57a61c6ec1d194a4c0e76eee702b5dcb3b55d1a81cdb40bb439b1b52fe6247  81-caihong-charging-inhibit.rules
 0ebee4e30d51de9fba8786e6fd459ca3faed4015979d7edfdcee9f3b3b9a698a2eac88a8bc49d452ece1cb67d51900e7a45690bd4ff678d17171d8888276dd3a  caihong-minidump
 24dd8892e79efe0cd57add6326b4ab2741ca0298c2ce5674d49bbd63c4b96497046b97387fde9b61c1426feab4d1231e9edc1389f132ecaf0d590b63a8f664c3  caihong-minidump-save.service
 5c065915a4153d56bc732eb3816426986fcf66b0517e08d137847877f6d608c18260d49e15ec5470304d0bb0c4d0311cfa72e879a66f14cfd5aa369bd03bfe25  caihong-pen

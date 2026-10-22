@@ -1,0 +1,8 @@
+[Unit]
+Description=Block system sleep while charging
+After=systemd-logind.service
+
+[Service]
+ExecStart=/usr/bin/systemd-inhibit --what=sleep --mode=block --who="Charging" --why="Monitoring battery temperature" /usr/bin/sleep infinity
+Restart=on-failure
+RestartSec=5

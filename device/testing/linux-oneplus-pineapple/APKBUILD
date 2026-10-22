@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=43
+pkgrel=45
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -106,6 +106,7 @@ source="
 	0078-power-supply-add-cps8601-stylus-charger.patch
 	0079-arm64-dts-qcom-caihong-stylus-charger.patch
 	0080-drm-msm-dpu-disable-the-slave-encoder-before-the-master.patch
+	0081-power-supply-qcom-battmgr-ordinary-charging.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -216,6 +217,7 @@ c51fecf6edd3af3eff83f9775c8424a8304ae567da59d2ec0e00a1e514aed497da70bda165435a10
 8fff0bd18b17335e5430967892f13273496c8287cd7a48dfa02b426ae4a7d039922f44549ced9086d5f0d7df8d37e0978597087526bc46496615de62cf4169e9  0078-power-supply-add-cps8601-stylus-charger.patch
 dab91ff65311b67b06b3de985d4d990b34579ef1b0a9104bea6e82e5405b0a1afb839f5b00994767113445786485afc33aa3b33b668039605445d8f02994f62b  0079-arm64-dts-qcom-caihong-stylus-charger.patch
 2ff17bcd1c6eec58e168dfcfdf3a7eefc73fc96db2688c7e537a63e3376d7372acbb62fa5a4709dada7fe7a723f0ea53fc0076629192a3cdb3deda9e137f99ff  0080-drm-msm-dpu-disable-the-slave-encoder-before-the-master.patch
+a2baafa244187d7c6d30233195ea482b95b8443de4819f5ab7ee9778e32fe5ddacd361c18527aa6cd2404ea9b347f0af8feb52a4abfb4ec2c9d89cf2b5b98f91  0081-power-supply-qcom-battmgr-ordinary-charging.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 90f881d5278f010f2c87737464076dafac2d262af4b72247d287c294e218e92ab10ce25fffaebff8fbbea178a68817d04e51e30672f020892dd0ae1206ddefc4  config-oneplus-pineapple.aarch64
 "

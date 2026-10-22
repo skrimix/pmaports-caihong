@@ -1,0 +1,5 @@
+# Charging limits follow the battery temperature only while the system is awake,
+# as Android keeps it awake with a charger attached; block sleep meanwhile.
+# The kernel sends a change uevent on the battery manager whenever charging_active changes.
+ACTION=="add|change", SUBSYSTEM=="auxiliary", ATTR{charging_active}=="1", RUN+="/usr/bin/systemctl --no-block start caihong-charging-inhibit.service"
+ACTION=="add|change", SUBSYSTEM=="auxiliary", ATTR{charging_active}=="0", RUN+="/usr/bin/systemctl --no-block stop caihong-charging-inhibit.service"
