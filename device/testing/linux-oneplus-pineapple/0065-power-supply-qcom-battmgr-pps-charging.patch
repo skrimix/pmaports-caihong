@@ -17,7 +17,7 @@ a uevent on each change, so that userspace can inhibit system sleep, which
 would end the session. debugfs pps_control shows the session and accepts
 "stop", and pps_limit_ma caps the current at 1000-5000 mA.
 diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
-index 9d6ea5f..02ed8b3 100644
+index d20234d..4b01b20 100644
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
 @@ -6,7 +6,9 @@
@@ -68,7 +68,7 @@ index 9d6ea5f..02ed8b3 100644
  };
  
  struct qcom_battmgr_wireless {
-@@ -359,6 +372,63 @@ struct qcom_battmgr_wireless {
+@@ -359,6 +372,65 @@ struct qcom_battmgr_wireless {
  	unsigned int current_max;
  };
  
@@ -95,6 +95,7 @@ index 9d6ea5f..02ed8b3 100644
 +	bool blocked;
 +	/* Charger insertion */
 +	bool attached;
++	bool attached_pps;	/* the insertion reported PD_PPS */
 +	bool done;		/* no further sessions until the charger is removed */
 +	unsigned int absent_count;
 +	bool ibat_recovery;	/* restart only once ordinary charging resumes */
@@ -124,6 +125,7 @@ index 9d6ea5f..02ed8b3 100644
 +	unsigned int full_sw_count, full_hw_count;
 +	unsigned int ramp_steps, retries, over_count, abnormal_count, low_count;
 +	unsigned int ibat_high_count, ibat_low_count, gauge_hot_count, conn_hot_count;
++	unsigned int stopped_count;
 +	struct sc8547a_sample cp_sample[PPS_CP_NUM];
 +	const char *result;
 +	int result_err;
@@ -132,7 +134,7 @@ index 9d6ea5f..02ed8b3 100644
  struct qcom_battmgr {
  	struct device *dev;
  	struct pmic_glink_client *client;
-@@ -405,6 +475,8 @@ struct qcom_battmgr {
+@@ -405,6 +477,8 @@ struct qcom_battmgr {
  	struct work_struct oplus_update_usb_state_work;
  	struct delayed_work oplus_init_work;
  
@@ -141,7 +143,7 @@ index 9d6ea5f..02ed8b3 100644
  	/*
  	 * @lock is used to prevent concurrent power supply requests to the
  	 * firmware, as it then stops responding.
-@@ -427,6 +499,7 @@ static int qcom_battmgr_request(struct qcom_battmgr *battmgr, void *data, size_t
+@@ -427,6 +501,7 @@ static int qcom_battmgr_request(struct qcom_battmgr *battmgr, void *data, size_t
  	battmgr->request_opcode = opcode;
  	battmgr->request_property = U32_MAX;
  	if (opcode == BATTMGR_BAT_PROPERTY_GET ||
@@ -149,7 +151,7 @@ index 9d6ea5f..02ed8b3 100644
  	    opcode == BATTMGR_USB_PROPERTY_GET ||
  	    opcode == BATTMGR_USB_PROPERTY_SET ||
  	    opcode == BATTMGR_WLS_PROPERTY_GET)
-@@ -770,6 +843,13 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+@@ -769,6 +844,13 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
  	switch (psp) {
  	case POWER_SUPPLY_PROP_STATUS:
  		val->intval = battmgr->status.status;
@@ -163,7 +165,7 @@ index 9d6ea5f..02ed8b3 100644
  		break;
  	case POWER_SUPPLY_PROP_CHARGE_TYPE:
  		val->intval = battmgr->info.charge_type;
-@@ -1434,6 +1514,1359 @@ static int qcom_battmgr_pps_status_show(struct seq_file *seq, void *unused)
+@@ -1432,6 +1514,1371 @@ static int qcom_battmgr_pps_status_show(struct seq_file *seq, void *unused)
  }
  DEFINE_SHOW_ATTRIBUTE(qcom_battmgr_pps_status);
  
@@ -186,6 +188,7 @@ index 9d6ea5f..02ed8b3 100644
 +#define PPS_IDLE_POLL_MS	10000
 +#define PPS_RAMP_STEPS_MAX	20
 +#define PPS_START_RETRIES	3
++#define PPS_STOPPED_CYCLES	3
 +#define PPS_TIMEOUT_S		10800	/* oplus,pps_timeout_third */
 +#define PPS_GEAR_OVER_MS	2500
 +
@@ -861,9 +864,16 @@ index 9d6ea5f..02ed8b3 100644
 +		return 0;
 +	if (!SC8547A_SAMPLE_SWITCHING(&pps->cp_sample[0]) ||
 +	    (pps->secondary_on && !SC8547A_SAMPLE_SWITCHING(&pps->cp_sample[1]))) {
++		/*
++		 * An unplug can stop the pumps on UCP before the firmware
++		 * reports the detach; give it 1 s to do so.
++		 */
++		if (++pps->stopped_count < PPS_STOPPED_CYCLES)
++			return PPS_INTERVAL_MS;
 +		*reason = "pump stopped switching";
 +		return -EIO;
 +	}
++	pps->stopped_count = 0;
 +
 +	/* oplus_pps_check_ibat_safety(), counted in 500 ms cycles. */
 +	pps->ibat_high_count = in.ibat_ma < -12000 ? pps->ibat_high_count + 1 : 0;
@@ -1117,7 +1127,7 @@ index 9d6ea5f..02ed8b3 100644
 +		 in.vbat_mv, in.temp_dc, in.gauge_dc, in.therm_dc[0], in.therm_dc[1]);
 +	pps->state = PPS_RAMP;
 +	pps->ramp_steps = pps->over_count = pps->abnormal_count = pps->low_count = 0;
-+	pps->ibat_high_count = pps->ibat_low_count = 0;
++	pps->ibat_high_count = pps->ibat_low_count = pps->stopped_count = 0;
 +	pps->gauge_hot_count = pps->conn_hot_count = 0;
 +	pps->full_sw_count = pps->full_hw_count = 0;
 +	pps->target_curr_ma = 0;
@@ -1166,8 +1176,9 @@ index 9d6ea5f..02ed8b3 100644
 +			mod_delayed_work(system_dfl_wq, &pps->work, HZ);
 +			return;
 +		}
-+		dev_info(battmgr->dev, "PPS: charger removed\n");
-+		pps->attached = pps->done = pps->ibat_recovery = false;
++		if (pps->attached_pps)
++			dev_info(battmgr->dev, "PPS: charger removed\n");
++		pps->attached = pps->attached_pps = pps->done = pps->ibat_recovery = false;
 +		pps->absent_count = 0;
 +		return;
 +	}
@@ -1176,6 +1187,8 @@ index 9d6ea5f..02ed8b3 100644
 +		pps->attached = true;
 +		pps->wait_reason = NULL;
 +	}
++	if (battmgr->usb.usb_type == POWER_SUPPLY_USB_TYPE_PD_PPS)
++		pps->attached_pps = true;
 +
 +	mod_delayed_work(system_dfl_wq, &pps->work, msecs_to_jiffies(PPS_IDLE_POLL_MS));
 +	if (pps->done || !pps->allowed || battmgr->usb.usb_type != POWER_SUPPLY_USB_TYPE_PD_PPS)
@@ -1383,9 +1396,10 @@ index 9d6ea5f..02ed8b3 100644
 +	seq_printf(seq, "counts: ramp %u retries %u over %u abnormal %u low %u range %+d x%d\n",
 +		   pps->ramp_steps, pps->retries, pps->over_count, pps->abnormal_count,
 +		   pps->low_count, pps->range_pending, pps->range_count);
-+	seq_printf(seq, "guards: ibat-high %u ibat-low %u gauge-hot %u conn-hot %u full-sw %u full-hw %u\n",
++	seq_printf(seq, "guards: ibat-high %u ibat-low %u gauge-hot %u conn-hot %u full-sw %u full-hw %u stopped %u\n",
 +		   pps->ibat_high_count, pps->ibat_low_count, pps->gauge_hot_count,
-+		   pps->conn_hot_count, pps->full_sw_count, pps->full_hw_count);
++		   pps->conn_hot_count, pps->full_sw_count, pps->full_hw_count,
++		   pps->stopped_count);
 +	if (pps->curve)
 +		seq_printf(seq, "curve: %s, ladder %d, gear %u/%u: %u mA to %u mV\n",
 +			   qcom_battmgr_pps_range_names[pps->range], pps->ladder, pps->gear,
@@ -1523,7 +1537,7 @@ index 9d6ea5f..02ed8b3 100644
  static void qcom_battmgr_remove_debugfs(void *data)
  {
  	debugfs_remove_recursive(data);
-@@ -1455,6 +2888,8 @@ out:
+@@ -1453,6 +2900,8 @@ out:
  	if (ret)
  		dev_err(battmgr->dev, "OnePlus Type-C initialization failed: %d\n", ret);
  	mutex_unlock(&battmgr->lock);
@@ -1532,7 +1546,7 @@ index 9d6ea5f..02ed8b3 100644
  }
  
  static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
-@@ -1463,6 +2898,8 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
+@@ -1461,6 +2910,8 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
  	bool enable = battmgr->oplus_otg_state;
  	int ret;
  
@@ -1541,7 +1555,7 @@ index 9d6ea5f..02ed8b3 100644
  	mutex_lock(&battmgr->lock);
  	if (enable) {
  		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
-@@ -1553,6 +2990,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+@@ -1551,6 +3002,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  		power_supply_changed(battmgr->bat_psy);
  		break;
  	case NOTIF_USB_PROPERTY:
@@ -1549,7 +1563,7 @@ index 9d6ea5f..02ed8b3 100644
  		power_supply_changed(battmgr->usb_psy);
  		break;
  	case NOTIF_WLS_PROPERTY:
-@@ -1574,6 +3012,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+@@ -1572,6 +3024,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  	case NOTIF_OPLUS_TYPEC_STATE_CHANGE:
  		dev_info(battmgr->dev, "OnePlus state change notification: %#x, updating usb state\n", notification);
  		schedule_work(&battmgr->oplus_update_usb_state_work);
@@ -1557,7 +1571,7 @@ index 9d6ea5f..02ed8b3 100644
  		power_supply_changed(battmgr->usb_psy);
  		power_supply_changed(battmgr->bat_psy);
  		break;
-@@ -1823,6 +3262,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+@@ -1821,6 +3274,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  	battmgr->error = 0;
  
  	switch (opcode) {
@@ -1565,7 +1579,7 @@ index 9d6ea5f..02ed8b3 100644
  	case BATTMGR_USB_PROPERTY_SET:
  		/* The reply value is not a readback of the requested setting. */
  		break;
-@@ -1927,6 +3367,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+@@ -1925,6 +3379,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  		case OPLUS_USB_PPS_STATUS:
  			battmgr->pps_status = le32_to_cpu(resp->intval.value);
  			break;
@@ -1575,7 +1589,7 @@ index 9d6ea5f..02ed8b3 100644
  		default:
  			dev_warn(battmgr->dev, "unknown property %#x\n", property);
  			battmgr->error = -EOPNOTSUPP;
-@@ -2028,6 +3471,8 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
+@@ -2026,6 +3483,8 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
  	if (state == SERVREG_SERVICE_STATE_UP) {
  		battmgr->service_up = true;
  		schedule_work(&battmgr->enable_work);
@@ -1584,7 +1598,7 @@ index 9d6ea5f..02ed8b3 100644
  	} else {
  		battmgr->service_up = false;
  	}
-@@ -2182,6 +3627,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+@@ -2180,6 +3639,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
  					   &qcom_battmgr_pps_status_fops);
  		if (IS_ERR(file))
  			return dev_err_probe(dev, PTR_ERR(file), "failed to create PPS status diagnostic\n");
