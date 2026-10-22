@@ -16,7 +16,7 @@ uevent on each change, so that userspace can inhibit system sleep. A
 suspend that ignores the inhibitor returns to 5 V at a low charge current
 until resume. debugfs pps_control shows the applied limits.
 diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
-index f01ee781c..3275326f2 100644
+index 208b086e3..0c6b9d9be 100644
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
 @@ -145,6 +145,7 @@ enum qcom_battmgr_variant {
@@ -35,7 +35,7 @@ index f01ee781c..3275326f2 100644
  };
  
  struct qcom_battmgr_wireless {
-@@ -379,6 +381,27 @@ struct qcom_battmgr_wireless {
+@@ -379,6 +381,28 @@ struct qcom_battmgr_wireless {
  
  struct qcom_battmgr_pps_gear;
  
@@ -51,6 +51,7 @@ index f01ee781c..3275326f2 100644
 +	int thr_dc[WIRED_T_NUM - 1];
 +	int temp_dc;
 +	int fcc_ma;		/* last written, -1 if unknown */
++	int chg_en;		/* battery charging enable written, -1 if unknown */
 +	int icl_ma;		/* input current limit set, -1 if unknown */
 +	int icl_target_ma;	/* -1 to set the limit again */
 +	int vbus_mv;		/* fixed PDO requested */
@@ -63,7 +64,7 @@ index f01ee781c..3275326f2 100644
  struct qcom_battmgr_pps {
  	bool enabled;
  	/* Session state; taken before the request lock. */
-@@ -431,6 +454,7 @@ struct qcom_battmgr_pps {
+@@ -431,6 +455,7 @@ struct qcom_battmgr_pps {
  	struct sc8547a_sample cp_sample[PPS_CP_NUM];
  	const char *result;
  	int result_err;
@@ -71,7 +72,7 @@ index f01ee781c..3275326f2 100644
  };
  
  struct qcom_battmgr {
-@@ -2319,6 +2343,502 @@ static int qcom_battmgr_pps_get_resources(struct qcom_battmgr *battmgr)
+@@ -2322,6 +2347,560 @@ static int qcom_battmgr_pps_get_resources(struct qcom_battmgr *battmgr)
  	return 0;
  }
  
@@ -94,7 +95,9 @@ index f01ee781c..3275326f2 100644
 +/*
 + * Linux only: Android holds a wakelock while a charger is attached. If a
 + * suspend ignores the sleep inhibitor, charge at a low rate until resume,
-+ * since temperature regions are not followed during sleep.
++ * since temperature regions are not followed during sleep. The same rate
++ * is left for the next system after a reboot, and replaces the 0 mA of a
++ * hot or cold battery when the charger is removed.
 + */
 +#define WIRED_SUSPEND_FCC_MA	500
 +
@@ -229,6 +232,7 @@ index f01ee781c..3275326f2 100644
 +	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
 +
 +	qcom_battmgr_wired_reset(w);
++	w->chg_en = -1;
 +	w->mode = -1;
 +	w->region = WIRED_T_NUM;
 +	memcpy(w->thr_dc, qcom_battmgr_wired_thr_dc, sizeof(w->thr_dc));
@@ -245,6 +249,29 @@ index f01ee781c..3275326f2 100644
 +	mutex_lock(&battmgr->lock);
 +	ret = qcom_battmgr_request_property(battmgr, opcode, property, value);
 +	mutex_unlock(&battmgr->lock);
++	return ret;
++}
++
++/*
++ * oplus_chg_8350_output_suspend(): battery charging on or off, independent
++ * of the charge current and the input. The firmware keeps the setting
++ * across charger removal.
++ */
++static int qcom_battmgr_wired_enable(struct qcom_battmgr *battmgr, bool en)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++	int prev = w->chg_en, ret;
++
++	if (prev == en)
++		return 0;
++	ret = qcom_battmgr_wired_set(battmgr, BATTMGR_BAT_PROPERTY_SET, BATT_CHG_CTRL_EN, en);
++	w->chg_en = ret ? -1 : en;
++	if (ret)
++		dev_err(battmgr->dev, "charging: failed to %s battery charging: %d\n",
++			en ? "enable" : "disable", ret);
++	else if (!en || !prev)
++		dev_info(battmgr->dev, "charging: battery charging %s\n",
++			 en ? "enabled" : "disabled");
 +	return ret;
 +}
 +
@@ -469,6 +496,7 @@ index f01ee781c..3275326f2 100644
 +	if (READ_ONCE(w->stale)) {
 +		WRITE_ONCE(w->stale, false);
 +		qcom_battmgr_wired_reset(w);
++		w->chg_en = -1;
 +	}
 +
 +	mode = qcom_battmgr_wired_mode(battmgr->usb.usb_type);
@@ -503,6 +531,15 @@ index f01ee781c..3275326f2 100644
 +		w->vbus_mv = WIRED_5V_MV;
 +		w->icl_target_ma = -1;
 +	}
++
++	/*
++	 * oplus_wired_temp_region_update_work(): no battery charging when hot
++	 * or cold, set before the charge current as the OEM does.
++	 */
++	ret = qcom_battmgr_wired_enable(battmgr, w->region != WIRED_T_HOT &&
++					 w->region != WIRED_T_COLD);
++	if (ret)
++		goto err;
 +
 +	/* Before the input limit: its steps only see a sag under load. */
 +	fcc = qcom_battmgr_wired_fcc_ma[mode][w->region];
@@ -555,14 +592,36 @@ index f01ee781c..3275326f2 100644
 +	return PPS_IDLE_POLL_MS;
 +}
 +
-+/* Before system sleep or reboot; resume applies the policy again. */
-+static void qcom_battmgr_wired_block(struct qcom_battmgr *battmgr)
++/*
++ * The firmware keeps the charge enable and current across charger removal
++ * and reboot: do not leave battery charging off for a later charger or system.
++ */
++static void qcom_battmgr_wired_release(struct qcom_battmgr *battmgr)
++{
++	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
++	int ret;
++
++	qcom_battmgr_wired_enable(battmgr, true);
++	if (!w->fcc_ma) {
++		ret = qcom_battmgr_wired_set(battmgr, BATTMGR_BAT_PROPERTY_SET, BATT_CHG_CTRL_LIM,
++					     WIRED_SUSPEND_FCC_MA * 1000);
++		w->fcc_ma = ret ? -1 : WIRED_SUSPEND_FCC_MA;
++	}
++}
++
++/*
++ * Before system sleep or reboot; resume applies the policy again. Sleep
++ * keeps battery charging off when hot or cold; a reboot releases it.
++ */
++static void qcom_battmgr_wired_block(struct qcom_battmgr *battmgr, bool sleep)
 +{
 +	struct qcom_battmgr_wired *w = &battmgr->pps.wired;
 +	int ret;
 +
 +	if (!w->active || battmgr->oplus_otg_state || !battmgr->service_up)
 +		return;
++	if (!sleep)
++		qcom_battmgr_wired_release(battmgr);
 +	qcom_battmgr_wired_buck(battmgr);
 +	if (w->fcc_ma < 0 || w->fcc_ma > WIRED_SUSPEND_FCC_MA) {
 +		ret = qcom_battmgr_wired_set(battmgr, BATTMGR_BAT_PROPERTY_SET, BATT_CHG_CTRL_LIM,
@@ -574,7 +633,7 @@ index f01ee781c..3275326f2 100644
  /* Find the strongest APDO covering the 5.5 V start and the 11 V ceiling. */
  static int qcom_battmgr_pps_find_apdo(struct qcom_battmgr *battmgr, int *max_mv,
  				      unsigned int *max_ma)
-@@ -2426,6 +2946,8 @@ static int qcom_battmgr_pps_enter(struct qcom_battmgr *battmgr)
+@@ -2435,6 +3014,8 @@ static int qcom_battmgr_pps_enter(struct qcom_battmgr *battmgr)
  	pps->wait_reason = NULL;
  
  	/* oplus_pps_switch_to_normal(): start from fixed 5 V, then read caps. */
@@ -583,7 +642,7 @@ index f01ee781c..3275326f2 100644
  	pps->contract = true;
  	mutex_lock(&battmgr->lock);
  	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
-@@ -2503,6 +3025,7 @@ static int qcom_battmgr_pps_enter(struct qcom_battmgr *battmgr)
+@@ -2512,6 +3093,7 @@ static int qcom_battmgr_pps_enter(struct qcom_battmgr *battmgr)
  static void qcom_battmgr_pps_idle(struct qcom_battmgr *battmgr)
  {
  	struct qcom_battmgr_pps *pps = &battmgr->pps;
@@ -591,10 +650,11 @@ index f01ee781c..3275326f2 100644
  	bool present;
  	int ret;
  
-@@ -2531,22 +3054,33 @@ static void qcom_battmgr_pps_idle(struct qcom_battmgr *battmgr)
+@@ -2540,22 +3122,34 @@ static void qcom_battmgr_pps_idle(struct qcom_battmgr *battmgr)
  			dev_info(battmgr->dev, "PPS: charger removed\n");
  		pps->attached = pps->attached_pps = pps->done = pps->ibat_recovery = false;
  		pps->absent_count = 0;
++		qcom_battmgr_wired_release(battmgr);
 +		qcom_battmgr_wired_set_active(battmgr, false);
  		return;
  	}
@@ -630,16 +690,49 @@ index f01ee781c..3275326f2 100644
  }
  
  static void qcom_battmgr_pps_worker(struct work_struct *work)
-@@ -2634,6 +3168,8 @@ static void qcom_battmgr_pps_block(struct qcom_battmgr *battmgr, bool block, con
+@@ -2635,7 +3229,8 @@ static void qcom_battmgr_pps_stop(struct qcom_battmgr *battmgr, const char *reas
+  * Stop before system sleep or reboot, while GLINK and I2C are still up, and
+  * refuse new sessions until resume.
+  */
+-static void qcom_battmgr_pps_block(struct qcom_battmgr *battmgr, bool block, const char *reason)
++static void qcom_battmgr_pps_block(struct qcom_battmgr *battmgr, bool block, bool sleep,
++				   const char *reason)
+ {
+ 	struct qcom_battmgr_pps *pps = &battmgr->pps;
+ 
+@@ -2643,6 +3238,8 @@ static void qcom_battmgr_pps_block(struct qcom_battmgr *battmgr, bool block, con
  	pps->blocked = block;
  	if (block && pps->state != PPS_IDLE && pps->state != PPS_VERIFY)
  		qcom_battmgr_pps_exit(battmgr, reason, 0, true);
 +	if (block)
-+		qcom_battmgr_wired_block(battmgr);
++		qcom_battmgr_wired_block(battmgr, sleep);
  	if (!block)
  		mod_delayed_work(system_dfl_wq, &pps->work, 0);
  	mutex_unlock(&pps->lock);
-@@ -2673,6 +3209,13 @@ static void qcom_battmgr_pps_kick(struct qcom_battmgr *battmgr)
+@@ -2656,11 +3253,11 @@ static int qcom_battmgr_pps_pm_notify(struct notifier_block *nb, unsigned long a
+ 	switch (action) {
+ 	case PM_HIBERNATION_PREPARE:
+ 	case PM_SUSPEND_PREPARE:
+-		qcom_battmgr_pps_block(battmgr, true, "system suspend");
++		qcom_battmgr_pps_block(battmgr, true, true, "system suspend");
+ 		break;
+ 	case PM_POST_HIBERNATION:
+ 	case PM_POST_SUSPEND:
+-		qcom_battmgr_pps_block(battmgr, false, NULL);
++		qcom_battmgr_pps_block(battmgr, false, true, NULL);
+ 		break;
+ 	}
+ 
+@@ -2672,7 +3269,7 @@ static int qcom_battmgr_pps_reboot_notify(struct notifier_block *nb, unsigned lo
+ {
+ 	struct qcom_battmgr *battmgr = container_of(nb, struct qcom_battmgr, pps.reboot_nb);
+ 
+-	qcom_battmgr_pps_block(battmgr, true, "reboot");
++	qcom_battmgr_pps_block(battmgr, true, false, "reboot");
+ 	return NOTIFY_DONE;
+ }
+ 
+@@ -2682,6 +3279,13 @@ static void qcom_battmgr_pps_kick(struct qcom_battmgr *battmgr)
  		mod_delayed_work(system_dfl_wq, &battmgr->pps.work, 0);
  }
  
@@ -653,7 +746,7 @@ index f01ee781c..3275326f2 100644
  static ssize_t pps_charging_show(struct device *dev, struct device_attribute *attr, char *buf)
  {
  	struct qcom_battmgr *battmgr = dev_get_drvdata(dev);
-@@ -2715,9 +3258,20 @@ static ssize_t pps_active_show(struct device *dev, struct device_attribute *attr
+@@ -2728,9 +3332,20 @@ static ssize_t pps_active_show(struct device *dev, struct device_attribute *attr
  }
  static DEVICE_ATTR_RO(pps_active);
  
@@ -674,22 +767,31 @@ index f01ee781c..3275326f2 100644
  	NULL,
  };
  static const struct attribute_group qcom_battmgr_pps_group = {
-@@ -2755,6 +3309,14 @@ static int qcom_battmgr_pps_control_show(struct seq_file *seq, void *unused)
+@@ -2768,6 +3383,14 @@ static int qcom_battmgr_pps_control_show(struct seq_file *seq, void *unused)
  		seq_printf(seq, "curve: %s, ladder %d, gear %u/%u: %u mA to %u mV\n",
  			   qcom_battmgr_pps_range_names[pps->range], pps->ladder, pps->gear,
  			   pps->gears, pps->curve[pps->gear].ma, pps->curve[pps->gear].mv);
-+	seq_printf(seq, "charging: active %d mode %s region %s (%d) fcc %d mA input %d/%d mA vbus %d mV pdo 5V %d mA 9V %d mA boost retries %u off %d\n",
++	seq_printf(seq, "charging: active %d mode %s region %s (%d) enable %d fcc %d mA input %d/%d mA vbus %d mV pdo 5V %d mA 9V %d mA boost retries %u off %d\n",
 +		   pps->wired.active,
 +		   pps->wired.mode >= 0 ? qcom_battmgr_wired_mode_names[pps->wired.mode] : "none",
 +		   pps->wired.region < WIRED_T_NUM ?
 +		   qcom_battmgr_wired_region_names[pps->wired.region] : "none",
-+		   pps->wired.temp_dc, pps->wired.fcc_ma, pps->wired.icl_ma,
++		   pps->wired.temp_dc, pps->wired.chg_en, pps->wired.fcc_ma, pps->wired.icl_ma,
 +		   pps->wired.icl_target_ma, pps->wired.vbus_mv, pps->wired.pdo_5v_ma,
 +		   pps->wired.pdo_9v_ma, pps->wired.boost_retries, pps->wired.boost_off);
  	for (i = 0; i < PPS_CP_NUM; i++)
  		seq_printf(seq, "pump %d: 06=0x%02x 07=0x%02x 0e=0x%02x vbus %d mV ibus %d mA vout %d mV tdie %d\n",
  			   i, pps->cp_sample[i].status, pps->cp_sample[i].ctrl,
-@@ -2840,6 +3402,7 @@ static void qcom_battmgr_pps_remove(void *data)
+@@ -2844,7 +3467,7 @@ static void qcom_battmgr_pps_remove(void *data)
+ 
+ 	unregister_reboot_notifier(&pps->reboot_nb);
+ 	unregister_pm_notifier(&pps->pm_nb);
+-	qcom_battmgr_pps_block(battmgr, true, "driver removed");
++	qcom_battmgr_pps_block(battmgr, true, false, "driver removed");
+ 	pps->enabled = false;
+ 	cancel_delayed_work_sync(&pps->work);
+ 	for (i = 0; i < PPS_CP_NUM; i++)
+@@ -2853,6 +3476,7 @@ static void qcom_battmgr_pps_remove(void *data)
  	for (i = 0; i < PPS_THERM_NUM; i++)
  		if (pps->therm[i])
  			iio_channel_release(pps->therm[i]);
@@ -697,7 +799,7 @@ index f01ee781c..3275326f2 100644
  	wakeup_source_unregister(pps->ws);
  }
  
-@@ -2859,6 +3422,14 @@ static int qcom_battmgr_pps_init(struct qcom_battmgr *battmgr, struct dentry *de
+@@ -2872,6 +3496,15 @@ static int qcom_battmgr_pps_init(struct qcom_battmgr *battmgr, struct dentry *de
  	pps->ws = wakeup_source_register(battmgr->dev, "caihong_pps");
  	if (!pps->ws)
  		return -ENOMEM;
@@ -707,12 +809,13 @@ index f01ee781c..3275326f2 100644
 +		return -ENOMEM;
 +	}
 +	pps->wired.mode = -1;
++	pps->wired.chg_en = -1;
 +	pps->wired.region = WIRED_T_NUM;
 +	qcom_battmgr_wired_reset(&pps->wired);
  	pps->enabled = true;
  
  	file = debugfs_create_file("pps_control", 0600, debugfs, battmgr,
-@@ -2872,12 +3443,14 @@ static int qcom_battmgr_pps_init(struct qcom_battmgr *battmgr, struct dentry *de
+@@ -2885,12 +3518,14 @@ static int qcom_battmgr_pps_init(struct qcom_battmgr *battmgr, struct dentry *de
  	pps->reboot_nb.notifier_call = qcom_battmgr_pps_reboot_notify;
  	ret = register_pm_notifier(&pps->pm_nb);
  	if (ret) {
@@ -727,7 +830,7 @@ index f01ee781c..3275326f2 100644
  		wakeup_source_unregister(pps->ws);
  		return ret;
  	}
-@@ -2943,6 +3516,7 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
+@@ -2956,6 +3591,7 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
  		dev_err(battmgr->dev, "OnePlus OTG %s failed: %d\n",
  			enable ? "enable" : "disable", ret);
  	mutex_unlock(&battmgr->lock);
@@ -735,7 +838,7 @@ index f01ee781c..3275326f2 100644
  }
  
  static void qcom_battmgr_oplus_update_usb_state_worker(struct work_struct *work)
-@@ -3390,6 +3964,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+@@ -3403,6 +4039,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  		case OPLUS_USB_IN_STATUS:
  			battmgr->usb.in_status = le32_to_cpu(resp->intval.value);
  			break;
@@ -745,7 +848,7 @@ index f01ee781c..3275326f2 100644
  		default:
  			dev_warn(battmgr->dev, "unknown property %#x\n", property);
  			battmgr->error = -EOPNOTSUPP;
-@@ -3492,7 +4069,7 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
+@@ -3505,7 +4144,7 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
  		battmgr->service_up = true;
  		schedule_work(&battmgr->enable_work);
  		/* A charger may already be attached. */

@@ -17,7 +17,7 @@ a uevent on each change, so that userspace can inhibit system sleep, which
 would end the session. debugfs pps_control shows the session and accepts
 "stop", and pps_limit_ma caps the current at 1000-5000 mA.
 diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
-index d20234d..4b01b20 100644
+index d20234d..901e9f8 100644
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
 @@ -6,7 +6,9 @@
@@ -165,7 +165,7 @@ index d20234d..4b01b20 100644
  		break;
  	case POWER_SUPPLY_PROP_CHARGE_TYPE:
  		val->intval = battmgr->info.charge_type;
-@@ -1432,6 +1514,1371 @@ static int qcom_battmgr_pps_status_show(struct seq_file *seq, void *unused)
+@@ -1432,6 +1514,1384 @@ static int qcom_battmgr_pps_status_show(struct seq_file *seq, void *unused)
  }
  DEFINE_SHOW_ATTRIBUTE(qcom_battmgr_pps_status);
  
@@ -759,8 +759,6 @@ index d20234d..4b01b20 100644
 +{
 +	struct qcom_battmgr_pps *pps = &battmgr->pps;
 +
-+	if (!in->present)
-+		return "detached";
 +	if (in->adapter != POWER_SUPPLY_USB_TYPE_PD_PPS)
 +		return "adapter type changed";
 +	pps->gauge_hot_count = in->gauge_dc >= PPS_GAUGE_STOP_DC ? pps->gauge_hot_count + 1 : 0;
@@ -798,8 +796,13 @@ index d20234d..4b01b20 100644
 +		*reason = "pump read failed";
 +		return ret;
 +	}
++	/*
++	 * A detach may be a brief USBIN drop, such as a PD hard reset, rather
++	 * than a removal: a new session may start if the charger stays.
++	 */
 +	if (!in.present) {
 +		*reason = "detached";
++		*retry = true;
 +		return 0;
 +	}
 +
@@ -1014,8 +1017,14 @@ index d20234d..4b01b20 100644
 +	if (!battmgr->service_up || battmgr->oplus_otg_state || pps->blocked)
 +		return -EAGAIN;
 +	ret = qcom_battmgr_pps_get_resources(battmgr);
-+	if (ret)
-+		return ret;
++	if (ret) {
++		/* Ordinary charging goes on; report once, the idle poll retries. */
++		reason = "charge pump or thermistor unavailable";
++		if (reason != pps->wait_reason)
++			dev_warn(battmgr->dev, "PPS: not starting (%s): %d\n", reason, ret);
++		pps->wait_reason = reason;
++		return -EPERM;
++	}
 +
 +	ret = qcom_battmgr_pps_read_inputs(battmgr, &in);
 +	if (ret)
@@ -1220,7 +1229,7 @@ index d20234d..4b01b20 100644
 +			mutex_unlock(&battmgr->lock);
 +			if (ret || !battmgr->usb.in_status) {
 +				qcom_battmgr_pps_exit(battmgr, ret ? "input read failed" : "detached",
-+						      ret, false);
++						      ret, !ret);
 +				goto out;
 +			}
 +		}
@@ -1329,7 +1338,11 @@ index d20234d..4b01b20 100644
 +	return sysfs_emit(buf, "%d\n", READ_ONCE(battmgr->pps.allowed));
 +}
 +
-+/* Disabling stops a session; enabling allows one again on the current charger. */
++/*
++ * Writing 0 stops a session and prevents new ones. Writing 1 after 0 resets
++ * the charger's state as a new insertion does: a session may start again
++ * after any exit, including full, time limit, "stop" and faults.
++ */
 +static ssize_t pps_charging_store(struct device *dev, struct device_attribute *attr,
 +				  const char *buf, size_t count)
 +{
@@ -1344,7 +1357,7 @@ index d20234d..4b01b20 100644
 +
 +	mutex_lock(&pps->lock);
 +	if (enable && !pps->allowed)
-+		pps->done = false;
++		pps->done = pps->ibat_recovery = false;
 +	WRITE_ONCE(pps->allowed, enable);
 +	if (!enable && pps->state != PPS_IDLE && pps->state != PPS_VERIFY)
 +		qcom_battmgr_pps_exit(battmgr, "disabled", 0, true);
@@ -1537,7 +1550,7 @@ index d20234d..4b01b20 100644
  static void qcom_battmgr_remove_debugfs(void *data)
  {
  	debugfs_remove_recursive(data);
-@@ -1453,6 +2900,8 @@ out:
+@@ -1453,6 +2913,8 @@ static void qcom_battmgr_oplus_init_worker(struct work_struct *work)
  	if (ret)
  		dev_err(battmgr->dev, "OnePlus Type-C initialization failed: %d\n", ret);
  	mutex_unlock(&battmgr->lock);
@@ -1546,7 +1559,7 @@ index d20234d..4b01b20 100644
  }
  
  static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
-@@ -1461,6 +2910,8 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
+@@ -1461,6 +2923,8 @@ static void qcom_battmgr_oplus_otg_worker(struct work_struct *work)
  	bool enable = battmgr->oplus_otg_state;
  	int ret;
  
@@ -1555,7 +1568,7 @@ index d20234d..4b01b20 100644
  	mutex_lock(&battmgr->lock);
  	if (enable) {
  		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
-@@ -1551,6 +3002,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+@@ -1551,6 +3015,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  		power_supply_changed(battmgr->bat_psy);
  		break;
  	case NOTIF_USB_PROPERTY:
@@ -1563,7 +1576,7 @@ index d20234d..4b01b20 100644
  		power_supply_changed(battmgr->usb_psy);
  		break;
  	case NOTIF_WLS_PROPERTY:
-@@ -1572,6 +3024,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+@@ -1572,6 +3037,7 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  	case NOTIF_OPLUS_TYPEC_STATE_CHANGE:
  		dev_info(battmgr->dev, "OnePlus state change notification: %#x, updating usb state\n", notification);
  		schedule_work(&battmgr->oplus_update_usb_state_work);
@@ -1571,7 +1584,7 @@ index d20234d..4b01b20 100644
  		power_supply_changed(battmgr->usb_psy);
  		power_supply_changed(battmgr->bat_psy);
  		break;
-@@ -1821,6 +3274,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+@@ -1821,6 +3287,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  	battmgr->error = 0;
  
  	switch (opcode) {
@@ -1579,7 +1592,7 @@ index d20234d..4b01b20 100644
  	case BATTMGR_USB_PROPERTY_SET:
  		/* The reply value is not a readback of the requested setting. */
  		break;
-@@ -1925,6 +3379,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+@@ -1925,6 +3392,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
  		case OPLUS_USB_PPS_STATUS:
  			battmgr->pps_status = le32_to_cpu(resp->intval.value);
  			break;
@@ -1589,7 +1602,7 @@ index d20234d..4b01b20 100644
  		default:
  			dev_warn(battmgr->dev, "unknown property %#x\n", property);
  			battmgr->error = -EOPNOTSUPP;
-@@ -2026,6 +3483,8 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
+@@ -2026,6 +3496,8 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
  	if (state == SERVREG_SERVICE_STATE_UP) {
  		battmgr->service_up = true;
  		schedule_work(&battmgr->enable_work);
@@ -1598,7 +1611,7 @@ index d20234d..4b01b20 100644
  	} else {
  		battmgr->service_up = false;
  	}
-@@ -2180,6 +3639,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+@@ -2180,6 +3652,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
  					   &qcom_battmgr_pps_status_fops);
  		if (IS_ERR(file))
  			return dev_err_probe(dev, PTR_ERR(file), "failed to create PPS status diagnostic\n");
