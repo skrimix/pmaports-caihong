@@ -4,7 +4,10 @@ Subject: [PATCH] power: supply: qcom_battmgr: derive Pad 2 battery health
 The Oplus Android supply computes health from gauge/policy inputs and
 returns zero for standard power. Our generic health reply reports Overheat
 at ordinary gauge temperatures; its power reply disagrees with voltage and
-current by orders of magnitude. Stop requesting those properties.
+current by orders of magnitude. Its cycle count is not a cycle count
+either: it moved between 1 and 3 and back down on a used tablet, while
+Android's standard supply reports zero cycles. Stop requesting those
+properties.
 
 Derive health from fresh presence, gauge temperature and voltage, with the
 Pad 2 OEM fault limits and hysteresis. Decode signed temperature before
@@ -14,11 +17,12 @@ Limits: saved Android DT /soc/oplus,comm, batt-them-thr and vbatt-ov-thr-mv.
 Reference: OnePlus modules 3b0ed1b3edbcbffec3fdf43e4e7e54730a7c08a9,
 vendor/oplus/kernel/charger/v2/oplus_chg_comm.c (health, temperature and
 voltage checks), include/oplus_chg_comm.h (BATT_TEMP_HYST), and
-charger_ic/oplus_hal_adsp.c (signed temperature decoding).
+charger_ic/oplus_hal_adsp.c (signed temperature decoding; the same
+firmware value is read as battery_cc in fg_sm8350_get_battery_cc()).
 
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
-@@ -317,13 +317,16 @@
+@@ -318,13 +318,16 @@
  struct qcom_battmgr_status {
  	unsigned int status;
  	unsigned int health;
@@ -36,7 +40,7 @@ charger_ic/oplus_hal_adsp.c (signed temperature decoding).
  	unsigned int resistance;
  	unsigned int soh_percent;
  
-@@ -504,7 +507,6 @@
+@@ -505,7 +508,6 @@
  
  static const u8 sm8350_bat_prop_map[] = {
  	[POWER_SUPPLY_PROP_STATUS] = BATT_STATUS,
@@ -44,7 +48,15 @@ charger_ic/oplus_hal_adsp.c (signed temperature decoding).
  	[POWER_SUPPLY_PROP_PRESENT] = BATT_PRESENT,
  	[POWER_SUPPLY_PROP_CHARGE_TYPE] = BATT_CHG_TYPE,
  	[POWER_SUPPLY_PROP_CAPACITY] = BATT_CAPACITY,
-@@ -523,9 +525,53 @@
+@@ -516,7 +518,6 @@
+ 	[POWER_SUPPLY_PROP_TEMP] = BATT_TEMP,
+ 	[POWER_SUPPLY_PROP_TECHNOLOGY] = BATT_TECHNOLOGY,
+ 	[POWER_SUPPLY_PROP_CHARGE_COUNTER] =  BATT_CHG_COUNTER,
+-	[POWER_SUPPLY_PROP_CYCLE_COUNT] = BATT_CYCLE_COUNT,
+ 	[POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN] =  BATT_CHG_FULL_DESIGN,
+ 	[POWER_SUPPLY_PROP_CHARGE_FULL] = BATT_CHG_FULL,
+ 	[POWER_SUPPLY_PROP_MODEL_NAME] = BATT_MODEL_NAME,
+@@ -524,9 +525,53 @@
  	[POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG] = BATT_TTE_AVG,
  	[POWER_SUPPLY_PROP_INTERNAL_RESISTANCE] = BATT_RESISTANCE,
  	[POWER_SUPPLY_PROP_STATE_OF_HEALTH] = BATT_SOH,
@@ -99,7 +111,7 @@ charger_ic/oplus_hal_adsp.c (signed temperature decoding).
  static int qcom_battmgr_bat_sm8350_update(struct qcom_battmgr *battmgr,
  					  enum power_supply_property psp)
  {
-@@ -538,7 +584,10 @@
+@@ -539,7 +584,10 @@
  	prop = sm8350_bat_prop_map[psp];
  
  	mutex_lock(&battmgr->lock);
@@ -111,7 +123,15 @@ charger_ic/oplus_hal_adsp.c (signed temperature decoding).
  	mutex_unlock(&battmgr->lock);
  
  	return ret;
-@@ -958,7 +1007,6 @@
+@@ -951,7 +999,6 @@
+ 	POWER_SUPPLY_PROP_TEMP,
+ 	POWER_SUPPLY_PROP_TECHNOLOGY,
+ 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
+-	POWER_SUPPLY_PROP_CYCLE_COUNT,
+ 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+ 	POWER_SUPPLY_PROP_CHARGE_FULL,
+ 	POWER_SUPPLY_PROP_MODEL_NAME,
+@@ -959,7 +1006,6 @@
  	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
  	POWER_SUPPLY_PROP_INTERNAL_RESISTANCE,
  	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
@@ -119,7 +139,7 @@ charger_ic/oplus_hal_adsp.c (signed temperature decoding).
  };
  
  static const struct power_supply_desc sm8350_bat_psy_desc = {
-@@ -1593,7 +1641,7 @@
+@@ -1592,7 +1638,7 @@
  	unsigned int property;
  	unsigned int opcode = le32_to_cpu(resp->hdr.opcode);
  	size_t payload_len = len - sizeof(struct pmic_glink_hdr);
@@ -128,7 +148,7 @@ charger_ic/oplus_hal_adsp.c (signed temperature decoding).
  
  	if (opcode == OPLUS_PPS_READ_BUFFER) {
  		const struct qcom_battmgr_pps_response *pps = (const void *)resp;
-@@ -1697,7 +1745,7 @@
+@@ -1696,7 +1742,7 @@
  			battmgr->status.current_now = le32_to_cpu(resp->intval.value);
  			break;
  		case BATT_TEMP:
