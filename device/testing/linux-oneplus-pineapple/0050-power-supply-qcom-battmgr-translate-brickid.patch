@@ -1,33 +1,76 @@
 From: Pad 2 bring-up <local@localhost>
-Subject: [PATCH] power: supply: qcom_battmgr: translate firmware BrickID type
+Subject: [PATCH] power: supply: qcom_battmgr: translate firmware adapter types
 
-The SM8350-style firmware ABI encodes Apple/BrickID as 9. Adding the SPR
-AVS types to enum power_supply_usb_type moved the kernel's BrickID value
-to 11, so copying the wire value now reports an unsupported SPR AVS type.
-On this tablet a reconnect can return 9 and every USB supply uevent then
-fails with "driver reporting unavailable enum value 9", flooding the log.
+The firmware's USB_ADAP_TYPE follows the old enum power_supply_usb_type,
+which encodes Apple/BrickID as 9. Adding the SPR AVS types moved the
+kernel's BrickID to 11. Oplus firmware also reports 17 (PD_SDP) for a
+PD source that is a USB host, such as a hub. Copying either value
+fails every read of usb_type with "driver reporting unavailable enum
+value", and systemd-journald reads the supply's uevent for each such
+message, so the warnings sustain themselves at about 95 per second.
 
-Translate this fixed wire value to the kernel enum. The other firmware
-USB types (0 through 8) still match. This changes reporting only.
+On this tablet a charger connected through a USB-C hub reports 17, 
+and a Type-A DCP brick replugged after a hub session can report 9.
+Android doesn't show the same behaviour, however, so it is likely 
+something in our code causes it.
 
+Keep the firmware value for the driver's own use and translate it for
+sysfs: 0 through 8 still match, 9 becomes BrickID and 17 becomes PD.
+Report any other value as Unknown and warn once.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index d4f3d47b0..e2c5b68a1 100644
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
-@@ -90,6 +90,9 @@
- #define USB_ADAP_TYPE			7
+@@ -92,6 +92,14 @@ enum qcom_battmgr_variant {
  #define USB_MOISTURE_DET_EN		8
  #define USB_MOISTURE_DET_STS		9
-+
-+/* Fixed firmware ABI, independent of enum power_supply_usb_type. */
-+#define BATTMGR_USB_TYPE_APPLE_BRICK_ID	9
  
++/*
++ * USB_ADAP_TYPE values follow the old enum power_supply_usb_type, which
++ * still matches the kernel's for 0 through 8. Oplus firmware adds PD_SDP,
++ * a PD source that is also a USB host, e.g. a hub.
++ */
++#define BATTMGR_USB_TYPE_APPLE_BRICK_ID	9
++#define BATTMGR_USB_TYPE_PD_SDP		17
++
  #define BATTMGR_WLS_PROPERTY_GET	0x34
  #define BATTMGR_WLS_PROPERTY_SET	0x35
-@@ -1913,6 +1916,8 @@
- 			break;
- 		case USB_ADAP_TYPE:
- 			battmgr->usb.usb_type = le32_to_cpu(resp->intval.value);
-+			if (battmgr->usb.usb_type == BATTMGR_USB_TYPE_APPLE_BRICK_ID)
-+				battmgr->usb.usb_type = POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID;
- 			break;
- 		case OPLUS_USB_PPS_STATUS:
- 			battmgr->pps_status = le32_to_cpu(resp->intval.value);
+ #define WLS_ONLINE			0
+@@ -1195,6 +1203,27 @@ static int qcom_battmgr_usb_sm8350_update(struct qcom_battmgr *battmgr,
+ 	return ret;
+ }
+ 
++/*
++ * A value outside the supply's usb_types fails every uevent with a warning,
++ * and journald answers each warning by reading the uevent again.
++ */
++static int qcom_battmgr_usb_type(struct qcom_battmgr *battmgr)
++{
++	unsigned int type = battmgr->usb.usb_type;
++
++	switch (type) {
++	case POWER_SUPPLY_USB_TYPE_UNKNOWN ... POWER_SUPPLY_USB_TYPE_PD_PPS:
++		return type;
++	case BATTMGR_USB_TYPE_APPLE_BRICK_ID:
++		return POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID;
++	case BATTMGR_USB_TYPE_PD_SDP:
++		return POWER_SUPPLY_USB_TYPE_PD;
++	default:
++		dev_warn_once(battmgr->dev, "unknown USB adapter type %u\n", type);
++		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
++	}
++}
++
+ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+@@ -1233,7 +1262,7 @@ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
+ 		val->intval = battmgr->usb.current_limit;
+ 		break;
+ 	case POWER_SUPPLY_PROP_USB_TYPE:
+-		val->intval = battmgr->usb.usb_type;
++		val->intval = qcom_battmgr_usb_type(battmgr);
+ 		break;
+ 	default:
+ 		return -EINVAL;
