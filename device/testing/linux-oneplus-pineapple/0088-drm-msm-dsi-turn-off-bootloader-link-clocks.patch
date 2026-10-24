@@ -1,0 +1,94 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] drm/msm/dsi: turn off the link clocks the bootloader left on
+
+After a continuous-splash takeover, the first power-on warned
+"disp_cc_mdss_pclk{0,1}_clk_src: rcg didn't update its configuration":
+the pixel clock branches the bootloader enabled keep their RCGs on, and
+the PHY enable has stopped the PLL they run from, so the RCGs cannot
+switch to the new rates. A normal boot resets MDSS first, and a regular
+power-off turns the branches off.
+
+Before the first power-on, take and drop the link clock reference once
+if a branch is still on. In bonded mode, host 0's rate change reaches
+both hosts' RCGs through the shared PLL, so do it for both hosts first.
+
+diff --git a/drivers/gpu/drm/msm/dsi/dsi.h b/drivers/gpu/drm/msm/dsi/dsi.h
+index 93c028a12..9ef62179a 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -76,6 +76,7 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
+ 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
+ 			bool is_bonded_dsi, struct msm_dsi_phy *phy);
+ int msm_dsi_host_power_off(struct mipi_dsi_host *host);
++void msm_dsi_host_drop_boot_link_clks(struct mipi_dsi_host *host);
+ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ 				  const struct drm_display_mode *mode);
+ enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 6906d7b1d..b42f8eb0d 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/clk-provider.h>
+ #include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/err.h>
+@@ -2580,6 +2581,39 @@ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
+ 	return 0;
+ }
+ 
++/**
++ * msm_dsi_host_drop_boot_link_clks() - turn off link clocks left on by the bootloader
++ * @host: the DSI host
++ *
++ * A bootloader display (continuous splash) leaves the link clock branches
++ * enabled. Their RCGs then stay on while the PHY reset in the PHY enable
++ * has stopped the PLL, and cannot latch the new link rates ("rcg didn't
++ * update its configuration"). Take and drop a reference once to turn the
++ * branches off, as after a regular power-off. Call this after the PHY
++ * enable and before the first host sets the rates of the PLL it shares.
++ */
++void msm_dsi_host_drop_boot_link_clks(struct mipi_dsi_host *host)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
++
++	mutex_lock(&msm_host->dev_mutex);
++	if (msm_host->power_on)
++		goto unlock;
++
++	/* With the bus clocks on, the clock controller reports the hardware state */
++	pm_runtime_get_sync(&msm_host->pdev->dev);
++	if (__clk_is_enabled(msm_host->byte_clk) ||
++	    __clk_is_enabled(msm_host->pixel_clk)) {
++		if (!cfg_hnd->ops->link_clk_enable(msm_host))
++			cfg_hnd->ops->link_clk_disable(msm_host);
++	}
++	pm_runtime_put(&msm_host->pdev->dev);
++
++unlock:
++	mutex_unlock(&msm_host->dev_mutex);
++}
++
+ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ 				  const struct drm_display_mode *mode)
+ {
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_manager.c b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+index 959daa88b..15d06b7ad 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -224,6 +224,11 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
+ 	if (ret)
+ 		goto phy_en_fail;
+ 
++	/* Host 0 sets the rates of the PLL both hosts share */
++	msm_dsi_host_drop_boot_link_clks(host);
++	if (is_bonded_dsi && msm_dsi1)
++		msm_dsi_host_drop_boot_link_clks(msm_dsi1->host);
++
+ 	ret = msm_dsi_host_power_on(host, &phy_shared_timings[id], is_bonded_dsi, msm_dsi->phy);
+ 	if (ret) {
+ 		pr_err("%s: power on host %d failed, %d\n", __func__, id, ret);

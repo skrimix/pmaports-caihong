@@ -1,0 +1,89 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] backlight: ktz8866: keep the backlight the bootloader left on
+
+With the bootloader splash kept on screen, probe turned the backlight
+off (BL_EN written without the enable bit) and back on 15 ms later at
+the default brightness, a visible blink. The OEM driver leaves the chips
+alone at probe.
+
+If the backlight is on, keep the enable bit and start at the curve level
+matching the bootloader's brightness.
+
+diff --git a/drivers/video/backlight/ktz8866.c b/drivers/video/backlight/ktz8866.c
+index c6b60ef0c..d1c5b398a 100644
+--- a/drivers/video/backlight/ktz8866.c
++++ b/drivers/video/backlight/ktz8866.c
+@@ -229,8 +229,37 @@ static const struct backlight_ops ktz8866_backlight_ops = {
+ 	.update_status = ktz8866_backlight_update_status,
+ };
+ 
++/*
++ * A bootloader splash leaves the backlight on. Returns the curve level
++ * matching its brightness, or 0 if the backlight is off.
++ */
++static unsigned int ktz8866_boot_level(struct ktz8866 *ktz)
++{
++	unsigned int en, lsb, msb, hw, level;
++
++	if (regmap_read(ktz->regmap, BL_EN, &en) || !(en & BL_EN_BIT) ||
++	    regmap_read(ktz->regmap, BL_BRT_LSB, &lsb) ||
++	    regmap_read(ktz->regmap, BL_BRT_MSB, &msb))
++		return 0;
++
++	hw = (msb << 3) | (lsb & 0x7);
++	if (!hw)
++		return 0;
++
++	for (level = 1; level < ARRAY_SIZE(ktz8866_brightness_curve) - 1; level++)
++		if (ktz8866_brightness_curve[level] >= hw)
++			break;
++
++	dev_info(&ktz->client->dev, "backlight left on at %u (level %u), keeping it\n",
++		 hw, level);
++
++	return level;
++}
++
+ static void ktz8866_init(struct ktz8866 *ktz)
+ {
++	/* Keep a backlight the bootloader left on */
++	unsigned int en = ktz->led_on ? BL_EN_BIT : 0;
+ 	unsigned int val = 0;
+ 
+ 	/* Oplus specific IC initialization */
+@@ -240,9 +269,9 @@ static void ktz8866_init(struct ktz8866 *ktz)
+ 	ktz8866_write(ktz, PWM_RAMP_TIME, 0xF8); /* 30.0mA/CH Full scale */
+ 
+ 	if (!of_property_read_u32(ktz->client->dev.of_node, "current-num-sinks", &val))
+-		ktz8866_write(ktz, BL_EN, BIT(val) - 1);
++		ktz8866_write(ktz, BL_EN, en | (BIT(val) - 1));
+ 	else
+-		ktz8866_write(ktz, BL_EN, BIT(6) - 1);
++		ktz8866_write(ktz, BL_EN, en | (BIT(6) - 1));
+ 
+ 	/* Master-ONLY LCD Bias Configuration */
+ 	if (of_property_read_bool(ktz->client->dev.of_node, "kinetic,enable-lcd-bias")) {
+@@ -301,6 +330,7 @@ static int ktz8866_probe(struct i2c_client *client)
+ 	struct backlight_device *backlight_dev;
+ 	struct backlight_properties props = {};
+ 	struct ktz8866 *ktz;
++	unsigned int level;
+ 	int ret = 0;
+ 
+ 	ktz = devm_kzalloc(&client->dev, sizeof(*ktz), GFP_KERNEL);
+@@ -329,11 +359,14 @@ static int ktz8866_probe(struct i2c_client *client)
+ 				     "failed to register slave\n");
+ 	usleep_range(2000, 5000);
+ 
++	level = ktz8866_boot_level(ktz);
++	ktz->led_on = level > 0;
++
+ 	ktz8866_init(ktz);
+ 
+ 	props.type = BACKLIGHT_RAW;
+ 	props.max_brightness = ARRAY_SIZE(ktz8866_brightness_curve) - 1; // MAX_BRIGHTNESS;
+-	props.brightness = DEFAULT_BRIGHTNESS;
++	props.brightness = level ?: DEFAULT_BRIGHTNESS;
+ 	props.scale = BACKLIGHT_SCALE_LINEAR;
+ 
+ 	backlight_dev = devm_backlight_device_register(&client->dev, "ktz8866-backlight",

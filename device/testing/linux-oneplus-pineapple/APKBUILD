@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=64
+pkgrel=66
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -112,6 +112,8 @@ source="
 	0084-drm-msm-keep-bootloader-display-until-first-commit.patch
 	0085-drm-panel-nt36532-keep-bootloader-panel.patch
 	0086-iommu-arm-smmu-finalise-paging-domains-at-allocation.patch
+	0087-backlight-ktz8866-keep-bootloader-backlight.patch
+	0088-drm-msm-dsi-turn-off-bootloader-link-clocks.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -228,6 +230,8 @@ dd3707c8b8e7326b91514127842bb6b1c3cbcaf93461052edb2c6837f8d5366aeb18d846d95767f0
 6b22a965757ee37bc2850bd61203e5f311b7c14bf7fae5dd3529ee9d8e103b96fe2d2ac820401a81b30eca22db1439b7238fef627dd66b29f388de68256ca0b5  0084-drm-msm-keep-bootloader-display-until-first-commit.patch
 c687220e711cb0f4dcdf68fbfd9e298b3e047b1ae31b0894f9a91192268b038d740866dfb6a1c7960da91bb2877193d4a4ca9846f6b1ba11510824006e721f18  0085-drm-panel-nt36532-keep-bootloader-panel.patch
 636ba91db520e0bcbf8cff9d20cee63e2facd403108fec6b3e4e06db67e067ae0b6c0070d13e937604c183add152e01c0b72785c2470e5d26c9e2f628e05ec0b  0086-iommu-arm-smmu-finalise-paging-domains-at-allocation.patch
+bbb0faa22f4cfff854f9fb990afa61fa559c318abb566b1dc14e7bf781bdd35af3b6264222134094da8acd4bab5fd8e89370d24ff6c80b8a5a6dd71dc4407309  0087-backlight-ktz8866-keep-bootloader-backlight.patch
+cb6eadabccce733112003bc84ff73d25e9baf09cd3e7b4b2459c2bee0ef8222b0e4b1d2ef02a26100394e59c00e05c103f691ad9ded5e531e5152b9d8048eb10  0088-drm-msm-dsi-turn-off-bootloader-link-clocks.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 90f881d5278f010f2c87737464076dafac2d262af4b72247d287c294e218e92ab10ce25fffaebff8fbbea178a68817d04e51e30672f020892dd0ae1206ddefc4  config-oneplus-pineapple.aarch64
 "
