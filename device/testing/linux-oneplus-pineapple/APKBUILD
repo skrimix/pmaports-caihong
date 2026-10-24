@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=66
+pkgrel=67
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -233,5 +233,5 @@ c687220e711cb0f4dcdf68fbfd9e298b3e047b1ae31b0894f9a91192268b038d740866dfb6a1c796
 bbb0faa22f4cfff854f9fb990afa61fa559c318abb566b1dc14e7bf781bdd35af3b6264222134094da8acd4bab5fd8e89370d24ff6c80b8a5a6dd71dc4407309  0087-backlight-ktz8866-keep-bootloader-backlight.patch
 cb6eadabccce733112003bc84ff73d25e9baf09cd3e7b4b2459c2bee0ef8222b0e4b1d2ef02a26100394e59c00e05c103f691ad9ded5e531e5152b9d8048eb10  0088-drm-msm-dsi-turn-off-bootloader-link-clocks.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
-90f881d5278f010f2c87737464076dafac2d262af4b72247d287c294e218e92ab10ce25fffaebff8fbbea178a68817d04e51e30672f020892dd0ae1206ddefc4  config-oneplus-pineapple.aarch64
+2988af7cc130ab4fe10b0f76f23d03e524eb5f4333527844c684ed3f5ae260e18912075a40fa37010a9eac191ff5a9fb64551fe891ad7a42acbf2c10a80202c5  config-oneplus-pineapple.aarch64
 "

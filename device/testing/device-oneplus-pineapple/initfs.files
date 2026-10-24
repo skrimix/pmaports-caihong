@@ -4,3 +4,4 @@
 /usr/sbin/i2cdump
 /usr/sbin/i2cset
 /usr/sbin/i2ctransfer
+/usr/share/device-oneplus-pineapple/initfs-profile:/.profile

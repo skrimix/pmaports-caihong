@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=66
+pkgrel=69
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -63,6 +63,8 @@ source="
 	caihong-pen.service
 	90-dev-nopasswd
 	99-watchdog.conf
+	plasmalogin-plymouth.conf
+	initfs-profile
 "
 
 build() {
@@ -75,6 +77,8 @@ package() {
 	devicepkg_package $startdir $pkgname
 	install -Dm644 "$srcdir/initfs.files" \
 		"$pkgdir/usr/share/mkinitfs/files/00-$pkgname.files"
+	install -Dm644 "$srcdir/initfs-profile" \
+		"$pkgdir/usr/share/$pkgname/initfs-profile"
 	install -Dm755 "$srcdir/pad2-usb-gadget" "$pkgdir/usr/libexec/pad2-usb-gadget"
 	install -Dm644 "$srcdir/pad2-usb-gadget.service" \
 		"$pkgdir/usr/lib/systemd/system/pad2-usb-gadget.service"
@@ -109,6 +113,8 @@ package() {
 		"$pkgdir/usr/lib/systemd/system/caihong-pen.service"
 	install -Dm644 "$srcdir/99-watchdog.conf" \
 		"$pkgdir/usr/lib/systemd/system.conf.d/99-oneplus-pineapple-watchdog.conf"
+	install -Dm644 "$srcdir/plasmalogin-plymouth.conf" \
+		"$pkgdir/usr/lib/systemd/system/plasmalogin.service.d/50-oneplus-pineapple-plymouth.conf"
 	# DEBUG: passwordless sudo for development; remove before release.
 	install -Dm440 "$srcdir/90-dev-nopasswd" \
 		"$pkgdir/etc/sudoers.d/90-dev-nopasswd"
@@ -139,8 +145,8 @@ audio() {
 }
 
 sha512sums="
-1a1a5f378db9fb2912ae007f4ffdb66149dc08ba21333099ebbe180001b9c7d08c5d3f044c094a40d3fc92917d7ee0a7908b7589764ed1ae44f658914d1f83eb  deviceinfo
-a07ac14549c5f02028fd099ff2277c2e64153366444ddec87a7c37efa7a3c70882be5a6d5ccda6d5de4571080e59ae82ecf265bd28ceb0bb1606d70b47f62292  initfs.files
+1808854305af882cdd58ea4b469ea749865db686462a39d5e68919af89780c53a9baf3d000feeab60bfd6e2dd4dd3f16790e2f0ea282df8710bdeebf53fbce10  deviceinfo
+f923ad803dd4f2618695f8f172d13a1ad2d220ca029889ce6fc07572b7550b67826c961e6d1315d86a24bf9c88ee2e61568f85e3aa40f0cf7d47550a74777afc  initfs.files
 df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd554e5499568de00553e194a689a6111bdf6e9e76538530cc86  modules-initfs
 349218102b923e2b381af89191f0880976568fdf3fe54c6c2e72b73cea6c25fc23881a964658164536dcdcc63a38506d51cfa1153fea9e60e89eda43c9df6cf9  caihong.conf
 452cfacd546f0717e7c01da32449a98e7847a071229ed8cc95fb3adf28fdd843e2a67ae2816e29c69ef57ba27f2e8a094f1ecb17b298c1021ac9baaf4d054a68  HiFi.conf
@@ -165,4 +171,6 @@ aba868c8cfde8a26720c6ddd41b6a4c25b01975319cb52f28898598ca550a8fcaf5103d66b52a58d
 42c1278ba85f828f9d2ac25d91c599167a9ab052f51457485cd63305e0575ee4886404d3d7412c369e175edebb92568b0fce34790af9120a1fd61be957d51024  caihong-pen.service
 d757e155c598ba8894e1f27d511bbb9504578503596d581ead84ac4c38318643fdb3cfa7164f77d361021af47022a4f3eaab20423784f54494e28aade1faffc0  90-dev-nopasswd
 39f18b25e12f5387dbbbfe699a59f6500b71eaaa81c3ec02e709e037ca9a89d3e9f3e5c2dc17da148069177994a6161b744918fbb13c4b255cc371009f559c64  99-watchdog.conf
+3930c284c0e9bbe769881951f5adc517d4a8cf5f14065a0fb4d1c479f091fb30868249a8bf030724feff7dc2686ee8ec169298f2a08f54c6433744c68df8ecc8  plasmalogin-plymouth.conf
+20328a565454cc7d3a09328e77e3f81d4a766b951b6db80f4c036cb0cdd4ea8cfae3e41ab04e0d78dbfedb06a11494002c80e34f5ca94635d15d7ba3d2e0b782  initfs-profile
 "

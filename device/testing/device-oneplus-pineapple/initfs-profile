@@ -1,0 +1,6 @@
+# Read by the initramfs debug shell after its /etc/profile.
+# vt.global_cursor_default=0 hides the cursor for the boot splash; show it
+# again on the display console.
+case "$(tty)" in
+/dev/tty[0-9]*) printf '\033[?25h' ;;
+esac
