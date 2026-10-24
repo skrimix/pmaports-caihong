@@ -1,0 +1,125 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] iommu/arm-smmu: finalise paging domains at an early map
+
+A paging domain gets its context bank and page tables only at the first
+attach, so map_pages() fails with -ENODEV before that. The IOMMU core
+expects drivers to accept mappings before attach (see the direct-mapping
+workaround in iommu_setup_default_domain()), and a display driver needs
+them: to keep a bootloader framebuffer readable across the switch from
+the identity domain to its own paging domain, the mapping must exist
+before the stream is switched over.
+
+Remember the device a domain was allocated for, and finalise the domain
+for it when a sleepable map comes before the first attach. Finalising
+at allocation instead would make iommu_set_pgtable_quirks() fail with
+-EPERM for every domain, silently dropping the GPU's
+IO_PGTABLE_QUIRK_ARM_OUTER_WBWA.
+
+The core chose the page size of that first map from all sizes the SMMU
+supports (it can include 64K) rather than the format's, so split it
+into the largest size the format takes. Later chunks use the format's
+sizes.
+
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu.c b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+index 889a0966d..379be7191 100644
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu.c
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+@@ -922,7 +922,7 @@ static struct iommu_domain *arm_smmu_domain_alloc_paging(struct device *dev)
+ 	/*
+ 	 * Allocate the domain and initialise some of its data structures.
+ 	 * We can't really do anything meaningful until we've added a
+-	 * master.
++	 * master, or a mapping arrives before that (see arm_smmu_map_pages()).
+ 	 */
+ 	smmu_domain = kzalloc_obj(*smmu_domain);
+ 	if (!smmu_domain)
+@@ -931,6 +931,7 @@ static struct iommu_domain *arm_smmu_domain_alloc_paging(struct device *dev)
+ 	mutex_init(&smmu_domain->init_mutex);
+ 	spin_lock_init(&smmu_domain->cb_lock);
+ 	smmu_domain->domain.pgsize_bitmap = smmu->pgsize_bitmap;
++	smmu_domain->alloc_dev = dev;
+ 
+ 	return &smmu_domain->domain;
+ }
+@@ -1263,17 +1264,67 @@ static struct iommu_domain arm_smmu_blocked_domain = {
+ 	.ops = &arm_smmu_blocked_ops,
+ };
+ 
++static int arm_smmu_finalise_for_alloc_dev(struct arm_smmu_domain *smmu_domain)
++{
++	struct device *dev = smmu_domain->alloc_dev;
++	struct arm_smmu_master_cfg *cfg = dev_iommu_priv_get(dev);
++	struct arm_smmu_device *smmu;
++	int ret;
++
++	if (!cfg)
++		return -ENODEV;
++
++	smmu = cfg->smmu;
++	ret = arm_smmu_rpm_get(smmu);
++	if (ret < 0)
++		return ret;
++
++	ret = arm_smmu_init_domain_context(smmu_domain, smmu, dev);
++	arm_smmu_rpm_put(smmu);
++
++	return ret;
++}
++
+ static int arm_smmu_map_pages(struct iommu_domain *domain, unsigned long iova,
+ 			      phys_addr_t paddr, size_t pgsize, size_t pgcount,
+ 			      int prot, gfp_t gfp, size_t *mapped)
+ {
+-	struct io_pgtable_ops *ops = to_smmu_domain(domain)->pgtbl_ops;
+-	struct arm_smmu_device *smmu = to_smmu_domain(domain)->smmu;
++	struct arm_smmu_domain *smmu_domain = to_smmu_domain(domain);
++	struct io_pgtable_ops *ops = smmu_domain->pgtbl_ops;
++	struct arm_smmu_device *smmu;
+ 	int ret;
+ 
++	/*
++	 * Mappings are expected to work before the first attach, e.g. to keep
++	 * a bootloader framebuffer readable when the attach switches the
++	 * streams over. Finalise the domain for the device it was allocated
++	 * for; page table quirks set before this still apply.
++	 */
++	if (!ops && smmu_domain->alloc_dev && gfpflags_allow_blocking(gfp)) {
++		unsigned long sizes;
++
++		ret = arm_smmu_finalise_for_alloc_dev(smmu_domain);
++		if (ret)
++			return ret;
++		ops = smmu_domain->pgtbl_ops;
++
++		/*
++		 * The core chose this page size from all the sizes the SMMU
++		 * supports; the format may only take smaller ones.
++		 */
++		if (!(domain->pgsize_bitmap & pgsize)) {
++			sizes = domain->pgsize_bitmap & (pgsize - 1);
++			if (!sizes)
++				return -EINVAL;
++			pgcount *= pgsize >> __fls(sizes);
++			pgsize = BIT(__fls(sizes));
++		}
++	}
++
+ 	if (!ops)
+ 		return -ENODEV;
+ 
++	smmu = smmu_domain->smmu;
+ 	arm_smmu_rpm_get(smmu);
+ 	ret = ops->map_pages(ops, iova, paddr, pgsize, pgcount, prot, gfp, mapped);
+ 	arm_smmu_rpm_put(smmu);
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu.h b/drivers/iommu/arm/arm-smmu/arm-smmu.h
+index 26d2e33cd..e9edbde33 100644
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu.h
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu.h
+@@ -384,6 +384,7 @@ struct arm_smmu_domain {
+ 	enum arm_smmu_domain_stage	stage;
+ 	struct mutex			init_mutex; /* Protects smmu pointer */
+ 	spinlock_t			cb_lock; /* Serialises ATS1* ops and TLB syncs */
++	struct device			*alloc_dev; /* finalised for at an early map */
+ 	struct iommu_domain		domain;
+ };
+ 

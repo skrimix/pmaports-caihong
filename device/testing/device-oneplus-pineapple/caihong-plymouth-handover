@@ -1,0 +1,23 @@
+#!/bin/sh
+# Quit Plymouth once kwin holds the DRM device, keeping the splash on screen.
+# Quitting earlier closes the last DRM file, which restores the text console
+# until kwin opens the device. Stops waiting after 20 s.
+
+kwin_holds_drm() {
+	for pid in $(pidof kwin_wayland); do
+		for fd in /proc/"$pid"/fd/*; do
+			case "$(readlink "$fd")" in
+			/dev/dri/card*) return 0 ;;
+			esac
+		done
+	done
+	return 1
+}
+
+i=0
+while [ "$i" -lt 100 ] && ! kwin_holds_drm; do
+	sleep 0.2
+	i=$((i + 1))
+done
+
+exec /usr/bin/plymouth quit --retain-splash

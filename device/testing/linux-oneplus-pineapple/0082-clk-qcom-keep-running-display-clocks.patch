@@ -6,7 +6,9 @@ steps of the SM8550 DISPCC probe stop its scanout:
 
 - clk_lucid_ole_pll_configure() disables the PLL output and puts the PLL
   in standby. Skip the configuration of a PLL that is already running,
-  as clk_lucid_evo_pll_configure() and the Trion variants do.
+  as clk_lucid_evo_pll_configure() and the Trion variants do. This
+  applies to every Lucid OLE PLL, not only DISPCC's: on SM8650 also
+  those of GPUCC, CAMCC and VIDEOCC.
 - Registering the shared RCGs parks them at XO. Use the no-init-park ops
   for the AHB, ESC0, ESC1 and MDP sources, like dispcc-sc8280xp and
   dispcc-x1e80100 do for MDP; later operations are the same.

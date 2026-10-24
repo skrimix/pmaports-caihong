@@ -21,9 +21,12 @@ Keep it running instead and take over at the first commit:
   dpu_encoder_helper_phys_cleanup()), unmaps the splash buffer and
   drops both references. DSI and the panel are left running for the
   modeset that follows.
+- Once stopped, the splash buffer goes to the page allocator, as the
+  downstream driver does, unless the reservation is no-map (no linear
+  mapping). Later MDSS probes then treat the splash as gone.
 
 diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
-index da3556eb6..bf0a88b72 100644
+index da3556eb6..132111153 100644
 --- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
 +++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
 @@ -437,10 +437,15 @@ static void dpu_kms_disable_vblank(struct msm_kms *kms, struct drm_crtc *crtc)
@@ -66,7 +69,7 @@ index da3556eb6..bf0a88b72 100644
  	if (IS_ERR(vm))
  		return PTR_ERR(vm);
  
-@@ -1135,6 +1148,175 @@ unsigned long dpu_kms_get_clk_rate(struct dpu_kms *dpu_kms, char *clock_name)
+@@ -1135,6 +1148,177 @@ unsigned long dpu_kms_get_clk_rate(struct dpu_kms *dpu_kms, char *clock_name)
  
  #define	DPU_PERF_DEFAULT_MAX_CORE_CLK_RATE	412500000
  
@@ -229,9 +232,11 @@ index da3556eb6..bf0a88b72 100644
 +							   to_dpu_hw_ctl(dpu_kms->rm.ctl_blks[i]));
 +
 +	/* Nothing fetches from the splash buffer any more */
-+	if (stopped)
++	if (stopped) {
 +		mmu->funcs->unmap(mmu, dpu_kms->splash.start,
 +				  resource_size(&dpu_kms->splash));
++		msm_mdss_splash_free(&dpu_kms->splash);
++	}
 +
 +	DRM_INFO("bootloader display %s\n", stopped ? "stopped" : "NOT stopped");
 +
@@ -242,7 +247,7 @@ index da3556eb6..bf0a88b72 100644
  static int dpu_kms_hw_init(struct msm_kms *kms)
  {
  	struct dpu_kms *dpu_kms;
-@@ -1174,6 +1356,8 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
+@@ -1174,6 +1358,8 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
  		goto err_pm_put;
  	}
  
@@ -251,7 +256,7 @@ index da3556eb6..bf0a88b72 100644
  	/*
  	 * Now we need to read the HW catalog and initialize resources such as
  	 * clocks, regulators, GDSC/MMAGIC, ioremap the register ranges etc
-@@ -1279,6 +1463,15 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
+@@ -1279,6 +1465,15 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
  
  	dpu_vbif_init_memtypes(dpu_kms);
  
@@ -267,7 +272,7 @@ index da3556eb6..bf0a88b72 100644
  	pm_runtime_put_sync(&dpu_kms->pdev->dev);
  
  	return 0;
-@@ -1286,6 +1479,8 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
+@@ -1286,6 +1481,8 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
  err_pm_put:
  	pm_runtime_put_sync(&dpu_kms->pdev->dev);
  error:
@@ -317,7 +322,7 @@ index 3934cd060..4431b5806 100644
  		ret = PTR_ERR(vm);
  		return ret;
 diff --git a/drivers/gpu/drm/msm/msm_drv.h b/drivers/gpu/drm/msm/msm_drv.h
-index eb4bbae85..7728cffe0 100644
+index eb4bbae85..7940d527a 100644
 --- a/drivers/gpu/drm/msm/msm_drv.h
 +++ b/drivers/gpu/drm/msm/msm_drv.h
 @@ -220,7 +220,8 @@ void msm_crtc_disable_vblank(struct drm_crtc *crtc);
@@ -330,16 +335,18 @@ index eb4bbae85..7728cffe0 100644
  bool msm_use_mmu(struct drm_device *dev);
  
  int msm_ioctl_gem_submit(struct drm_device *dev, void *data,
-@@ -418,9 +419,13 @@ static inline void msm_dpu_unregister(void) {}
+@@ -418,9 +419,15 @@ static inline void msm_dpu_unregister(void) {}
  #ifdef CONFIG_DRM_MSM_MDSS
  void msm_mdss_register(void);
  void msm_mdss_unregister(void);
 +int msm_mdss_splash_region(struct resource *res);
++void msm_mdss_splash_free(const struct resource *res);
 +void msm_mdss_splash_release(struct device *dev);
  #else
  static inline void msm_mdss_register(void) {}
  static inline void msm_mdss_unregister(void) {}
 +static inline int msm_mdss_splash_region(struct resource *res) { return -ENODEV; }
++static inline void msm_mdss_splash_free(const struct resource *res) {}
 +static inline void msm_mdss_splash_release(struct device *dev) {}
  #endif
  
@@ -440,18 +447,19 @@ index e5d0ea629..4ff0987f8 100644
  		dev_err(mdp_dev, "vm create, error %pe\n", vm);
  		mmu->funcs->destroy(mmu);
 diff --git a/drivers/gpu/drm/msm/msm_mdss.c b/drivers/gpu/drm/msm/msm_mdss.c
-index 9087c4b29..21fe5124d 100644
+index 9087c4b29..cca6904ff 100644
 --- a/drivers/gpu/drm/msm/msm_mdss.c
 +++ b/drivers/gpu/drm/msm/msm_mdss.c
-@@ -11,6 +11,7 @@
+@@ -11,6 +11,8 @@
  #include <linux/irqchip.h>
  #include <linux/irqdesc.h>
  #include <linux/irqchip/chained_irq.h>
++#include <linux/mm.h>
 +#include <linux/of_address.h>
  #include <linux/of_platform.h>
  #include <linux/platform_device.h>
  #include <linux/pm_runtime.h>
-@@ -44,6 +45,8 @@ struct msm_mdss {
+@@ -44,6 +46,8 @@ struct msm_mdss {
  	struct icc_path *mdp_path[2];
  	u32 num_mdp_paths;
  	struct icc_path *reg_bus_path;
@@ -460,10 +468,13 @@ index 9087c4b29..21fe5124d 100644
  };
  
  static int msm_mdss_parse_data_bus_icc_path(struct device *dev,
-@@ -362,21 +365,57 @@ static int mdp5_mdss_parse_clock(struct platform_device *pdev, struct clk_bulk_d
+@@ -362,21 +366,91 @@ static int mdp5_mdss_parse_clock(struct platform_device *pdev, struct clk_bulk_d
  	return num_clocks;
  }
  
++/* set once msm_mdss_splash_free() gave the buffer away */
++static bool msm_mdss_splash_freed;
++
 +/**
 + * msm_mdss_splash_region() - get the bootloader's splash buffer
 + * @res: the splash_region reservation
@@ -472,12 +483,16 @@ index 9087c4b29..21fe5124d 100644
 + * /reserved-memory/splash_region, and updates the reservation to the buffer
 + * it scans out of. It powers the display down otherwise.
 + *
-+ * Return: 0 if the reservation exists, a negative error code otherwise.
++ * Return: 0 if the reservation exists and its buffer was not given away by
++ * msm_mdss_splash_free(), a negative error code otherwise.
 + */
 +int msm_mdss_splash_region(struct resource *res)
 +{
 +	struct device_node *node;
 +	int ret;
++
++	if (msm_mdss_splash_freed)
++		return -ENODEV;
 +
 +	node = of_find_node_by_path("/reserved-memory/splash_region");
 +	if (!node)
@@ -487,6 +502,33 @@ index 9087c4b29..21fe5124d 100644
 +	of_node_put(node);
 +
 +	return ret;
++}
++
++/**
++ * msm_mdss_splash_free() - give the splash buffer to the page allocator
++ * @res: the buffer, from msm_mdss_splash_region()
++ *
++ * Call once nothing fetches from the buffer any more; the downstream driver
++ * frees it after its takeover as well. A no-map reservation has no linear
++ * mapping and stays reserved.
++ */
++void msm_mdss_splash_free(const struct resource *res)
++{
++	struct device_node *node;
++	bool no_map;
++
++	node = of_find_node_by_path("/reserved-memory/splash_region");
++	if (!node)
++		return;
++
++	no_map = of_property_read_bool(node, "no-map");
++	of_node_put(node);
++	if (no_map || msm_mdss_splash_freed)
++		return;
++
++	msm_mdss_splash_freed = true;
++	free_reserved_area(phys_to_virt(res->start),
++			   phys_to_virt(res->end) + 1, -1, "splash");
 +}
 +
  static struct msm_mdss *msm_mdss_init(struct platform_device *pdev, bool is_mdp5)
@@ -521,7 +563,7 @@ index 9087c4b29..21fe5124d 100644
  	msm_mdss->mdss_data = qcom_ubwc_config_get_data();
  	if (IS_ERR(msm_mdss->mdss_data))
  		return ERR_CAST(msm_mdss->mdss_data);
-@@ -479,6 +518,19 @@ static int mdss_probe(struct platform_device *pdev)
+@@ -479,6 +553,19 @@ static int mdss_probe(struct platform_device *pdev)
  
  	platform_set_drvdata(pdev, mdss);
  
@@ -541,16 +583,15 @@ index 9087c4b29..21fe5124d 100644
  	/*
  	 * MDP5/DPU based devices don't have a flat hierarchy. There is a top
  	 * level parent: MDSS, and children: MDP5/DPU, DSI, HDMI, eDP etc.
-@@ -488,6 +540,8 @@ static int mdss_probe(struct platform_device *pdev)
+@@ -488,6 +575,7 @@ static int mdss_probe(struct platform_device *pdev)
  	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
  	if (ret) {
  		DRM_DEV_ERROR(dev, "failed to populate children devices\n");
-+		of_platform_depopulate(dev);
 +		msm_mdss_splash_release(dev);
  		msm_mdss_destroy(mdss);
  		return ret;
  	}
-@@ -501,6 +555,7 @@ static void mdss_remove(struct platform_device *pdev)
+@@ -501,6 +589,7 @@ static void mdss_remove(struct platform_device *pdev)
  
  	of_platform_depopulate(&pdev->dev);
  
@@ -558,7 +599,7 @@ index 9087c4b29..21fe5124d 100644
  	msm_mdss_destroy(mdss);
  }
  
-@@ -570,6 +625,25 @@ static struct platform_driver mdss_platform_driver = {
+@@ -570,6 +659,25 @@ static struct platform_driver mdss_platform_driver = {
  	},
  };
  

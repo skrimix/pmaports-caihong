@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=73
+pkgrel=75
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -64,6 +64,8 @@ source="
 	90-dev-nopasswd
 	99-watchdog.conf
 	plasmalogin-plymouth.conf
+	caihong-plymouth-handover
+	vt-cursor.conf
 	initfs-profile
 "
 
@@ -115,6 +117,10 @@ package() {
 		"$pkgdir/usr/lib/systemd/system.conf.d/99-oneplus-pineapple-watchdog.conf"
 	install -Dm644 "$srcdir/plasmalogin-plymouth.conf" \
 		"$pkgdir/usr/lib/systemd/system/plasmalogin.service.d/50-oneplus-pineapple-plymouth.conf"
+	install -Dm755 "$srcdir/caihong-plymouth-handover" \
+		"$pkgdir/usr/libexec/caihong-plymouth-handover"
+	install -Dm644 "$srcdir/vt-cursor.conf" \
+		"$pkgdir/usr/lib/tmpfiles.d/oneplus-pineapple-vt-cursor.conf"
 	# DEBUG: passwordless sudo for development; remove before release.
 	install -Dm440 "$srcdir/90-dev-nopasswd" \
 		"$pkgdir/etc/sudoers.d/90-dev-nopasswd"
@@ -171,6 +177,8 @@ aba868c8cfde8a26720c6ddd41b6a4c25b01975319cb52f28898598ca550a8fcaf5103d66b52a58d
 42c1278ba85f828f9d2ac25d91c599167a9ab052f51457485cd63305e0575ee4886404d3d7412c369e175edebb92568b0fce34790af9120a1fd61be957d51024  caihong-pen.service
 d757e155c598ba8894e1f27d511bbb9504578503596d581ead84ac4c38318643fdb3cfa7164f77d361021af47022a4f3eaab20423784f54494e28aade1faffc0  90-dev-nopasswd
 39f18b25e12f5387dbbbfe699a59f6500b71eaaa81c3ec02e709e037ca9a89d3e9f3e5c2dc17da148069177994a6161b744918fbb13c4b255cc371009f559c64  99-watchdog.conf
-3930c284c0e9bbe769881951f5adc517d4a8cf5f14065a0fb4d1c479f091fb30868249a8bf030724feff7dc2686ee8ec169298f2a08f54c6433744c68df8ecc8  plasmalogin-plymouth.conf
+8e754d7e122a662126a2746ad4ecb36411906dbc9570b4502baa389199cfd3c47ff39502e167c6404deca23cd4480c94ffafa2e15271769fb0285b812e147716  plasmalogin-plymouth.conf
+336fd5c5364f895361e10b548aeb5cda3776af7f8859fae7d9f2cf6a676afa79d8fc482a20a79e514f249cbabd152ac881815b2c6045023a96f74806e8920120  caihong-plymouth-handover
+0b9df190f8f973087221e517e2450668c912ba0b5033ad812af1601b095634741a0236cf602d6a201784644964a9a240ca02032d2e41ed8f6ed0dd4680880299  vt-cursor.conf
 20328a565454cc7d3a09328e77e3f81d4a766b951b6db80f4c036cb0cdd4ea8cfae3e41ab04e0d78dbfedb06a11494002c80e34f5ca94635d15d7ba3d2e0b782  initfs-profile
 "
