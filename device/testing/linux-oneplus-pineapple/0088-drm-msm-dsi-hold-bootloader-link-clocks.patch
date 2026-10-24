@@ -1,0 +1,156 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] drm/msm/dsi: hold the bootloader link clocks until the first power-on
+
+A bootloader display (continuous splash) leaves the DSI link clock
+branches on with nothing in Linux holding them. If the first commit
+comes after the unused-clock cleanup at late_initcall_sync, e.g. with
+fbcon's deferred takeover waiting for console output, the cleanup turns
+off the byte, pixel and escape clocks under the running link, and the
+first commit can no longer stop the bootloader's timing engines.
+
+Like the downstream driver's continuous-splash vote, a host whose byte
+clock is on at probe takes a runtime PM reference and enables its link
+clocks without setting rates. The PHY's PLL takes that prepare without
+restarting.
+
+Release the hold before the first PHY enable, for both hosts in bonded
+mode. The branches then go off before the PLL they run from stops, so
+their RCGs can latch the new link rates; with the branches left on
+across the PHY enable, the first power-on warned
+"disp_cc_mdss_pclk{0,1}_clk_src: rcg didn't update its configuration".
+
+diff --git a/drivers/gpu/drm/msm/dsi/dsi.c b/drivers/gpu/drm/msm/dsi/dsi.c
+index 3c9f01ed6..ec9f7b660 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi.c
++++ b/drivers/gpu/drm/msm/dsi/dsi.c
+@@ -108,6 +108,9 @@ static struct msm_dsi *dsi_init(struct platform_device *pdev)
+ 	if (ret)
+ 		goto destroy_dsi;
+ 
++	/* Last, so that a deferred probe does not stop the bootloader display */
++	msm_dsi_host_hold_boot_link(msm_dsi->host);
++
+ 	return msm_dsi;
+ 
+ destroy_dsi:
+diff --git a/drivers/gpu/drm/msm/dsi/dsi.h b/drivers/gpu/drm/msm/dsi/dsi.h
+index 93c028a12..d31adc0c3 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -76,6 +76,8 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
+ 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
+ 			bool is_bonded_dsi, struct msm_dsi_phy *phy);
+ int msm_dsi_host_power_off(struct mipi_dsi_host *host);
++void msm_dsi_host_hold_boot_link(struct mipi_dsi_host *host);
++void msm_dsi_host_release_boot_link(struct mipi_dsi_host *host);
+ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ 				  const struct drm_display_mode *mode);
+ enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 6906d7b1d..1ad080d65 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/clk-provider.h>
+ #include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/err.h>
+@@ -186,6 +187,8 @@ struct msm_dsi_host {
+ 	bool registered;
+ 	bool power_on;
+ 	bool enabled;
++	/* see msm_dsi_host_hold_boot_link() */
++	bool boot_link_held;
+ 	int irq;
+ };
+ 
+@@ -2102,6 +2105,9 @@ void msm_dsi_host_destroy(struct mipi_dsi_host *host)
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	DBG("");
++	if (msm_host->boot_link_held)
++		msm_dsi_host_release_boot_link(host);
++
+ 	if (msm_host->workqueue) {
+ 		destroy_workqueue(msm_host->workqueue);
+ 		msm_host->workqueue = NULL;
+@@ -2580,6 +2586,60 @@ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
+ 	return 0;
+ }
+ 
++/**
++ * msm_dsi_host_hold_boot_link() - hold the clocks of a link left on by the bootloader
++ * @host: the DSI host
++ *
++ * A bootloader display (continuous splash) leaves the link clock branches
++ * enabled with nothing in Linux holding them, so the unused-clock cleanup
++ * stops the link if the first commit comes later, e.g. with fbcon's
++ * deferred takeover. Like the downstream driver's continuous-splash vote,
++ * hold the bus and link clocks of a running link until the first power-on.
++ * The rates are left alone; the PHY's PLL takes the prepare without
++ * restarting.
++ */
++void msm_dsi_host_hold_boot_link(struct mipi_dsi_host *host)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
++	struct device *dev = &msm_host->pdev->dev;
++
++	/* With the bus clocks on, the clock controller reports the hardware state */
++	if (pm_runtime_resume_and_get(dev))
++		return;
++
++	if (__clk_is_enabled(msm_host->byte_clk) &&
++	    !cfg_hnd->ops->link_clk_enable(msm_host)) {
++		msm_host->boot_link_held = true;
++		dev_info(dev, "holding the link clocks left on by the bootloader\n");
++		return;
++	}
++
++	pm_runtime_put(dev);
++}
++
++/**
++ * msm_dsi_host_release_boot_link() - release the bootloader link clocks
++ * @host: the DSI host
++ *
++ * Drop the hold of msm_dsi_host_hold_boot_link(). Call this before the
++ * first PHY enable, for both hosts in bonded mode: the PLL they share then
++ * stops after the branches, and the RCGs can latch the new link rates.
++ */
++void msm_dsi_host_release_boot_link(struct mipi_dsi_host *host)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
++
++	mutex_lock(&msm_host->dev_mutex);
++	if (msm_host->boot_link_held) {
++		msm_host->boot_link_held = false;
++		cfg_hnd->ops->link_clk_disable(msm_host);
++		pm_runtime_put(&msm_host->pdev->dev);
++	}
++	mutex_unlock(&msm_host->dev_mutex);
++}
++
+ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ 				  const struct drm_display_mode *mode)
+ {
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_manager.c b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+index 959daa88b..87b7c387d 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -220,6 +220,11 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
+ 
+ 	DBG("id=%d", id);
+ 
++	/* Both hosts' links run from the PLL the PHY enable reprograms */
++	msm_dsi_host_release_boot_link(host);
++	if (is_bonded_dsi && msm_dsi1)
++		msm_dsi_host_release_boot_link(msm_dsi1->host);
++
+ 	ret = dsi_mgr_phy_enable(id, phy_shared_timings);
+ 	if (ret)
+ 		goto phy_en_fail;

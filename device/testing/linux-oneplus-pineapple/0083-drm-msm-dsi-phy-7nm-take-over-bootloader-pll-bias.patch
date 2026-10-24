@@ -1,5 +1,5 @@
 From: skrimix <skrimix.git@fastmail.org>
-Subject: [PATCH] drm/msm/dsi/phy: 7nm: take over the PLL bias the bootloader left on
+Subject: [PATCH] drm/msm/dsi/phy: 7nm: take over the PLL the bootloader left on
 
 With a bootloader display still running (continuous splash), the PLL
 bias is on while pll_enable_cnt starts at 0. The enable/disable pairs
@@ -10,8 +10,13 @@ slave PHY's probe blanks the screen.
 Start a PLL found with its bias on at one reference and drop it at the
 first PHY enable, when the driver takes its own.
 
+Until then, the DSI hosts hold their link clocks so that the running
+link survives the unused-clock cleanup. Their prepare must not restart
+the PLL or reset the PHY digital block under the live link, so the VCO
+prepare only takes its bias references while the inherited one is held.
+
 diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
-index 984a66085..095c6b2af 100644
+index 984a66085..4ec975efe 100644
 --- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
 +++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
 @@ -96,6 +96,8 @@ struct dsi_pll_7nm {
@@ -23,7 +28,24 @@ index 984a66085..095c6b2af 100644
  
  	struct pll_7nm_cached_state cached_state;
  
-@@ -874,6 +876,19 @@ static int dsi_pll_7nm_init(struct msm_dsi_phy *phy)
+@@ -497,6 +499,16 @@ static int dsi_pll_7nm_vco_prepare(struct clk_hw *hw)
+ 	if (pll_7nm->slave)
+ 		dsi_pll_enable_pll_bias(pll_7nm->slave);
+ 
++	/*
++	 * The bootloader's link still runs from this PLL (a DSI host holds
++	 * its clocks until the first power-on): restarting it and resetting
++	 * the PHY digital block would stop the display.
++	 */
++	if (pll_7nm->inherited_bias) {
++		pll_7nm->phy->pll_on = true;
++		return 0;
++	}
++
+ 	/* Start PLL */
+ 	writel(BIT(0), pll_7nm->phy->base + REG_DSI_7nm_PHY_CMN_PLL_CNTRL);
+ 
+@@ -874,6 +886,19 @@ static int dsi_pll_7nm_init(struct msm_dsi_phy *phy)
  
  	pll_7nm->phy = phy;
  
@@ -43,7 +65,7 @@ index 984a66085..095c6b2af 100644
  	ret = pll_7nm_register(pll_7nm, phy->provided_clocks->hws);
  	if (ret) {
  		DRM_DEV_ERROR(&pdev->dev, "failed to register PLL: %d\n", ret);
-@@ -967,10 +982,17 @@ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
+@@ -967,10 +992,17 @@ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
  	u32 glbl_pemph_ctrl_0;
  	u32 glbl_str_swi_cal_sel_ctrl, glbl_hstx_str_ctrl_0;
  	u32 glbl_rescode_top_ctrl, glbl_rescode_bot_ctrl;
