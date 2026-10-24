@@ -1,0 +1,81 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] drm/panel: nt36532: keep a panel the bootloader left running
+
+The panel's reset line is GPIO_ACTIVE_HIGH and the driver requested it
+GPIOD_OUT_LOW, which resets a panel the bootloader left running for
+its splash. Read the line first: if the panel is out of reset, keep it
+there, skip the first reset and full init, and send only the short
+init the driver uses for an already initialized panel (PPS, compression
+mode, refresh registers, display on).
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index 615cbb23f..8bc59e60a 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -66,6 +66,7 @@ struct panel_info {
+     struct drm_connector *connector;
+     unsigned int active_vrefresh;
+     bool is_powered_on;
++    bool splash_inherited; /* left running by the bootloader */
+     int last_manual_cmd_res;
+ };
+ 
+@@ -415,6 +416,16 @@ static int nt36532_prepare(struct drm_panel* panel)
+ 
+     dev_info(panel->dev, "NOVA-TRACE: [prepare] called.\n");
+ 
++    if (pinfo->splash_inherited) {
++        /* The supplies are already on; take the references and skip reset */
++        ret = regulator_bulk_enable(ARRAY_SIZE(nt36532_supplies), pinfo->supplies);
++        if (ret < 0) {
++            dev_err(panel->dev, "failed to enable regulators: %d\n", ret);
++            return ret;
++        }
++        return 0;
++    }
++
+     if (!pinfo->is_powered_on) {
+     	dev_info(panel->dev, "NOVA-TRACE: [prepare] Device was not powered on. Turning on regulators.\n");
+ 
+@@ -448,6 +459,15 @@ static int nt36532_enable(struct drm_panel* panel)
+         pinfo->active_vrefresh = drm_mode_vrefresh(&pinfo->desc->modes[0]); /* Failsafe */
+     }
+ 
++    /*
++     * An inherited panel takes the "already initialized" path, which still
++     * sends PPS, compression mode, refresh registers and display on.
++     */
++    if (pinfo->splash_inherited) {
++        pinfo->splash_inherited = false;
++        pinfo->is_powered_on = true;
++    }
++
+     /* The DSI high-speed link is now alive. Safe to send DCS commands. */
+     dev_info(panel->dev, "NOVA-TRACE: [enable] Calling init sequence.\n");
+     ret = pinfo->desc->init_sequence(pinfo);
+@@ -738,11 +758,24 @@ static int nt36532_probe(struct mipi_dsi_device* dsi)
+         return ret;
+     }
+ 
+-    pinfo->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++    pinfo->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
+     if (IS_ERR(pinfo->reset_gpio))
+         return dev_err_probe(dev, PTR_ERR(pinfo->reset_gpio),
+             "Failed to get reset-gpio\n");
+ 
++    /*
++     * A panel the bootloader left running (continuous splash) is out of
++     * reset. Keep it there and skip its first reset and full init;
++     * otherwise hold it in reset until prepare.
++     */
++    ret = gpiod_get_value_cansleep(pinfo->reset_gpio);
++    pinfo->splash_inherited = ret > 0;
++    ret = gpiod_direction_output(pinfo->reset_gpio, pinfo->splash_inherited);
++    if (ret)
++        return dev_err_probe(dev, ret, "Failed to set reset-gpio\n");
++    if (pinfo->splash_inherited)
++        dev_info(dev, "panel left on by the bootloader, keeping it\n");
++
+     pinfo->desc = of_device_get_match_data(dev);
+     if (!pinfo->desc)
+         return -ENODEV;

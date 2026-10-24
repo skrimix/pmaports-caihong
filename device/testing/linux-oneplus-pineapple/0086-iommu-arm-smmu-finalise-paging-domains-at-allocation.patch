@@ -1,0 +1,59 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] iommu/arm-smmu: finalise paging domains at allocation
+
+A paging domain gets its context bank and page tables only at the first
+attach, so map_pages() fails with -ENODEV before that. The IOMMU core
+expects drivers to accept mappings before attach (see the direct-mapping
+workaround in iommu_setup_default_domain()), and a display driver needs
+them: to keep a bootloader framebuffer readable across the switch from
+the identity domain to its own paging domain, the mapping must exist
+before the stream is switched over.
+
+domain_alloc_paging() gets the device, so finalise the domain for it
+there. The attach-time call becomes a no-op.
+
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu.c b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+index 889a0966d..cd466a4e6 100644
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu.c
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+@@ -918,12 +918,9 @@ static struct iommu_domain *arm_smmu_domain_alloc_paging(struct device *dev)
+ 	struct arm_smmu_domain *smmu_domain;
+ 	struct arm_smmu_master_cfg *cfg = dev_iommu_priv_get(dev);
+ 	struct arm_smmu_device *smmu = cfg->smmu;
++	int ret;
+ 
+-	/*
+-	 * Allocate the domain and initialise some of its data structures.
+-	 * We can't really do anything meaningful until we've added a
+-	 * master.
+-	 */
++	/* Allocate the domain and initialise its data structures */
+ 	smmu_domain = kzalloc_obj(*smmu_domain);
+ 	if (!smmu_domain)
+ 		return NULL;
+@@ -932,7 +929,25 @@ static struct iommu_domain *arm_smmu_domain_alloc_paging(struct device *dev)
+ 	spin_lock_init(&smmu_domain->cb_lock);
+ 	smmu_domain->domain.pgsize_bitmap = smmu->pgsize_bitmap;
+ 
++	/*
++	 * Finalise the domain for this device right away, so that mappings
++	 * can be installed before the first attach switches its streams over,
++	 * e.g. to keep a bootloader framebuffer readable. Attaching repeats
++	 * this as a no-op.
++	 */
++	ret = arm_smmu_rpm_get(smmu);
++	if (ret < 0)
++		goto err_free;
++	ret = arm_smmu_init_domain_context(smmu_domain, smmu, dev);
++	arm_smmu_rpm_put(smmu);
++	if (ret < 0)
++		goto err_free;
++
+ 	return &smmu_domain->domain;
++
++err_free:
++	kfree(smmu_domain);
++	return ERR_PTR(ret);
+ }
+ 
+ static void arm_smmu_domain_free(struct iommu_domain *domain)

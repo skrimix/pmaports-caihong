@@ -1,0 +1,63 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] drm/msm/dsi/phy: 7nm: take over the PLL bias the bootloader left on
+
+With a bootloader display still running (continuous splash), the PLL
+bias is on while pll_enable_cnt starts at 0. The enable/disable pairs
+around the probe-time register reads (save_state, recalc_rate) then
+clear PLL_SHUTDOWNB and zero PLL_SYSTEM_MUXES: on a bonded panel the
+slave PHY's probe blanks the screen.
+
+Start a PLL found with its bias on at one reference and drop it at the
+first PHY enable, when the driver takes its own.
+
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+index 984a66085..095c6b2af 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+@@ -96,6 +96,8 @@ struct dsi_pll_7nm {
+ 	 */
+ 	spinlock_t pll_enable_lock;
+ 	int pll_enable_cnt;
++	/* bias reference taken over from the bootloader, see dsi_pll_7nm_init() */
++	bool inherited_bias;
+ 
+ 	struct pll_7nm_cached_state cached_state;
+ 
+@@ -874,6 +876,19 @@ static int dsi_pll_7nm_init(struct msm_dsi_phy *phy)
+ 
+ 	pll_7nm->phy = phy;
+ 
++	/*
++	 * A PLL the bootloader left running for its display has its bias on.
++	 * Take over that reference until the first PHY enable; otherwise the
++	 * enable/disable pairs around the register reads below turn the bias
++	 * off and reset the PLL muxes under the running link.
++	 */
++	if (readl(phy->base + REG_DSI_7nm_PHY_CMN_CTRL_0) &
++	    DSI_7nm_PHY_CMN_CTRL_0_PLL_SHUTDOWNB) {
++		pll_7nm->pll_enable_cnt = 1;
++		pll_7nm->inherited_bias = true;
++		dev_info(&pdev->dev, "PLL%d left running by the bootloader\n", phy->id);
++	}
++
+ 	ret = pll_7nm_register(pll_7nm, phy->provided_clocks->hws);
+ 	if (ret) {
+ 		DRM_DEV_ERROR(&pdev->dev, "failed to register PLL: %d\n", ret);
+@@ -967,10 +982,17 @@ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
+ 	u32 glbl_pemph_ctrl_0;
+ 	u32 glbl_str_swi_cal_sel_ctrl, glbl_hstx_str_ctrl_0;
+ 	u32 glbl_rescode_top_ctrl, glbl_rescode_bot_ctrl;
++	struct dsi_pll_7nm *pll_7nm = to_pll_7nm(phy->vco_hw);
+ 	u32 data;
+ 
+ 	DBG("");
+ 
++	/* From here on the driver keeps its own bias references */
++	if (pll_7nm->inherited_bias) {
++		pll_7nm->inherited_bias = false;
++		dsi_pll_disable_pll_bias(pll_7nm);
++	}
++
+ 	if (phy->cphy_mode)
+ 		ret = msm_dsi_cphy_timing_calc_v4(timing, clk_req);
+ 	else

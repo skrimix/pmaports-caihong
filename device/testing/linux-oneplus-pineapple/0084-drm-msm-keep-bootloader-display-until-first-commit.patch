@@ -1,0 +1,600 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] drm/msm: keep the bootloader display until the first commit
+
+When the DT reserves /reserved-memory/splash_region, the bootloader
+leaves its display pipeline scanning out of that buffer. Without
+handling, Linux blanks it at several points before its own first frame
+and then cannot bring up the bonded DSI panel over the running pipeline.
+Keep it running instead and take over at the first commit:
+
+- MDSS skips its reset pulse and holds a runtime-PM reference, so the
+  children's probes do not suspend it and cut its clocks.
+- DPU checks at hw_init whether a CTL still drives an interface. If so,
+  it keeps its own runtime reference (its runtime suspend would drop
+  the clock and bandwidth votes), and DRM's display domain maps the
+  splash buffer 1:1 read-only before the attach switches the stream
+  over, with DRM's allocations kept below it. Otherwise the MDSS
+  reference goes right away.
+- At the first commit, DPU stops the inherited pipeline the way the
+  encoder disables bonded interfaces (slave timing engine first, then
+  the master, then CTL reset and cleanup as
+  dpu_encoder_helper_phys_cleanup()), unmaps the splash buffer and
+  drops both references. DSI and the panel are left running for the
+  modeset that follows.
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+index da3556eb6..bf0a88b72 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -437,10 +437,15 @@ static void dpu_kms_disable_vblank(struct msm_kms *kms, struct drm_crtc *crtc)
+ 	dpu_crtc_vblank(crtc, false);
+ }
+ 
++static void dpu_kms_splash_stop(struct dpu_kms *dpu_kms);
++
+ static void dpu_kms_enable_commit(struct msm_kms *kms)
+ {
+ 	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
+ 	pm_runtime_get_sync(&dpu_kms->pdev->dev);
++
++	if (dpu_kms->splash_active)
++		dpu_kms_splash_stop(dpu_kms);
+ }
+ 
+ static void dpu_kms_disable_commit(struct msm_kms *kms)
+@@ -913,6 +918,13 @@ static void dpu_kms_destroy(struct msm_kms *kms)
+ 
+ 	dpu_kms = to_dpu_kms(kms);
+ 
++	/* No commit ever came: drop the references keeping the splash */
++	if (dpu_kms->splash_active) {
++		dpu_kms->splash_active = false;
++		pm_runtime_put_noidle(&dpu_kms->pdev->dev);
++		msm_mdss_splash_release(dpu_kms->pdev->dev.parent);
++	}
++
+ 	_dpu_kms_hw_destroy(dpu_kms);
+ 
+ 	msm_kms_destroy(&dpu_kms->base);
+@@ -1106,7 +1118,8 @@ static int _dpu_kms_mmu_init(struct dpu_kms *dpu_kms)
+ {
+ 	struct drm_gpuvm *vm;
+ 
+-	vm = msm_kms_init_vm(dpu_kms->dev, dpu_kms->dev->dev->parent);
++	vm = msm_kms_init_vm(dpu_kms->dev, dpu_kms->dev->dev->parent,
++			     dpu_kms->splash_active ? &dpu_kms->splash : NULL);
+ 	if (IS_ERR(vm))
+ 		return PTR_ERR(vm);
+ 
+@@ -1135,6 +1148,175 @@ unsigned long dpu_kms_get_clk_rate(struct dpu_kms *dpu_kms, char *clock_name)
+ 
+ #define	DPU_PERF_DEFAULT_MAX_CORE_CLK_RATE	412500000
+ 
++/*
++ * Continuous splash: the bootloader can leave its display pipeline running
++ * (see msm_mdss_splash_region()). DPU keeps it scanning out of the splash
++ * buffer until the first commit, then stops it the way the encoder tears
++ * down bonded interfaces: slave timing engines first, then the master, and
++ * once they have stopped, reset and clear the CTL like
++ * dpu_encoder_helper_phys_cleanup(). DSI and the panel are left running
++ * for the modeset that follows.
++ */
++
++/* CTL registers describing the path, as in dpu_hw_ctl.c */
++#define DPU_SPLASH_CTL_MERGE_3D_ACTIVE	0x0e4
++#define DPU_SPLASH_CTL_DSC_ACTIVE	0x0e8
++#define DPU_SPLASH_CTL_INTF_ACTIVE	0x0f4
++#define DPU_SPLASH_CTL_INTF_MASTER	0x134
++
++static void dpu_kms_splash_init(struct dpu_kms *dpu_kms)
++{
++	const struct dpu_mdss_cfg *cat = dpu_kms->catalog;
++	int i;
++
++	if (msm_mdss_splash_region(&dpu_kms->splash))
++		return;
++
++	for (i = 0; i < cat->ctl_count; i++) {
++		if (readl_relaxed(dpu_kms->mmio + cat->ctl[i].base +
++				  DPU_SPLASH_CTL_INTF_ACTIVE)) {
++			dpu_kms->splash_active = true;
++			DRM_INFO("bootloader display running from %pR, keeping it until the first commit\n",
++				 &dpu_kms->splash);
++			return;
++		}
++	}
++}
++
++/* Returns false if the bootloader pipeline on this CTL did not stop. */
++static bool dpu_kms_splash_stop_ctl(struct dpu_kms *dpu_kms, struct dpu_hw_ctl *ctl)
++{
++	const struct dpu_mdss_cfg *cat = dpu_kms->catalog;
++	struct dpu_hw_intf *intfs[INTF_MAX - INTF_0] = { };
++	u32 intf_active, intf_master, dsc_active, merge_3d_active;
++	struct dpu_hw_intf_status status;
++	struct dpu_hw_intf_cfg intf_cfg;
++	unsigned long timeout;
++	bool running;
++	int i;
++
++	intf_active = DPU_REG_READ(&ctl->hw, DPU_SPLASH_CTL_INTF_ACTIVE);
++	if (!intf_active)
++		return true;
++
++	intf_master = DPU_REG_READ(&ctl->hw, DPU_SPLASH_CTL_INTF_MASTER);
++	dsc_active = DPU_REG_READ(&ctl->hw, DPU_SPLASH_CTL_DSC_ACTIVE);
++	merge_3d_active = DPU_REG_READ(&ctl->hw, DPU_SPLASH_CTL_MERGE_3D_ACTIVE);
++	DPU_DEBUG("splash on ctl_%d: intf %#x master %#x dsc %#x merge_3d %#x\n",
++		  ctl->idx - CTL_0, intf_active, intf_master, dsc_active, merge_3d_active);
++
++	for (i = 0; i < ARRAY_SIZE(intfs); i++) {
++		if (!(intf_active & BIT(i)))
++			continue;
++		intfs[i] = dpu_kms->rm.hw_intf[i];
++		if (!intfs[i] || !intfs[i]->ops.enable_timing || !intfs[i]->ops.get_status) {
++			DPU_ERROR("splash: intf_%d unknown, leaving ctl_%d running\n",
++				  i, ctl->idx - CTL_0);
++			return false;
++		}
++	}
++
++	/* Slaves first, as dpu_encoder_virt_atomic_disable() does */
++	for (i = 0; i < ARRAY_SIZE(intfs); i++)
++		if (intfs[i] && !(intf_master & BIT(i)))
++			intfs[i]->ops.enable_timing(intfs[i], 0);
++	for (i = 0; i < ARRAY_SIZE(intfs); i++)
++		if (intfs[i] && (intf_master & BIT(i)))
++			intfs[i]->ops.enable_timing(intfs[i], 0);
++
++	/* The timing engines stop at the end of the frame */
++	timeout = jiffies + msecs_to_jiffies(200);
++	do {
++		running = false;
++		for (i = 0; i < ARRAY_SIZE(intfs); i++) {
++			if (!intfs[i])
++				continue;
++			intfs[i]->ops.get_status(intfs[i], &status);
++			running |= status.is_en;
++		}
++		if (!running)
++			break;
++		usleep_range(500, 1000);
++	} while (time_before(jiffies, timeout));
++
++	if (running) {
++		DPU_ERROR("splash: timing engines did not stop, leaving ctl_%d alone\n",
++			  ctl->idx - CTL_0);
++		return false;
++	}
++
++	if (ctl->ops.reset(ctl))
++		DPU_ERROR("splash: ctl_%d reset timed out\n", ctl->idx - CTL_0);
++
++	for (i = 0; i < cat->mixer_count; i++)
++		ctl->ops.update_pending_flush_mixer(ctl, cat->mixer[i].id);
++
++	for (i = 0; i < ARRAY_SIZE(intfs); i++) {
++		if (!intfs[i])
++			continue;
++		if (intfs[i]->ops.bind_pingpong_blk)
++			intfs[i]->ops.bind_pingpong_blk(intfs[i], PINGPONG_NONE);
++		if (ctl->ops.update_pending_flush_intf)
++			ctl->ops.update_pending_flush_intf(ctl, INTF_0 + i);
++	}
++
++	for (i = 0; i < DSC_MAX - DSC_0; i++)
++		if ((dsc_active & BIT(i)) && ctl->ops.update_pending_flush_dsc)
++			ctl->ops.update_pending_flush_dsc(ctl, DSC_0 + i);
++
++	memset(&intf_cfg, 0, sizeof(intf_cfg));
++	intf_cfg.dsc = dsc_active;
++	for (i = 0; i < MERGE_3D_MAX - MERGE_3D_0; i++) {
++		if (!(merge_3d_active & BIT(i)))
++			continue;
++		intf_cfg.merge_3d = MERGE_3D_0 + i;
++		if (ctl->ops.reset_intf_cfg)
++			ctl->ops.reset_intf_cfg(ctl, &intf_cfg);
++		if (ctl->ops.update_pending_flush_merge_3d)
++			ctl->ops.update_pending_flush_merge_3d(ctl, MERGE_3D_0 + i);
++		intf_cfg.dsc = 0;
++	}
++	for (i = 0; i < ARRAY_SIZE(intfs); i++) {
++		if (!intfs[i])
++			continue;
++		memset(&intf_cfg, 0, sizeof(intf_cfg));
++		intf_cfg.intf = INTF_0 + i;
++		intf_cfg.dsc = dsc_active;
++		if (ctl->ops.reset_intf_cfg)
++			ctl->ops.reset_intf_cfg(ctl, &intf_cfg);
++	}
++
++	ctl->ops.trigger_flush(ctl);
++	ctl->ops.trigger_start(ctl);
++	ctl->ops.clear_pending_flush(ctl);
++
++	return true;
++}
++
++static void dpu_kms_splash_stop(struct dpu_kms *dpu_kms)
++{
++	struct msm_mmu *mmu = to_msm_vm(dpu_kms->base.vm)->mmu;
++	bool stopped = true;
++	int i;
++
++	dpu_kms->splash_active = false;
++
++	for (i = 0; i < ARRAY_SIZE(dpu_kms->rm.ctl_blks); i++)
++		if (dpu_kms->rm.ctl_blks[i])
++			stopped &= dpu_kms_splash_stop_ctl(dpu_kms,
++							   to_dpu_hw_ctl(dpu_kms->rm.ctl_blks[i]));
++
++	/* Nothing fetches from the splash buffer any more */
++	if (stopped)
++		mmu->funcs->unmap(mmu, dpu_kms->splash.start,
++				  resource_size(&dpu_kms->splash));
++
++	DRM_INFO("bootloader display %s\n", stopped ? "stopped" : "NOT stopped");
++
++	pm_runtime_put_noidle(&dpu_kms->pdev->dev);
++	msm_mdss_splash_release(dpu_kms->pdev->dev.parent);
++}
++
+ static int dpu_kms_hw_init(struct msm_kms *kms)
+ {
+ 	struct dpu_kms *dpu_kms;
+@@ -1174,6 +1356,8 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
+ 		goto err_pm_put;
+ 	}
+ 
++	dpu_kms_splash_init(dpu_kms);
++
+ 	/*
+ 	 * Now we need to read the HW catalog and initialize resources such as
+ 	 * clocks, regulators, GDSC/MMAGIC, ioremap the register ranges etc
+@@ -1279,6 +1463,15 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
+ 
+ 	dpu_vbif_init_memtypes(dpu_kms);
+ 
++	/*
++	 * Keep a bootloader display until the first commit: DPU's runtime
++	 * suspend would drop its clock and bandwidth votes under it.
++	 */
++	if (dpu_kms->splash_active)
++		pm_runtime_get_noresume(&dpu_kms->pdev->dev);
++	else
++		msm_mdss_splash_release(dpu_kms->pdev->dev.parent);
++
+ 	pm_runtime_put_sync(&dpu_kms->pdev->dev);
+ 
+ 	return 0;
+@@ -1286,6 +1479,8 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
+ err_pm_put:
+ 	pm_runtime_put_sync(&dpu_kms->pdev->dev);
+ error:
++	dpu_kms->splash_active = false;
++	msm_mdss_splash_release(dpu_kms->pdev->dev.parent);
+ 	_dpu_kms_hw_destroy(dpu_kms);
+ 
+ 	return rc;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
+index e39831a39..4d2c15b2d 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
+@@ -58,6 +58,9 @@ extern bool dpu_use_virtual_planes;
+ 
+ struct dpu_kms {
+ 	struct msm_kms base;
++	/* bootloader display left running, stopped at the first commit */
++	bool splash_active;
++	struct resource splash;
+ 	struct drm_device *dev;
+ 	const struct dpu_mdss_cfg *catalog;
+ 	const struct qcom_ubwc_cfg_data *mdss;
+diff --git a/drivers/gpu/drm/msm/disp/mdp4/mdp4_kms.c b/drivers/gpu/drm/msm/disp/mdp4/mdp4_kms.c
+index 9b1d1982e..c7d64bffe 100644
+--- a/drivers/gpu/drm/msm/disp/mdp4/mdp4_kms.c
++++ b/drivers/gpu/drm/msm/disp/mdp4/mdp4_kms.c
+@@ -449,7 +449,7 @@ static int mdp4_kms_init(struct drm_device *dev)
+ 	mdp4_disable(mdp4_kms);
+ 	mdelay(16);
+ 
+-	vm = msm_kms_init_vm(mdp4_kms->dev, NULL);
++	vm = msm_kms_init_vm(mdp4_kms->dev, NULL, NULL);
+ 	if (IS_ERR(vm)) {
+ 		ret = PTR_ERR(vm);
+ 		return ret;
+diff --git a/drivers/gpu/drm/msm/disp/mdp5/mdp5_kms.c b/drivers/gpu/drm/msm/disp/mdp5/mdp5_kms.c
+index 3934cd060..4431b5806 100644
+--- a/drivers/gpu/drm/msm/disp/mdp5/mdp5_kms.c
++++ b/drivers/gpu/drm/msm/disp/mdp5/mdp5_kms.c
+@@ -537,7 +537,7 @@ static int mdp5_kms_init(struct drm_device *dev)
+ 	}
+ 	mdelay(16);
+ 
+-	vm = msm_kms_init_vm(mdp5_kms->dev, pdev->dev.parent);
++	vm = msm_kms_init_vm(mdp5_kms->dev, pdev->dev.parent, NULL);
+ 	if (IS_ERR(vm)) {
+ 		ret = PTR_ERR(vm);
+ 		return ret;
+diff --git a/drivers/gpu/drm/msm/msm_drv.h b/drivers/gpu/drm/msm/msm_drv.h
+index eb4bbae85..7728cffe0 100644
+--- a/drivers/gpu/drm/msm/msm_drv.h
++++ b/drivers/gpu/drm/msm/msm_drv.h
+@@ -220,7 +220,8 @@ void msm_crtc_disable_vblank(struct drm_crtc *crtc);
+ int msm_register_mmu(struct drm_device *dev, struct msm_mmu *mmu);
+ void msm_unregister_mmu(struct drm_device *dev, struct msm_mmu *mmu);
+ 
+-struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_dev);
++struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_dev,
++				  const struct resource *splash);
+ bool msm_use_mmu(struct drm_device *dev);
+ 
+ int msm_ioctl_gem_submit(struct drm_device *dev, void *data,
+@@ -418,9 +419,13 @@ static inline void msm_dpu_unregister(void) {}
+ #ifdef CONFIG_DRM_MSM_MDSS
+ void msm_mdss_register(void);
+ void msm_mdss_unregister(void);
++int msm_mdss_splash_region(struct resource *res);
++void msm_mdss_splash_release(struct device *dev);
+ #else
+ static inline void msm_mdss_register(void) {}
+ static inline void msm_mdss_unregister(void) {}
++static inline int msm_mdss_splash_region(struct resource *res) { return -ENODEV; }
++static inline void msm_mdss_splash_release(struct device *dev) {}
+ #endif
+ 
+ #ifdef CONFIG_DEBUG_FS
+diff --git a/drivers/gpu/drm/msm/msm_iommu.c b/drivers/gpu/drm/msm/msm_iommu.c
+index da6782fca..f80ac8c76 100644
+--- a/drivers/gpu/drm/msm/msm_iommu.c
++++ b/drivers/gpu/drm/msm/msm_iommu.c
+@@ -732,7 +732,8 @@ static const struct msm_mmu_funcs funcs = {
+ 		.set_stall = msm_iommu_set_stall,
+ };
+ 
+-struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
++static struct msm_mmu *__msm_iommu_new(struct device *dev, unsigned long quirks,
++				       const struct resource *splash)
+ {
+ 	struct iommu_domain *domain;
+ 	struct msm_iommu *iommu;
+@@ -771,6 +772,18 @@ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
+ 		}
+ 	}
+ 
++	/*
++	 * A bootloader display may still scan out of its splash buffer. Map
++	 * it 1:1 read-only before the attach switches the stream over to
++	 * this domain; the display driver unmaps it after taking over.
++	 */
++	if (splash) {
++		ret = iommu_map(domain, splash->start, splash->start,
++				resource_size(splash), IOMMU_READ, GFP_KERNEL);
++		if (ret)
++			dev_warn(dev, "failed to map splash buffer: %d\n", ret);
++	}
++
+ 	ret = iommu_attach_device(iommu->domain, dev);
+ 	if (ret) {
+ 		iommu_domain_free(domain);
+@@ -781,12 +794,18 @@ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
+ 	return &iommu->base;
+ }
+ 
+-struct msm_mmu *msm_iommu_disp_new(struct device *dev, unsigned long quirks)
++struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
++{
++	return __msm_iommu_new(dev, quirks, NULL);
++}
++
++struct msm_mmu *msm_iommu_disp_new(struct device *dev, unsigned long quirks,
++				   const struct resource *splash)
+ {
+ 	struct msm_iommu *iommu;
+ 	struct msm_mmu *mmu;
+ 
+-	mmu = msm_iommu_new(dev, quirks);
++	mmu = __msm_iommu_new(dev, quirks, splash);
+ 	if (IS_ERR(mmu))
+ 		return mmu;
+ 
+diff --git a/drivers/gpu/drm/msm/msm_kms.c b/drivers/gpu/drm/msm/msm_kms.c
+index e5d0ea629..4ff0987f8 100644
+--- a/drivers/gpu/drm/msm/msm_kms.c
++++ b/drivers/gpu/drm/msm/msm_kms.c
+@@ -177,7 +177,8 @@ static int msm_kms_fault_handler(void *arg, unsigned long iova, int flags, void
+ 	return -ENOSYS;
+ }
+ 
+-struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_dev)
++struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_dev,
++				  const struct resource *splash)
+ {
+ 	struct drm_gpuvm *vm;
+ 	struct msm_mmu *mmu;
+@@ -185,6 +186,7 @@ struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_de
+ 	struct msm_drm_private *priv = dev->dev_private;
+ 	struct msm_kms *kms = priv->kms;
+ 	struct device *iommu_dev;
++	u64 va_end = 0x100000000;
+ 
+ 	/*
+ 	 * IOMMUs can be a part of MDSS device tree binding, or the
+@@ -199,12 +201,16 @@ struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_de
+ 		return ERR_PTR(-ENODEV);
+ 	}
+ 
+-	mmu = msm_iommu_disp_new(iommu_dev, 0);
++	/* Keep allocations clear of the 1:1 splash mapping */
++	if (splash && splash->start < va_end)
++		va_end = splash->start;
++
++	mmu = msm_iommu_disp_new(iommu_dev, 0, splash);
+ 	if (IS_ERR(mmu))
+ 		return ERR_CAST(mmu);
+ 
+ 	vm = msm_gem_vm_create(dev, mmu, "mdp_kms",
+-			       0x1000, 0x100000000 - 0x1000, true);
++			       0x1000, va_end - 0x1000, true);
+ 	if (IS_ERR(vm)) {
+ 		dev_err(mdp_dev, "vm create, error %pe\n", vm);
+ 		mmu->funcs->destroy(mmu);
+diff --git a/drivers/gpu/drm/msm/msm_mdss.c b/drivers/gpu/drm/msm/msm_mdss.c
+index 9087c4b29..21fe5124d 100644
+--- a/drivers/gpu/drm/msm/msm_mdss.c
++++ b/drivers/gpu/drm/msm/msm_mdss.c
+@@ -11,6 +11,7 @@
+ #include <linux/irqchip.h>
+ #include <linux/irqdesc.h>
+ #include <linux/irqchip/chained_irq.h>
++#include <linux/of_address.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+@@ -44,6 +45,8 @@ struct msm_mdss {
+ 	struct icc_path *mdp_path[2];
+ 	u32 num_mdp_paths;
+ 	struct icc_path *reg_bus_path;
++	/* runtime-PM reference keeping a bootloader display running */
++	bool splash_hold;
+ };
+ 
+ static int msm_mdss_parse_data_bus_icc_path(struct device *dev,
+@@ -362,21 +365,57 @@ static int mdp5_mdss_parse_clock(struct platform_device *pdev, struct clk_bulk_d
+ 	return num_clocks;
+ }
+ 
++/**
++ * msm_mdss_splash_region() - get the bootloader's splash buffer
++ * @res: the splash_region reservation
++ *
++ * The bootloader keeps its display running only when the DT reserves
++ * /reserved-memory/splash_region, and updates the reservation to the buffer
++ * it scans out of. It powers the display down otherwise.
++ *
++ * Return: 0 if the reservation exists, a negative error code otherwise.
++ */
++int msm_mdss_splash_region(struct resource *res)
++{
++	struct device_node *node;
++	int ret;
++
++	node = of_find_node_by_path("/reserved-memory/splash_region");
++	if (!node)
++		return -ENODEV;
++
++	ret = of_address_to_resource(node, 0, res);
++	of_node_put(node);
++
++	return ret;
++}
++
+ static struct msm_mdss *msm_mdss_init(struct platform_device *pdev, bool is_mdp5)
+ {
+ 	const struct msm_mdss_data *mdss_data;
+ 	struct msm_mdss *msm_mdss;
++	struct resource splash;
++	bool splash_hold;
+ 	int ret;
+ 	int irq;
+ 
+-	ret = msm_mdss_reset(&pdev->dev);
+-	if (ret)
+-		return ERR_PTR(ret);
++	/*
++	 * A reset pulse would blank a running bootloader display; DPU stops
++	 * its pipeline at the first commit instead.
++	 */
++	splash_hold = !is_mdp5 && !msm_mdss_splash_region(&splash);
++	if (!splash_hold) {
++		ret = msm_mdss_reset(&pdev->dev);
++		if (ret)
++			return ERR_PTR(ret);
++	}
+ 
+ 	msm_mdss = devm_kzalloc(&pdev->dev, sizeof(*msm_mdss), GFP_KERNEL);
+ 	if (!msm_mdss)
+ 		return ERR_PTR(-ENOMEM);
+ 
++	msm_mdss->splash_hold = splash_hold;
++
+ 	msm_mdss->mdss_data = qcom_ubwc_config_get_data();
+ 	if (IS_ERR(msm_mdss->mdss_data))
+ 		return ERR_CAST(msm_mdss->mdss_data);
+@@ -479,6 +518,19 @@ static int mdss_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, mdss);
+ 
++	/*
++	 * Keep a bootloader display powered: without a reference, the
++	 * children's probes runtime-suspend MDSS and cut its clocks under the
++	 * scanout. DPU drops it with msm_mdss_splash_release().
++	 */
++	if (mdss->splash_hold) {
++		ret = pm_runtime_resume_and_get(dev);
++		if (ret < 0) {
++			dev_warn(dev, "failed to keep the splash powered: %d\n", ret);
++			mdss->splash_hold = false;
++		}
++	}
++
+ 	/*
+ 	 * MDP5/DPU based devices don't have a flat hierarchy. There is a top
+ 	 * level parent: MDSS, and children: MDP5/DPU, DSI, HDMI, eDP etc.
+@@ -488,6 +540,8 @@ static int mdss_probe(struct platform_device *pdev)
+ 	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
+ 	if (ret) {
+ 		DRM_DEV_ERROR(dev, "failed to populate children devices\n");
++		of_platform_depopulate(dev);
++		msm_mdss_splash_release(dev);
+ 		msm_mdss_destroy(mdss);
+ 		return ret;
+ 	}
+@@ -501,6 +555,7 @@ static void mdss_remove(struct platform_device *pdev)
+ 
+ 	of_platform_depopulate(&pdev->dev);
+ 
++	msm_mdss_splash_release(&pdev->dev);
+ 	msm_mdss_destroy(mdss);
+ }
+ 
+@@ -570,6 +625,25 @@ static struct platform_driver mdss_platform_driver = {
+ 	},
+ };
+ 
++/**
++ * msm_mdss_splash_release() - drop the reference keeping the splash powered
++ * @dev: the MDSS device
++ */
++void msm_mdss_splash_release(struct device *dev)
++{
++	struct msm_mdss *mdss;
++
++	if (dev->driver != &mdss_platform_driver.driver)
++		return;
++
++	mdss = dev_get_drvdata(dev);
++	if (!mdss || !mdss->splash_hold)
++		return;
++
++	mdss->splash_hold = false;
++	pm_runtime_put(dev);
++}
++
+ void __init msm_mdss_register(void)
+ {
+ 	platform_driver_register(&mdss_platform_driver);
+diff --git a/drivers/gpu/drm/msm/msm_mmu.h b/drivers/gpu/drm/msm/msm_mmu.h
+index 8915662fb..ae72edca1 100644
+--- a/drivers/gpu/drm/msm/msm_mmu.h
++++ b/drivers/gpu/drm/msm/msm_mmu.h
+@@ -76,7 +76,8 @@ static inline void msm_mmu_init(struct msm_mmu *mmu, struct device *dev,
+ 
+ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks);
+ struct msm_mmu *msm_iommu_gpu_new(struct device *dev, struct msm_gpu *gpu, unsigned long quirks);
+-struct msm_mmu *msm_iommu_disp_new(struct device *dev, unsigned long quirks);
++struct msm_mmu *msm_iommu_disp_new(struct device *dev, unsigned long quirks,
++				   const struct resource *splash);
+ 
+ static inline void msm_mmu_set_fault_handler(struct msm_mmu *mmu, void *arg,
+ 		int (*handler)(void *arg, unsigned long iova, int flags, void *data))

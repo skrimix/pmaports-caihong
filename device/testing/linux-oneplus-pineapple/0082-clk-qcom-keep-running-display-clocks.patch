@@ -1,0 +1,73 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] clk: qcom: keep the display clocks the bootloader left running
+
+The bootloader can leave its display running (continuous splash). Two
+steps of the SM8550 DISPCC probe stop its scanout:
+
+- clk_lucid_ole_pll_configure() disables the PLL output and puts the PLL
+  in standby. Skip the configuration of a PLL that is already running,
+  as clk_lucid_evo_pll_configure() and the Trion variants do.
+- Registering the shared RCGs parks them at XO. Use the no-init-park ops
+  for the AHB, ESC0, ESC1 and MDP sources, like dispcc-sc8280xp and
+  dispcc-x1e80100 do for MDP; later operations are the same.
+
+diff --git a/drivers/clk/qcom/clk-alpha-pll.c b/drivers/clk/qcom/clk-alpha-pll.c
+index f8313f9d0..a820c5279 100644
+--- a/drivers/clk/qcom/clk-alpha-pll.c
++++ b/drivers/clk/qcom/clk-alpha-pll.c
+@@ -2373,6 +2373,15 @@ void clk_lucid_ole_pll_configure(struct clk_alpha_pll *pll, struct regmap *regma
+ {
+ 	u32 lval = config->l;
+ 
++	/*
++	 * If the bootloader left the PLL enabled it's likely that there are
++	 * RCGs that will lock up if we disable the PLL below.
++	 */
++	if (trion_pll_is_enabled(pll, regmap)) {
++		pr_debug("Lucid OLE PLL is already enabled, skipping configuration\n");
++		return;
++	}
++
+ 	lval |= TRION_PLL_CAL_VAL << LUCID_EVO_PLL_CAL_L_VAL_SHIFT;
+ 	lval |= TRION_PLL_CAL_VAL << LUCID_OLE_PLL_RINGOSC_CAL_L_VAL_SHIFT;
+ 	clk_alpha_pll_write_config(regmap, PLL_L_VAL(pll), lval);
+diff --git a/drivers/clk/qcom/dispcc-sm8550.c b/drivers/clk/qcom/dispcc-sm8550.c
+index 418dcea20..036ee0579 100644
+--- a/drivers/clk/qcom/dispcc-sm8550.c
++++ b/drivers/clk/qcom/dispcc-sm8550.c
+@@ -289,7 +289,7 @@ static struct clk_rcg2 disp_cc_mdss_ahb_clk_src = {
+ 		.parent_data = disp_cc_parent_data_6,
+ 		.num_parents = ARRAY_SIZE(disp_cc_parent_data_6),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_shared_ops,
++		.ops = &clk_rcg2_shared_no_init_park_ops,
+ 	},
+ };
+ 
+@@ -560,7 +560,7 @@ static struct clk_rcg2 disp_cc_mdss_esc0_clk_src = {
+ 		.parent_data = disp_cc_parent_data_5,
+ 		.num_parents = ARRAY_SIZE(disp_cc_parent_data_5),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_shared_ops,
++		.ops = &clk_rcg2_shared_no_init_park_ops,
+ 	},
+ };
+ 
+@@ -575,7 +575,7 @@ static struct clk_rcg2 disp_cc_mdss_esc1_clk_src = {
+ 		.parent_data = disp_cc_parent_data_5,
+ 		.num_parents = ARRAY_SIZE(disp_cc_parent_data_5),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_shared_ops,
++		.ops = &clk_rcg2_shared_no_init_park_ops,
+ 	},
+ };
+ 
+@@ -622,7 +622,7 @@ static struct clk_rcg2 disp_cc_mdss_mdp_clk_src = {
+ 		.parent_data = disp_cc_parent_data_8,
+ 		.num_parents = ARRAY_SIZE(disp_cc_parent_data_8),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_shared_ops,
++		.ops = &clk_rcg2_shared_no_init_park_ops,
+ 	},
+ };
+ 

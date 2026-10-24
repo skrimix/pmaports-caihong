@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=49
+pkgrel=64
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -57,7 +57,6 @@ source="
 	0018-drivers-input-touchscreen-add-nt36532.patch
 	0019-drivers-power-supply-battmgr.patch
 	0021-input-novatek-nt36532-watchdog-recovery.patch
-	0022-arm64-dts-qcom-caihong-disable-splash-handoff.patch
 	0024-iommu-arm-smmu-qcom-sm8650-display-identity.patch
 	0025-arm64-dts-qcom-caihong-wifi-power.patch
 	0026-ath12k-capture-wmi-startup-crash.patch
@@ -108,6 +107,11 @@ source="
 	0079-arm64-dts-qcom-caihong-stylus-charger.patch
 	0080-drm-msm-dpu-disable-the-slave-encoder-before-the-master.patch
 	0081-power-supply-qcom-battmgr-ordinary-charging.patch
+	0082-clk-qcom-keep-running-display-clocks.patch
+	0083-drm-msm-dsi-phy-7nm-take-over-bootloader-pll-bias.patch
+	0084-drm-msm-keep-bootloader-display-until-first-commit.patch
+	0085-drm-panel-nt36532-keep-bootloader-panel.patch
+	0086-iommu-arm-smmu-finalise-paging-domains-at-allocation.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -169,7 +173,6 @@ f42a313b3ad69e24041e99590186ba9a7a15f7b50c26208a7aa154e736050445194ff6054433cab2
 84ee322a60641bf70838bc5b082b2446f68a8e190d088f443cecceecc5ef06f855b165892e6277eb27a6d500339c56161cda6440b672bea2f57a1772e897cdd6  0018-drivers-input-touchscreen-add-nt36532.patch
 4e19e09df3815bde2582bca7f8db665f585ec09a93004baaafbeef5d3728a68dc7f4e16516605a3d340601937a518dc6cddd67dee47c35518d1f9d72fb5c7433  0019-drivers-power-supply-battmgr.patch
 d3f3c505af4d6196e99beb52587d8e999cb0b1b6e6cfa1e2b2bb5888600406a26e8f82a02ff53961dc4daf152c8974dc8a9f4e4a43d4703296fdda0fc47e6d30  0021-input-novatek-nt36532-watchdog-recovery.patch
-6e81749dd68fbfe9ee4b51b44a2fcc53ef6367e0e2a3ccf501f919c41ce639f9ff5474538edb89a57665d7ffbc6576d160826d2eceb603d601192e00a8957f91  0022-arm64-dts-qcom-caihong-disable-splash-handoff.patch
 5d59e0187ec03707d511cfeed4a8321deb62e72b61317fe07d89e1676691bb6d80df46f68a05ed973cd194c0e6d63425cafccdcdbd63abafabd6a55ad3fbab46  0024-iommu-arm-smmu-qcom-sm8650-display-identity.patch
 5a9520284aa68a9ad183d24f821d91a547f025cebba7f5a93ff0a4563b91d0fe640064b5d42d6064e542dee18bbb423437c52ec2d35ae901e344509d66866c97  0025-arm64-dts-qcom-caihong-wifi-power.patch
 d38fcb4fdbc990239d292e7720bc59d1de53dcaeddc283082c80945c410fb27e54fb48ebd4a363448f45f0676a527ea6853da9e7b704ce741c592e83034d1c07  0026-ath12k-capture-wmi-startup-crash.patch
@@ -220,6 +223,11 @@ c51fecf6edd3af3eff83f9775c8424a8304ae567da59d2ec0e00a1e514aed497da70bda165435a10
 dab91ff65311b67b06b3de985d4d990b34579ef1b0a9104bea6e82e5405b0a1afb839f5b00994767113445786485afc33aa3b33b668039605445d8f02994f62b  0079-arm64-dts-qcom-caihong-stylus-charger.patch
 2ff17bcd1c6eec58e168dfcfdf3a7eefc73fc96db2688c7e537a63e3376d7372acbb62fa5a4709dada7fe7a723f0ea53fc0076629192a3cdb3deda9e137f99ff  0080-drm-msm-dpu-disable-the-slave-encoder-before-the-master.patch
 3a1852fd3cc0b665e8e82e4e82386885558b2845bcf4456ac07a9bee05b4314a5da0c1231a192b3eefda498ce67945141a1c251fdd8f47f75119e0ce602677cc  0081-power-supply-qcom-battmgr-ordinary-charging.patch
+dd3707c8b8e7326b91514127842bb6b1c3cbcaf93461052edb2c6837f8d5366aeb18d846d95767f0943b5967191312eb9a508927c05c353ef9691b42f8f1d83c  0082-clk-qcom-keep-running-display-clocks.patch
+98da39bf751ae682312b7939d3127a0db2dbeb35d5d3eb0240e88b29fe581c3ba75a6e9e5ef883f5b01bed7587509ba552f87939678c971f7db2a1854273826e  0083-drm-msm-dsi-phy-7nm-take-over-bootloader-pll-bias.patch
+6b22a965757ee37bc2850bd61203e5f311b7c14bf7fae5dd3529ee9d8e103b96fe2d2ac820401a81b30eca22db1439b7238fef627dd66b29f388de68256ca0b5  0084-drm-msm-keep-bootloader-display-until-first-commit.patch
+c687220e711cb0f4dcdf68fbfd9e298b3e047b1ae31b0894f9a91192268b038d740866dfb6a1c7960da91bb2877193d4a4ca9846f6b1ba11510824006e721f18  0085-drm-panel-nt36532-keep-bootloader-panel.patch
+636ba91db520e0bcbf8cff9d20cee63e2facd403108fec6b3e4e06db67e067ae0b6c0070d13e937604c183add152e01c0b72785c2470e5d26c9e2f628e05ec0b  0086-iommu-arm-smmu-finalise-paging-domains-at-allocation.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 90f881d5278f010f2c87737464076dafac2d262af4b72247d287c294e218e92ab10ce25fffaebff8fbbea178a68817d04e51e30672f020892dd0ae1206ddefc4  config-oneplus-pineapple.aarch64
 "
