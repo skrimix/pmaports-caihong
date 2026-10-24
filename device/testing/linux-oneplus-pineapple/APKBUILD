@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=71
+pkgrel=72
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -115,6 +115,7 @@ source="
 	0087-backlight-ktz8866-keep-bootloader-backlight.patch
 	0088-drm-msm-dsi-hold-bootloader-link-clocks.patch
 	0089-arm64-dts-qcom-caihong-map-splash-region.patch
+	0090-arm64-dts-qcom-caihong-adc-thermal-zones.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -234,6 +235,7 @@ c687220e711cb0f4dcdf68fbfd9e298b3e047b1ae31b0894f9a91192268b038d740866dfb6a1c796
 bbb0faa22f4cfff854f9fb990afa61fa559c318abb566b1dc14e7bf781bdd35af3b6264222134094da8acd4bab5fd8e89370d24ff6c80b8a5a6dd71dc4407309  0087-backlight-ktz8866-keep-bootloader-backlight.patch
 96bdd8b67e1a645d000b6b93093cf2d1f163bdcf00356a569d2595e98b730a6c0dc2a18d8b641a0a02cfebc3f9d1361507dcda994a8d1837a27ad7359ba0201c  0088-drm-msm-dsi-hold-bootloader-link-clocks.patch
 48cbee6ee541cb04e0eda6aefbfea94008378c4dc7038387297739804be14dff2a3fd5d1ddf87da183b6a10cf80057e17fee82b88f5c44a65d3675f725cb7ac2  0089-arm64-dts-qcom-caihong-map-splash-region.patch
+67e7cf925a795e1e326d98ac61fb10cc9d11f6eee88646794e5d235642a2e7d97b707fb82eaf77e0853fa4a4d61e71571c4d75a1eaa9be2cc4b36f374671a0e5  0090-arm64-dts-qcom-caihong-adc-thermal-zones.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
-90f881d5278f010f2c87737464076dafac2d262af4b72247d287c294e218e92ab10ce25fffaebff8fbbea178a68817d04e51e30672f020892dd0ae1206ddefc4  config-oneplus-pineapple.aarch64
+1fc845001a2ac404b717c0773cc043618776b7e1fbb68946273d5413a4a88b263613e42170d7ac339e7151a27eca662afdf70530bb37e71bad6e384f597bc6ff  config-oneplus-pineapple.aarch64
 "

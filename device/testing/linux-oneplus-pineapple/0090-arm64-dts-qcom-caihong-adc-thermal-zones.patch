@@ -1,0 +1,235 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] arm64: dts: qcom: caihong: add the board thermistor zones
+
+Mark the board thermistors as ADC_TM channels and give each a thermal
+zone, so they are monitored through the Gen3 ADC_TM driver like on
+Android. The set follows the zones Android registers, adding the
+XO thermistor channel, plus the battery connector thermistor; the
+fake battery thermistor (0x744) is left out. The trips are 125 °C
+placeholders without cooling maps, as on the SM8650 HDK.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+index 5f1ad6b3b..4624afb12 100644
+--- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
++++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+@@ -588,12 +588,23 @@ vadc: adc@9000 {
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&svooc_therm_default>;
+ 
++		/* XO thermistor, Android pmk8550_xo_therm */
++		channel@44 {
++			reg = <0x44>;
++			qcom,pre-scaling = <1 1>;
++			qcom,hw-settle-time = <200>;
++			qcom,ratiometric;
++			qcom,adc-tm;
++			label = "xo_therm";
++		};
++
+ 		/* OnePlus Pad 2 Skin Thermistor */
+ 		channel@144 {
+ 			reg = <0x144>;
+ 			qcom,pre-scaling = <1 1>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "skin_msm_therm";
+ 		};
+ 
+@@ -603,6 +614,7 @@ channel@145 {
+ 			qcom,pre-scaling = <1 1>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "cam_flash_therm";
+ 		};
+ 		/* WLAN Thermistor */
+@@ -611,6 +623,7 @@ channel@146 {
+ 			qcom,pre-scaling = <1 1>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "wlan_therm";
+ 		};
+ 		/* PA thermistor 1 */
+@@ -619,6 +632,7 @@ channel@147 {
+ 			qcom,pre-scaling = <1 1>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "pa_therm_1";
+ 		};
+ 		/* Rear TOF Thermistor */
+@@ -627,6 +641,7 @@ channel@148 {
+ 			qcom,pre-scaling = <1 1>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "rear_tof_therm";
+ 		};
+ 		/* PA thermistor 2 */
+@@ -635,6 +650,7 @@ channel@14a {
+ 			qcom,pre-scaling = <1 1>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "pa_therm_2";
+ 		};
+ 
+@@ -644,6 +660,7 @@ channel@14b {
+ 			qcom,pre-scaling = <0x01 0x01>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "batt_con_therm";
+ 		};
+ 		/* SVOOC Thermistor */
+@@ -652,6 +669,7 @@ channel@14d {
+ 			qcom,pre-scaling = <1 1>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "svooc_therm";
+ 		};
+ 		/* Battery (Fake) Thermistor */
+@@ -668,6 +686,7 @@ channel@747 {
+ 			qcom,pre-scaling = <1 1>;
+ 			qcom,hw-settle-time = <200>;
+ 			qcom,ratiometric;
++			qcom,adc-tm;
+ 			label = "usb_therm";
+ 		};
+ 		/* WLS Thermistor */
+@@ -694,6 +713,132 @@ channel@78f {
+ 	};
+ };
+ 
++/*
++ * Board thermistors as ADC_TM zones, the ones Android registers plus the
++ * battery connector. The trips are placeholders, as on the SM8650 HDK.
++ */
++&{/thermal-zones} {
++	xo-thermal {
++		thermal-sensors = <&vadc 0x44>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	skin-msm-thermal {
++		thermal-sensors = <&vadc 0x144>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	cam-flash-thermal {
++		thermal-sensors = <&vadc 0x145>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	wlan-thermal {
++		thermal-sensors = <&vadc 0x146>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	pa-1-thermal {
++		thermal-sensors = <&vadc 0x147>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	rear-tof-thermal {
++		thermal-sensors = <&vadc 0x148>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	pa-2-thermal {
++		thermal-sensors = <&vadc 0x14a>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	batt-con-thermal {
++		thermal-sensors = <&vadc 0x14b>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	svooc-thermal {
++		thermal-sensors = <&vadc 0x14d>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++
++	usb-thermal {
++		thermal-sensors = <&vadc 0x747>;
++
++		trips {
++			trip-point0 {
++				temperature = <125000>;
++				hysteresis = <1000>;
++				type = "passive";
++			};
++		};
++	};
++};
++
+ 
+ &pm8550_flash {
+ 	status = "okay";
