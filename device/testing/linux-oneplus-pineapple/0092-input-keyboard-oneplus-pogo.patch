@@ -1,0 +1,1391 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] Input: add OnePlus pogo pin keyboard driver
+
+The OnePlus Pad 2 keyboard attaches through pogo pins carrying its power
+and a half-duplex UART at 921600 baud. While unpowered, an attached
+keyboard pulls a sense line low. The tablet then powers it, and the
+keyboard sends framed boot protocol keyboard reports, consumer key
+reports, touchpad reports with the layout of its BLE HID touchpad report,
+and a status heartbeat every 100 ms carrying its brand, Bluetooth
+address, LED and touchpad states. The tablet drives a transceiver enable
+line while it transmits.
+
+Follow the stock driver: power the keyboard once the sense line has read
+low for 120 ms, register the input devices on its first status frame,
+and power it off when it has been silent for 500 ms; then sample the
+sense line to power it again if it is still attached. Report keys with
+HID scancodes through a sparse keymap, so hwdb can remap them as for the
+BLE connection, and send the Caps Lock LED, correcting it when the
+heartbeat disagrees. Ask for the firmware version on connection.
+
+On system suspend, tell the keyboard that the host sleeps, as stock does
+on screen off, and wake it on resume. An asleep keyboard stops its
+heartbeat and holds the line low, then wakes the tablet through the
+UART's RX wake interrupt on a keypress. Wait for the line to fall before
+suspending: the edge would otherwise wake the tablet as soon as RX turns
+into a GPIO. A keyboard that does not acknowledge is powered off. While
+no keyboard is attached, the sense line is a wake source.
+
+The keyboard runs on its own battery, so cutting its power does not
+reset it, and an asleep keyboard stays silent after power-on. Wake a
+powered keyboard that has been silent for 500 ms.
+
+Written from the OnePlus downstream driver (oplus_bsp_pogo_keyboard).
+
+diff --git a/drivers/input/keyboard/Kconfig b/drivers/input/keyboard/Kconfig
+index d8c64f333..a5320ab66 100644
+--- a/drivers/input/keyboard/Kconfig
++++ b/drivers/input/keyboard/Kconfig
+@@ -486,6 +486,19 @@ config KEYBOARD_OPENCORES
+ 	  To compile this driver as a module, choose M here; the
+ 	  module will be called opencores-kbd.
+ 
++config KEYBOARD_ONEPLUS_POGO
++	tristate "OnePlus pogo pin keyboard"
++	depends on SERIAL_DEV_BUS
++	depends on OF
++	select INPUT_SPARSEKMAP
++	help
++	  Say Y here to enable support for the keyboard and touchpad that
++	  attach to OnePlus tablets through pogo pins, such as the OnePlus
++	  Pad 2 keyboard.
++
++	  To compile this driver as a module, choose M here; the
++	  module will be called oneplus-pogo-keyboard.
++
+ config KEYBOARD_PINEPHONE
+ 	tristate "Pine64 PinePhone Keyboard"
+ 	depends on I2C && REGULATOR
+diff --git a/drivers/input/keyboard/Makefile b/drivers/input/keyboard/Makefile
+index 60bb7baf8..1adcaf313 100644
+--- a/drivers/input/keyboard/Makefile
++++ b/drivers/input/keyboard/Makefile
+@@ -51,6 +51,7 @@ obj-$(CONFIG_KEYBOARD_NSPIRE)		+= nspire-keypad.o
+ obj-$(CONFIG_KEYBOARD_OMAP)		+= omap-keypad.o
+ obj-$(CONFIG_KEYBOARD_OMAP4)		+= omap4-keypad.o
+ obj-$(CONFIG_KEYBOARD_OPENCORES)	+= opencores-kbd.o
++obj-$(CONFIG_KEYBOARD_ONEPLUS_POGO)	+= oneplus-pogo-keyboard.o
+ obj-$(CONFIG_KEYBOARD_PINEPHONE)	+= pinephone-keyboard.o
+ obj-$(CONFIG_KEYBOARD_PMIC8XXX)		+= pmic8xxx-keypad.o
+ obj-$(CONFIG_KEYBOARD_PXA27x)		+= pxa27x_keypad.o
+diff --git a/drivers/input/keyboard/oneplus-pogo-keyboard.c b/drivers/input/keyboard/oneplus-pogo-keyboard.c
+new file mode 100644
+index 000000000..195ca0c5a
+--- /dev/null
++++ b/drivers/input/keyboard/oneplus-pogo-keyboard.c
+@@ -0,0 +1,1315 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * OnePlus pogo pin keyboard
++ *
++ * The keyboard of the OnePlus Pad 2 (also sold as the OnePlus Pad Pro and
++ * OPPO Pad 3 Pro keyboard) attaches through pogo pins carrying its power and
++ * a half-duplex UART. An attached, unpowered keyboard pulls a sense line low;
++ * the tablet then powers it, and the keyboard sends framed keyboard, consumer
++ * and touchpad reports plus a heartbeat every 100 ms. The tablet drives a
++ * transceiver enable line while it transmits.
++ *
++ * Written from the OnePlus downstream driver (oplus_bsp_pogo_keyboard).
++ */
++
++#include <linux/bits.h>
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/sparse-keymap.h>
++#include <linux/interrupt.h>
++#include <linux/jiffies.h>
++#include <linux/ktime.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/pm.h>
++#include <linux/property.h>
++#include <linux/serdev.h>
++#include <linux/unaligned.h>
++#include <linux/workqueue.h>
++
++#define POGO_BAUD			921600
++
++/*
++ * Frame: 0x55 x 8 | 0xf1 | src | dst | cmd | len | payload | CRC16 (BE) |
++ * 0xfe | 0xaa x 4. The CRC covers the start code up to the payload end.
++ */
++#define POGO_SYNC			0x55
++#define POGO_SYNC_LEN			8
++#define POGO_SYNC_MIN			4
++#define POGO_START			0xf1
++#define POGO_START_REPEAT		0xf2
++#define POGO_END			0xfe
++#define POGO_TAIL			0xaa
++#define POGO_TAIL_LEN			4
++#define POGO_HDR_LEN			5
++#define POGO_TRAILER_LEN		3
++#define POGO_FRAME_MAX			(POGO_HDR_LEN + 255 + POGO_TRAILER_LEN)
++
++#define POGO_ADDR_KEYBOARD		0xa1
++#define POGO_ADDR_HOST			0xa2
++
++#define POGO_CRC_POLY			0x8005
++#define POGO_CRC_INIT			0xc596
++
++#define POGO_CMD_KEYBOARD		0x01
++#define POGO_CMD_CONSUMER		0x02
++#define POGO_CMD_TOUCHPAD		0x03
++#define POGO_CMD_PARAM_SET		0x20
++#define POGO_CMD_STATUS			0x2f
++#define POGO_CMD_PASSTHROUGH		0x38
++#define POGO_CMD_PASSTHROUGH_ACK	0x39
++#define POGO_CMD_GENERAL		0x3a
++#define POGO_CMD_GENERAL_ACK		0x3b
++
++/* POGO_CMD_STATUS subcommands, sent by the keyboard */
++#define POGO_STATUS_POWER_UP		0x01
++#define POGO_STATUS_HEARTBEAT		0x05
++
++#define POGO_PARAM_LED			0x0d
++#define POGO_PASSTHROUGH_VERSION	0x08
++#define POGO_GENERAL_HOST_SLEEP		0x02
++#define POGO_GENERAL_TOUCHPAD_STATE	0x0c
++#define POGO_GENERAL_BATTERY		0x0e
++
++#define POGO_KEYS_LEN			8
++#define POGO_CONSUMER_LEN		4
++#define POGO_CONTACT_LEN		5
++#define POGO_MAX_CONTACTS		5
++
++#define POGO_KEY_SCAN(usage)		(0x070000 | (usage))
++#define POGO_CONSUMER_SCAN(usage)	(0x0c0000 | (usage))
++
++#define POGO_VENDOR			0x22d9
++#define POGO_PRODUCT			0x3869
++#define POGO_VERSION			0x0010
++
++/* Attach detection: consecutive sense line samples */
++#define POGO_DETECT_INTERVAL_MS		20
++#define POGO_DETECT_ATTACHED		6
++#define POGO_DETECT_DETACHED		3
++/* Recheck after the keyboard went silent */
++#define POGO_RECHECK_INTERVAL_MS	50
++#define POGO_RECHECK_ATTACHED		12
++#define POGO_RECHECK_DETACHED		20
++#define POGO_RECHECK_MAX		20
++
++#define POGO_WATCHDOG_MS		100
++/* The keyboard needs about 400 ms to start; stock waits up to 2 s */
++#define POGO_CONNECT_TIMEOUT_MS		2000
++#define POGO_HEARTBEAT_TIMEOUT_MS	500
++/* An asleep keyboard sends no heartbeat until it hears that we woke up */
++#define POGO_RESUME_GRACE_MS		1000
++/* Wake a silent keyboard: it runs on its battery and may still be asleep */
++#define POGO_POWERED_WAKE_MS		500
++#define POGO_SLEEP_SETTLE_MS		1000
++
++#define POGO_TX_SETUP_US		450
++#define POGO_TX_HOLD_US			300
++#define POGO_TX_TIMEOUT_MS		50
++#define POGO_REPLY_TIMEOUT_MS		100
++#define POGO_RETRIES			3
++#define POGO_LED_DELAY_MS		15
++
++#define POGO_KEY(usage, key)	{ KE_KEY, POGO_KEY_SCAN(usage), { key } }
++#define POGO_CONSUMER(usage, key) { KE_KEY, POGO_CONSUMER_SCAN(usage), { key } }
++
++/* The stock driver's tables, which match the defaults of hid-input */
++static const struct key_entry pogo_keymap[] = {
++	POGO_KEY(0x04, KEY_A),		POGO_KEY(0x05, KEY_B),
++	POGO_KEY(0x06, KEY_C),		POGO_KEY(0x07, KEY_D),
++	POGO_KEY(0x08, KEY_E),		POGO_KEY(0x09, KEY_F),
++	POGO_KEY(0x0a, KEY_G),		POGO_KEY(0x0b, KEY_H),
++	POGO_KEY(0x0c, KEY_I),		POGO_KEY(0x0d, KEY_J),
++	POGO_KEY(0x0e, KEY_K),		POGO_KEY(0x0f, KEY_L),
++	POGO_KEY(0x10, KEY_M),		POGO_KEY(0x11, KEY_N),
++	POGO_KEY(0x12, KEY_O),		POGO_KEY(0x13, KEY_P),
++	POGO_KEY(0x14, KEY_Q),		POGO_KEY(0x15, KEY_R),
++	POGO_KEY(0x16, KEY_S),		POGO_KEY(0x17, KEY_T),
++	POGO_KEY(0x18, KEY_U),		POGO_KEY(0x19, KEY_V),
++	POGO_KEY(0x1a, KEY_W),		POGO_KEY(0x1b, KEY_X),
++	POGO_KEY(0x1c, KEY_Y),		POGO_KEY(0x1d, KEY_Z),
++	POGO_KEY(0x1e, KEY_1),		POGO_KEY(0x1f, KEY_2),
++	POGO_KEY(0x20, KEY_3),		POGO_KEY(0x21, KEY_4),
++	POGO_KEY(0x22, KEY_5),		POGO_KEY(0x23, KEY_6),
++	POGO_KEY(0x24, KEY_7),		POGO_KEY(0x25, KEY_8),
++	POGO_KEY(0x26, KEY_9),		POGO_KEY(0x27, KEY_0),
++	POGO_KEY(0x28, KEY_ENTER),	POGO_KEY(0x29, KEY_ESC),
++	POGO_KEY(0x2a, KEY_BACKSPACE),	POGO_KEY(0x2b, KEY_TAB),
++	POGO_KEY(0x2c, KEY_SPACE),	POGO_KEY(0x2d, KEY_MINUS),
++	POGO_KEY(0x2e, KEY_EQUAL),	POGO_KEY(0x2f, KEY_LEFTBRACE),
++	POGO_KEY(0x30, KEY_RIGHTBRACE),	POGO_KEY(0x31, KEY_BACKSLASH),
++	POGO_KEY(0x32, KEY_BACKSLASH),	POGO_KEY(0x33, KEY_SEMICOLON),
++	POGO_KEY(0x34, KEY_APOSTROPHE),	POGO_KEY(0x35, KEY_GRAVE),
++	POGO_KEY(0x36, KEY_COMMA),	POGO_KEY(0x37, KEY_DOT),
++	POGO_KEY(0x38, KEY_SLASH),	POGO_KEY(0x39, KEY_CAPSLOCK),
++	POGO_KEY(0x3a, KEY_F1),		POGO_KEY(0x3b, KEY_F2),
++	POGO_KEY(0x3c, KEY_F3),		POGO_KEY(0x3d, KEY_F4),
++	POGO_KEY(0x3e, KEY_F5),		POGO_KEY(0x3f, KEY_F6),
++	POGO_KEY(0x40, KEY_F7),		POGO_KEY(0x41, KEY_F8),
++	POGO_KEY(0x42, KEY_F9),		POGO_KEY(0x43, KEY_F10),
++	POGO_KEY(0x44, KEY_F11),	POGO_KEY(0x45, KEY_F12),
++	POGO_KEY(0x46, KEY_SYSRQ),	POGO_KEY(0x47, KEY_SCROLLLOCK),
++	POGO_KEY(0x48, KEY_PAUSE),	POGO_KEY(0x49, KEY_INSERT),
++	POGO_KEY(0x4a, KEY_HOME),	POGO_KEY(0x4b, KEY_PAGEUP),
++	POGO_KEY(0x4c, KEY_DELETE),	POGO_KEY(0x4d, KEY_END),
++	POGO_KEY(0x4e, KEY_PAGEDOWN),	POGO_KEY(0x4f, KEY_RIGHT),
++	POGO_KEY(0x50, KEY_LEFT),	POGO_KEY(0x51, KEY_DOWN),
++	POGO_KEY(0x52, KEY_UP),		POGO_KEY(0x53, KEY_NUMLOCK),
++	POGO_KEY(0x54, KEY_KPSLASH),	POGO_KEY(0x55, KEY_KPASTERISK),
++	POGO_KEY(0x56, KEY_KPMINUS),	POGO_KEY(0x57, KEY_KPPLUS),
++	POGO_KEY(0x58, KEY_KPENTER),	POGO_KEY(0x59, KEY_KP1),
++	POGO_KEY(0x5a, KEY_KP2),	POGO_KEY(0x5b, KEY_KP3),
++	POGO_KEY(0x5c, KEY_KP4),	POGO_KEY(0x5d, KEY_KP5),
++	POGO_KEY(0x5e, KEY_KP6),	POGO_KEY(0x5f, KEY_KP7),
++	POGO_KEY(0x60, KEY_KP8),	POGO_KEY(0x61, KEY_KP9),
++	POGO_KEY(0x62, KEY_KP0),	POGO_KEY(0x63, KEY_KPDOT),
++	POGO_KEY(0x64, KEY_102ND),	POGO_KEY(0x65, KEY_COMPOSE),
++	POGO_KEY(0x66, KEY_POWER),	POGO_KEY(0x67, KEY_KPEQUAL),
++	POGO_KEY(0x68, KEY_F13),	POGO_KEY(0x69, KEY_F14),
++	POGO_KEY(0x6a, KEY_F15),	POGO_KEY(0x6b, KEY_F16),
++	POGO_KEY(0x6c, KEY_F17),	POGO_KEY(0x6d, KEY_F18),
++	POGO_KEY(0x6e, KEY_F19),	POGO_KEY(0x6f, KEY_F20),
++	POGO_KEY(0x70, KEY_F21),	POGO_KEY(0x71, KEY_F22),
++	POGO_KEY(0x72, KEY_F23),	POGO_KEY(0x73, KEY_F24),
++	POGO_KEY(0x74, KEY_OPEN),	POGO_KEY(0x75, KEY_HELP),
++	POGO_KEY(0x76, KEY_PROPS),	POGO_KEY(0x77, KEY_FRONT),
++	POGO_KEY(0x78, KEY_STOP),	POGO_KEY(0x79, KEY_AGAIN),
++	POGO_KEY(0x7a, KEY_UNDO),	POGO_KEY(0x7b, KEY_CUT),
++	POGO_KEY(0x7c, KEY_COPY),	POGO_KEY(0x7d, KEY_PASTE),
++	POGO_KEY(0x7e, KEY_FIND),	POGO_KEY(0x7f, KEY_MUTE),
++	POGO_KEY(0x80, KEY_VOLUMEUP),	POGO_KEY(0x81, KEY_VOLUMEDOWN),
++	POGO_KEY(0x85, KEY_KPCOMMA),	POGO_KEY(0x87, KEY_RO),
++	POGO_KEY(0x88, KEY_KATAKANAHIRAGANA), POGO_KEY(0x89, KEY_YEN),
++	POGO_KEY(0x8a, KEY_HENKAN),	POGO_KEY(0x8b, KEY_MUHENKAN),
++	POGO_KEY(0x8c, KEY_KPJPCOMMA),	POGO_KEY(0x90, KEY_HANGEUL),
++	POGO_KEY(0x91, KEY_HANJA),	POGO_KEY(0x92, KEY_KATAKANA),
++	POGO_KEY(0x93, KEY_HIRAGANA),	POGO_KEY(0x94, KEY_ZENKAKUHANKAKU),
++	POGO_KEY(0x9c, KEY_DELETE),	POGO_KEY(0xb6, KEY_KPLEFTPAREN),
++	POGO_KEY(0xb7, KEY_KPRIGHTPAREN), POGO_KEY(0xd8, KEY_DELETE),
++	POGO_KEY(0xe0, KEY_LEFTCTRL),	POGO_KEY(0xe1, KEY_LEFTSHIFT),
++	POGO_KEY(0xe2, KEY_LEFTALT),	POGO_KEY(0xe3, KEY_LEFTMETA),
++	POGO_KEY(0xe4, KEY_RIGHTCTRL),	POGO_KEY(0xe5, KEY_RIGHTSHIFT),
++	POGO_KEY(0xe6, KEY_RIGHTALT),	POGO_KEY(0xe7, KEY_RIGHTMETA),
++	POGO_KEY(0xe8, KEY_PLAYPAUSE),	POGO_KEY(0xe9, KEY_STOPCD),
++	POGO_KEY(0xea, KEY_PREVIOUSSONG), POGO_KEY(0xeb, KEY_NEXTSONG),
++	POGO_KEY(0xec, KEY_EJECTCD),	POGO_KEY(0xed, KEY_VOLUMEUP),
++	POGO_KEY(0xee, KEY_VOLUMEDOWN),	POGO_KEY(0xef, KEY_MUTE),
++	POGO_KEY(0xf0, KEY_WWW),	POGO_KEY(0xf1, KEY_BACK),
++	POGO_KEY(0xf2, KEY_FORWARD),	POGO_KEY(0xf3, KEY_STOP),
++	POGO_KEY(0xf4, KEY_FIND),	POGO_KEY(0xf5, KEY_SCROLLUP),
++	POGO_KEY(0xf6, KEY_SCROLLDOWN),	POGO_KEY(0xf7, KEY_EDIT),
++	POGO_KEY(0xf8, KEY_SLEEP),	POGO_KEY(0xf9, KEY_COFFEE),
++	POGO_KEY(0xfa, KEY_REFRESH),	POGO_KEY(0xfb, KEY_CALC),
++
++	POGO_CONSUMER(0x006f, KEY_BRIGHTNESSUP),
++	POGO_CONSUMER(0x0070, KEY_BRIGHTNESSDOWN),
++	POGO_CONSUMER(0x00b5, KEY_NEXTSONG),
++	POGO_CONSUMER(0x00b6, KEY_PREVIOUSSONG),
++	POGO_CONSUMER(0x00cd, KEY_PLAYPAUSE),
++	POGO_CONSUMER(0x00e2, KEY_MUTE),
++	POGO_CONSUMER(0x00e9, KEY_VOLUMEUP),
++	POGO_CONSUMER(0x00ea, KEY_VOLUMEDOWN),
++	POGO_CONSUMER(0x0224, KEY_BACK),
++	POGO_CONSUMER(0x0244, KEY_APPSELECT),
++	{ KE_END }
++};
++
++enum pogo_state {
++	POGO_IDLE,		/* powered off, waiting for the sense line */
++	POGO_DETECT,		/* powered off, sampling the sense line */
++	POGO_POWERED,		/* powered, waiting for the first status frame */
++	POGO_CONNECTED,		/* input devices registered */
++};
++
++struct pogo_rx {
++	unsigned int sync;
++	unsigned int len;
++	u8 buf[POGO_FRAME_MAX];
++};
++
++struct pogo {
++	struct serdev_device *serdev;
++	struct device *dev;
++
++	struct gpio_desc *power_gpio;
++	struct gpio_desc *tx_enable_gpio;
++	struct gpio_desc *detect_gpio;
++	int detect_irq;
++
++	u32 tp_size[2];
++	u32 tp_res[2];
++
++	struct pogo_rx rx;
++
++	/* Protects everything below, and the input devices */
++	struct mutex lock;
++	enum pogo_state state;
++	bool irq_armed;
++	bool irq_wake;
++	unsigned int detect_interval;
++	unsigned int detect_need_attached;
++	unsigned int detect_need_detached;
++	unsigned int detect_attached;
++	unsigned int detect_detached;
++	unsigned int rechecks;
++	unsigned long power_on_time;
++	bool wake_sent;
++	unsigned long last_rx;
++
++	u8 brand;
++	u8 mac[6];
++	u8 leds;
++	u8 touchpad_disabled;
++	u8 keys[POGO_KEYS_LEN];
++	u16 consumer[POGO_CONSUMER_LEN / 2];
++	u8 last_status[POGO_FRAME_MAX];
++	unsigned int last_status_len;
++
++	struct input_dev *keyboard;
++	struct input_dev *touchpad;
++	char keyboard_phys[64];
++	char touchpad_phys[64];
++	char touchpad_name[64];
++
++	/* Reply to the pending pogo_command(), protected by lock */
++	u8 reply_cmd;
++	u8 reply_sub;
++	u8 *reply_buf;
++	size_t reply_size;
++	size_t reply_len;
++	struct completion reply_done;
++
++	/* Serializes transmission */
++	struct mutex tx_lock;
++	bool capslock;
++
++	struct delayed_work detect_work;
++	struct delayed_work watchdog_work;
++	struct work_struct connect_work;
++	struct work_struct led_work;
++	struct work_struct wake_work;
++};
++
++static u16 pogo_crc16(const u8 *buf, size_t len)
++{
++	u16 crc = POGO_CRC_INIT;
++	int i;
++
++	while (len--) {
++		crc ^= *buf++ << 8;
++		for (i = 0; i < 8; i++)
++			crc = crc & 0x8000 ? (crc << 1) ^ POGO_CRC_POLY : crc << 1;
++	}
++
++	return crc;
++}
++
++/* Caller holds tx_lock */
++static int pogo_send(struct pogo *pogo, u8 cmd, const u8 *payload, size_t len)
++{
++	u8 frame[POGO_SYNC_LEN + POGO_HDR_LEN + 32 + POGO_TRAILER_LEN + POGO_TAIL_LEN];
++	u8 *p = frame;
++	ssize_t written;
++	size_t size;
++	int ret = 0;
++
++	if (len > 32)
++		return -EINVAL;
++
++	memset(p, POGO_SYNC, POGO_SYNC_LEN);
++	p += POGO_SYNC_LEN;
++	*p++ = POGO_START;
++	*p++ = POGO_ADDR_HOST;
++	*p++ = POGO_ADDR_KEYBOARD;
++	*p++ = cmd;
++	*p++ = len;
++	memcpy(p, payload, len);
++	p += len;
++	put_unaligned_be16(pogo_crc16(frame + POGO_SYNC_LEN, POGO_HDR_LEN + len), p);
++	p += 2;
++	*p++ = POGO_END;
++	memset(p, POGO_TAIL, POGO_TAIL_LEN);
++	p += POGO_TAIL_LEN;
++	size = p - frame;
++
++	dev_dbg(pogo->dev, "tx %*ph\n", (int)size, frame);
++
++	gpiod_set_value_cansleep(pogo->tx_enable_gpio, 1);
++	usleep_range(POGO_TX_SETUP_US, POGO_TX_SETUP_US + 100);
++
++	written = serdev_device_write(pogo->serdev, frame, size,
++				      msecs_to_jiffies(POGO_TX_TIMEOUT_MS));
++	if (written != size)
++		ret = written < 0 ? written : -ETIMEDOUT;
++	else
++		serdev_device_wait_until_sent(pogo->serdev,
++					      msecs_to_jiffies(POGO_TX_TIMEOUT_MS));
++
++	/* The TX FIFO may be empty while the last bytes are still shifting out */
++	usleep_range(POGO_TX_HOLD_US, POGO_TX_HOLD_US + 100);
++	gpiod_set_value_cansleep(pogo->tx_enable_gpio, 0);
++
++	return ret;
++}
++
++/*
++ * Send a command and wait for the keyboard's reply: command + 1 with the same
++ * subcommand (the first payload byte). Returns the reply payload length.
++ */
++static int pogo_command(struct pogo *pogo, u8 cmd, const u8 *payload,
++			size_t len, u8 *reply, size_t reply_size)
++{
++	int ret = -ETIMEDOUT;
++	int i;
++
++	mutex_lock(&pogo->tx_lock);
++
++	for (i = 0; i < POGO_RETRIES; i++) {
++		mutex_lock(&pogo->lock);
++		reinit_completion(&pogo->reply_done);
++		pogo->reply_cmd = cmd + 1;
++		pogo->reply_sub = payload[0];
++		pogo->reply_buf = reply;
++		pogo->reply_size = reply_size;
++		pogo->reply_len = 0;
++		mutex_unlock(&pogo->lock);
++
++		ret = pogo_send(pogo, cmd, payload, len);
++		if (ret)
++			continue;
++
++		if (wait_for_completion_timeout(&pogo->reply_done,
++						msecs_to_jiffies(POGO_REPLY_TIMEOUT_MS))) {
++			ret = pogo->reply_len;
++			break;
++		}
++		ret = -ETIMEDOUT;
++	}
++
++	mutex_lock(&pogo->lock);
++	pogo->reply_cmd = 0;
++	pogo->reply_buf = NULL;
++	mutex_unlock(&pogo->lock);
++
++	mutex_unlock(&pogo->tx_lock);
++
++	return ret;
++}
++
++static void pogo_handle_reply(struct pogo *pogo, u8 cmd, const u8 *p, size_t len)
++{
++	if (!pogo->reply_cmd || cmd != pogo->reply_cmd || !len ||
++	    p[0] != pogo->reply_sub)
++		return;
++
++	pogo->reply_len = min(len, pogo->reply_size);
++	memcpy(pogo->reply_buf, p, pogo->reply_len);
++	pogo->reply_cmd = 0;
++	complete(&pogo->reply_done);
++}
++
++static void pogo_query_version(struct pogo *pogo)
++{
++	static const u8 req[] = { POGO_PASSTHROUGH_VERSION, 0x01, 0x01 };
++	u8 reply[40];
++	int len, n;
++
++	len = pogo_command(pogo, POGO_CMD_PASSTHROUGH, req, sizeof(req),
++			   reply, sizeof(reply));
++	if (len < 0) {
++		dev_warn(pogo->dev, "no reply to version request: %d\n", len);
++		return;
++	}
++
++	/* subcommand, string length + 1, string */
++	n = len >= 2 ? min(reply[1] - 1, len - 2) : 0;
++	dev_info(pogo->dev, "keyboard firmware %.*s\n", max(n, 0), reply + 2);
++}
++
++/* Tell the keyboard whether the host sleeps, as stock does on screen off/on */
++static int pogo_set_host_asleep(struct pogo *pogo, bool asleep)
++{
++	const u8 req[] = { POGO_GENERAL_HOST_SLEEP, 0x01, asleep };
++	u8 reply[4];
++	int len;
++
++	len = pogo_command(pogo, POGO_CMD_GENERAL, req, sizeof(req),
++			   reply, sizeof(reply));
++	if (len < 0)
++		return len;
++
++	/* subcommand, 0x02, state, result */
++	if (len < 4 || reply[2] != asleep || reply[3] != 0x01)
++		return -EIO;
++
++	return 0;
++}
++
++static void pogo_wake_work(struct work_struct *work)
++{
++	struct pogo *pogo = container_of(work, struct pogo, wake_work);
++	int ret;
++
++	ret = pogo_set_host_asleep(pogo, false);
++	if (ret)
++		dev_warn(pogo->dev, "failed to wake the keyboard: %d\n", ret);
++}
++
++static void pogo_led_work(struct work_struct *work)
++{
++	struct pogo *pogo = container_of(work, struct pogo, led_work);
++	u8 payload[] = { POGO_PARAM_LED, 0x04, 0, 0, 0, 0 };
++	int ret;
++
++	/* As stock: let a frame the keyboard is sending go out first */
++	msleep(POGO_LED_DELAY_MS);
++
++	mutex_lock(&pogo->tx_lock);
++	payload[2] = READ_ONCE(pogo->capslock);
++	ret = pogo_send(pogo, POGO_CMD_PARAM_SET, payload, sizeof(payload));
++	mutex_unlock(&pogo->tx_lock);
++
++	if (ret)
++		dev_dbg(pogo->dev, "failed to set LEDs: %d\n", ret);
++}
++
++static int pogo_keyboard_event(struct input_dev *input, unsigned int type,
++			       unsigned int code, int value)
++{
++	struct pogo *pogo = input_get_drvdata(input);
++
++	if (type != EV_LED || code != LED_CAPSL)
++		return -EINVAL;
++
++	WRITE_ONCE(pogo->capslock, !!value);
++	schedule_work(&pogo->led_work);
++
++	return 0;
++}
++
++static const char *pogo_keyboard_name(struct pogo *pogo)
++{
++	const char *name;
++
++	/* The names are per tablet model, indexed by the brand byte */
++	if (pogo->brand &&
++	    !of_property_read_string_index(dev_of_node(pogo->dev),
++					   "keyboard-names", pogo->brand - 1,
++					   &name))
++		return name;
++
++	return "OnePlus Pogo Keyboard";
++}
++
++static void pogo_unregister_inputs(struct pogo *pogo)
++{
++	if (pogo->touchpad) {
++		input_unregister_device(pogo->touchpad);
++		pogo->touchpad = NULL;
++	}
++	if (pogo->keyboard) {
++		input_unregister_device(pogo->keyboard);
++		pogo->keyboard = NULL;
++	}
++}
++
++static int pogo_register_inputs(struct pogo *pogo)
++{
++	const char *name = pogo_keyboard_name(pogo);
++	struct input_dev *input;
++	int ret;
++
++	memset(pogo->keys, 0, sizeof(pogo->keys));
++	memset(pogo->consumer, 0, sizeof(pogo->consumer));
++
++	input = input_allocate_device();
++	if (!input)
++		return -ENOMEM;
++
++	input->name = name;
++	input->phys = pogo->keyboard_phys;
++	input->id.bustype = BUS_HOST;
++	input->id.vendor = POGO_VENDOR;
++	input->id.product = POGO_PRODUCT;
++	input->id.version = POGO_VERSION;
++	input->dev.parent = pogo->dev;
++	input->event = pogo_keyboard_event;
++	input_set_drvdata(input, pogo);
++
++	ret = sparse_keymap_setup(input, pogo_keymap, NULL);
++	if (ret) {
++		input_free_device(input);
++		return ret;
++	}
++	__set_bit(EV_REP, input->evbit);
++	input_set_capability(input, EV_LED, LED_CAPSL);
++
++	ret = input_register_device(input);
++	if (ret) {
++		input_free_device(input);
++		return ret;
++	}
++	pogo->keyboard = input;
++
++	input = input_allocate_device();
++	if (!input) {
++		ret = -ENOMEM;
++		goto err_unregister;
++	}
++
++	snprintf(pogo->touchpad_name, sizeof(pogo->touchpad_name),
++		 "%s Touchpad", name);
++	input->name = pogo->touchpad_name;
++	input->phys = pogo->touchpad_phys;
++	input->id.bustype = BUS_HOST;
++	input->id.vendor = POGO_VENDOR;
++	input->id.product = POGO_PRODUCT;
++	input->id.version = POGO_VERSION;
++	input->dev.parent = pogo->dev;
++
++	input_set_abs_params(input, ABS_MT_POSITION_X, 0, pogo->tp_size[0], 0, 0);
++	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, pogo->tp_size[1], 0, 0);
++	input_abs_set_res(input, ABS_MT_POSITION_X, pogo->tp_res[0]);
++	input_abs_set_res(input, ABS_MT_POSITION_Y, pogo->tp_res[1]);
++	input_set_abs_params(input, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER, MT_TOOL_PALM, 0, 0);
++	input_set_capability(input, EV_KEY, BTN_LEFT);
++	__set_bit(INPUT_PROP_POINTER, input->propbit);
++	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
++
++	ret = input_mt_init_slots(input, POGO_MAX_CONTACTS,
++				  INPUT_MT_POINTER | INPUT_MT_DROP_UNUSED);
++	if (ret)
++		goto err_free;
++
++	ret = input_register_device(input);
++	if (ret)
++		goto err_free;
++	pogo->touchpad = input;
++
++	return 0;
++
++err_free:
++	input_free_device(input);
++err_unregister:
++	pogo_unregister_inputs(pogo);
++	return ret;
++}
++
++static void pogo_report_usage(struct input_dev *input, unsigned int scancode,
++			      int value)
++{
++	const struct key_entry *ke;
++
++	ke = sparse_keymap_entry_from_scancode(input, scancode);
++	if (!ke) {
++		dev_dbg(input->dev.parent, "unknown usage %#x\n", scancode);
++		return;
++	}
++
++	input_event(input, EV_MSC, MSC_SCAN, scancode);
++	input_report_key(input, ke->keycode, value);
++}
++
++/* Boot protocol report: modifiers, reserved, 6 usages */
++static void pogo_report_keys(struct pogo *pogo, const u8 *p, size_t len)
++{
++	struct input_dev *input = pogo->keyboard;
++	u8 *old = pogo->keys;
++	int i;
++
++	if (len < POGO_KEYS_LEN)
++		return;
++
++	/* Keyboard ErrorRollOver: too many keys down, keep the old state */
++	if (p[2] == 0x01)
++		return;
++
++	for (i = 0; i < 8; i++)
++		if ((old[0] ^ p[0]) & BIT(i))
++			pogo_report_usage(input, POGO_KEY_SCAN(0xe0 + i),
++					  p[0] & BIT(i));
++
++	for (i = 2; i < POGO_KEYS_LEN; i++)
++		if (old[i] > 3 && !memchr(p + 2, old[i], POGO_KEYS_LEN - 2))
++			pogo_report_usage(input, POGO_KEY_SCAN(old[i]), 0);
++
++	for (i = 2; i < POGO_KEYS_LEN; i++)
++		if (p[i] > 3 && !memchr(old + 2, p[i], POGO_KEYS_LEN - 2))
++			pogo_report_usage(input, POGO_KEY_SCAN(p[i]), 1);
++
++	input_sync(input);
++	memcpy(old, p, POGO_KEYS_LEN);
++}
++
++/* Two 16-bit consumer usages */
++static void pogo_report_consumer(struct pogo *pogo, const u8 *p, size_t len)
++{
++	struct input_dev *input = pogo->keyboard;
++	u16 *old = pogo->consumer;
++	u16 new[ARRAY_SIZE(pogo->consumer)];
++	int i, j;
++
++	if (len < POGO_CONSUMER_LEN)
++		return;
++
++	for (i = 0; i < ARRAY_SIZE(new); i++)
++		new[i] = get_unaligned_le16(p + 2 * i);
++
++	for (i = 0; i < ARRAY_SIZE(new); i++) {
++		if (!old[i])
++			continue;
++		for (j = 0; j < ARRAY_SIZE(new); j++)
++			if (new[j] == old[i])
++				break;
++		if (j == ARRAY_SIZE(new))
++			pogo_report_usage(input, POGO_CONSUMER_SCAN(old[i]), 0);
++	}
++
++	for (i = 0; i < ARRAY_SIZE(new); i++) {
++		if (!new[i])
++			continue;
++		for (j = 0; j < ARRAY_SIZE(new); j++)
++			if (old[j] == new[i])
++				break;
++		if (j == ARRAY_SIZE(new))
++			pogo_report_usage(input, POGO_CONSUMER_SCAN(new[i]), 1);
++	}
++
++	input_sync(input);
++	memcpy(old, new, sizeof(new));
++}
++
++/*
++ * The layout of the keyboard's BLE touchpad report: 5 contacts (confidence,
++ * tip, ID, X, Y), scan time, contact count, buttons.
++ */
++static void pogo_report_touchpad(struct pogo *pogo, const u8 *p, size_t len)
++{
++	struct input_dev *input = pogo->touchpad;
++	unsigned int count, i;
++
++	if (len < 2)
++		return;
++
++	count = min_t(unsigned int, p[len - 2], POGO_MAX_CONTACTS);
++	count = min_t(unsigned int, count, (len - 2) / POGO_CONTACT_LEN);
++
++	for (i = 0; i < count; i++) {
++		const u8 *c = p + i * POGO_CONTACT_LEN;
++		bool confident = c[0] & BIT(0);
++		bool tip = c[0] & BIT(1);
++		int slot;
++
++		slot = input_mt_get_slot_by_key(input, c[0] >> 4);
++		if (slot < 0)
++			continue;
++
++		input_mt_slot(input, slot);
++		input_mt_report_slot_state(input,
++					   confident ? MT_TOOL_FINGER : MT_TOOL_PALM,
++					   tip);
++		if (tip) {
++			input_report_abs(input, ABS_MT_POSITION_X,
++					 get_unaligned_le16(c + 1));
++			input_report_abs(input, ABS_MT_POSITION_Y,
++					 get_unaligned_le16(c + 3));
++		}
++	}
++
++	input_mt_sync_frame(input);
++	input_report_key(input, BTN_LEFT, p[len - 1] & BIT(0));
++	input_sync(input);
++}
++
++/* Caller holds lock */
++static void pogo_start_detect(struct pogo *pogo, bool recheck)
++{
++	pogo->state = POGO_DETECT;
++	pogo->detect_attached = 0;
++	pogo->detect_detached = 0;
++	if (recheck) {
++		pogo->detect_interval = POGO_RECHECK_INTERVAL_MS;
++		pogo->detect_need_attached = POGO_RECHECK_ATTACHED;
++		pogo->detect_need_detached = POGO_RECHECK_DETACHED;
++	} else {
++		pogo->detect_interval = POGO_DETECT_INTERVAL_MS;
++		pogo->detect_need_attached = POGO_DETECT_ATTACHED;
++		pogo->detect_need_detached = POGO_DETECT_DETACHED;
++	}
++	mod_delayed_work(system_dfl_wq, &pogo->detect_work, 0);
++}
++
++/* Caller holds lock */
++static void pogo_arm_irq(struct pogo *pogo)
++{
++	pogo->state = POGO_IDLE;
++	if (!pogo->irq_armed) {
++		pogo->irq_armed = true;
++		enable_irq(pogo->detect_irq);
++	}
++}
++
++/* Caller holds lock */
++static void pogo_power_off(struct pogo *pogo)
++{
++	pogo_unregister_inputs(pogo);
++	gpiod_set_value_cansleep(pogo->power_gpio, 0);
++	pogo->last_status_len = 0;
++
++	if (pogo->rechecks++ < POGO_RECHECK_MAX)
++		pogo_start_detect(pogo, true);
++	else
++		pogo_arm_irq(pogo);
++}
++
++static void pogo_detect_work(struct work_struct *work)
++{
++	struct pogo *pogo = container_of(to_delayed_work(work), struct pogo,
++					 detect_work);
++
++	guard(mutex)(&pogo->lock);
++
++	if (pogo->state != POGO_DETECT)
++		return;
++
++	if (gpiod_get_value_cansleep(pogo->detect_gpio)) {
++		pogo->detect_attached++;
++		pogo->detect_detached = 0;
++	} else {
++		pogo->detect_detached++;
++		pogo->detect_attached = 0;
++	}
++
++	if (pogo->detect_attached >= pogo->detect_need_attached) {
++		dev_dbg(pogo->dev, "keyboard attached, powering on\n");
++		gpiod_set_value_cansleep(pogo->power_gpio, 1);
++		pogo->state = POGO_POWERED;
++		pogo->power_on_time = jiffies;
++		pogo->wake_sent = false;
++		mod_delayed_work(system_dfl_wq, &pogo->watchdog_work,
++				 msecs_to_jiffies(POGO_WATCHDOG_MS));
++	} else if (pogo->detect_detached >= pogo->detect_need_detached) {
++		pogo->rechecks = 0;
++		pogo_arm_irq(pogo);
++	} else {
++		mod_delayed_work(system_dfl_wq, &pogo->detect_work,
++				 msecs_to_jiffies(pogo->detect_interval));
++	}
++}
++
++static void pogo_watchdog_work(struct work_struct *work)
++{
++	struct pogo *pogo = container_of(to_delayed_work(work), struct pogo,
++					 watchdog_work);
++	unsigned long now = jiffies;
++
++	guard(mutex)(&pogo->lock);
++
++	switch (pogo->state) {
++	case POGO_POWERED:
++		if (time_after(now, pogo->power_on_time +
++			       msecs_to_jiffies(POGO_CONNECT_TIMEOUT_MS))) {
++			dev_info(pogo->dev, "keyboard does not respond\n");
++			pogo_power_off(pogo);
++			return;
++		}
++		if (!pogo->wake_sent &&
++		    time_after(now, pogo->power_on_time +
++			       msecs_to_jiffies(POGO_POWERED_WAKE_MS))) {
++			pogo->wake_sent = true;
++			schedule_work(&pogo->wake_work);
++		}
++		break;
++	case POGO_CONNECTED:
++		if (time_after(now, pogo->last_rx +
++			       msecs_to_jiffies(POGO_HEARTBEAT_TIMEOUT_MS))) {
++			dev_info(pogo->dev, "keyboard detached\n");
++			pogo_power_off(pogo);
++			return;
++		}
++		break;
++	default:
++		return;
++	}
++
++	mod_delayed_work(system_dfl_wq, &pogo->watchdog_work,
++			 msecs_to_jiffies(POGO_WATCHDOG_MS));
++}
++
++static void pogo_connect_work(struct work_struct *work)
++{
++	struct pogo *pogo = container_of(work, struct pogo, connect_work);
++	int ret;
++
++	scoped_guard(mutex, &pogo->lock) {
++		if (pogo->state != POGO_POWERED)
++			return;
++
++		ret = pogo_register_inputs(pogo);
++		if (ret) {
++			dev_err(pogo->dev, "failed to register input devices: %d\n",
++				ret);
++			return;
++		}
++
++		pogo->state = POGO_CONNECTED;
++		pogo->rechecks = 0;
++		pogo->last_rx = jiffies;
++		dev_info(pogo->dev, "%s attached, address %pMR\n",
++			 pogo->keyboard->name, pogo->mac);
++	}
++
++	pogo_query_version(pogo);
++}
++
++/* Caller holds lock */
++static void pogo_handle_status(struct pogo *pogo, const u8 *p, size_t len)
++{
++	bool power_up = p[0] == POGO_STATUS_POWER_UP;
++	u8 brand = pogo->brand;
++	const u8 *q;
++
++	if (len >= 2 && p[1] == 0x02) {
++		if (power_up && len >= 9) {
++			/* sub, 0x02, brand, address, touchpad state */
++			q = p + 2;
++		} else if (p[0] == POGO_STATUS_HEARTBEAT && len >= 10) {
++			/* sub, 0x02, LEDs, brand, address, touchpad state */
++			pogo->leds = p[2];
++			q = p + 3;
++		} else {
++			return;
++		}
++
++		pogo->brand = q[0];
++		memcpy(pogo->mac, q + 1, sizeof(pogo->mac));
++		if (q + 7 < p + len && pogo->touchpad_disabled != q[7]) {
++			pogo->touchpad_disabled = q[7];
++			dev_dbg(pogo->dev, "touchpad %s\n",
++				q[7] ? "disabled" : "enabled");
++		}
++	} else if (!power_up) {
++		return;
++	}
++
++	switch (pogo->state) {
++	case POGO_POWERED:
++		schedule_work(&pogo->connect_work);
++		break;
++	case POGO_CONNECTED:
++		if (power_up) {
++			dev_info(pogo->dev, "keyboard restarted\n");
++			if (brand != pogo->brand) {
++				pogo_unregister_inputs(pogo);
++				pogo->state = POGO_POWERED;
++				schedule_work(&pogo->connect_work);
++				break;
++			}
++			schedule_work(&pogo->led_work);
++		} else if ((pogo->leds & BIT(0)) != READ_ONCE(pogo->capslock)) {
++			schedule_work(&pogo->led_work);
++		}
++		break;
++	default:
++		break;
++	}
++}
++
++/* Caller holds lock */
++static void pogo_handle_general(struct pogo *pogo, const u8 *p, size_t len)
++{
++	switch (p[0]) {
++	case POGO_GENERAL_BATTERY:
++		if (len >= 4)
++			dev_dbg(pogo->dev, "battery %u%%, state %#04x\n",
++				p[2], p[3]);
++		break;
++	case POGO_GENERAL_TOUCHPAD_STATE:
++		if (len >= 3)
++			dev_dbg(pogo->dev, "touchpad %s\n",
++				p[2] ? "disabled" : "enabled");
++		break;
++	}
++}
++
++/* Caller holds lock */
++static void pogo_handle_frame(struct pogo *pogo, const u8 *f, size_t size)
++{
++	u8 cmd = f[3];
++	size_t len = f[4];
++	const u8 *p = f + POGO_HDR_LEN;
++
++	if (f[size - 1] != POGO_END ||
++	    get_unaligned_be16(p + len) != pogo_crc16(f, POGO_HDR_LEN + len)) {
++		dev_dbg(pogo->dev, "bad frame %*ph\n", (int)size, f);
++		return;
++	}
++
++	/* The transceiver echoes what we send */
++	if (f[1] != POGO_ADDR_KEYBOARD || f[2] != POGO_ADDR_HOST)
++		return;
++
++	if (pogo->state != POGO_POWERED && pogo->state != POGO_CONNECTED)
++		return;
++
++	pogo->last_rx = jiffies;
++
++	if (cmd == POGO_CMD_STATUS && len) {
++		/* Log heartbeats only when they change */
++		if (p[0] != POGO_STATUS_HEARTBEAT ||
++		    size != pogo->last_status_len ||
++		    memcmp(f, pogo->last_status, size)) {
++			dev_dbg(pogo->dev, "rx %*ph\n", (int)size, f);
++			memcpy(pogo->last_status, f, size);
++			pogo->last_status_len = size;
++		}
++		pogo_handle_status(pogo, p, len);
++		return;
++	}
++
++	dev_dbg(pogo->dev, "rx %*ph\n", (int)size, f);
++
++	if (!len)
++		return;
++
++	switch (cmd) {
++	case POGO_CMD_KEYBOARD:
++		if (pogo->keyboard)
++			pogo_report_keys(pogo, p, len);
++		break;
++	case POGO_CMD_CONSUMER:
++		if (pogo->keyboard)
++			pogo_report_consumer(pogo, p, len);
++		break;
++	case POGO_CMD_TOUCHPAD:
++		if (pogo->touchpad)
++			pogo_report_touchpad(pogo, p, len);
++		break;
++	case POGO_CMD_GENERAL_ACK:
++		pogo_handle_general(pogo, p, len);
++		fallthrough;
++	default:
++		pogo_handle_reply(pogo, cmd, p, len);
++		break;
++	}
++}
++
++static size_t pogo_receive_buf(struct serdev_device *serdev, const u8 *data,
++			       size_t count)
++{
++	struct pogo *pogo = serdev_device_get_drvdata(serdev);
++	struct pogo_rx *rx = &pogo->rx;
++	size_t i;
++
++	for (i = 0; i < count; i++) {
++		u8 b = data[i];
++
++		if (!rx->len) {
++			if (b == POGO_SYNC) {
++				rx->sync++;
++				continue;
++			}
++			if ((b == POGO_START || b == POGO_START_REPEAT) &&
++			    rx->sync >= POGO_SYNC_MIN)
++				rx->buf[rx->len++] = b;
++			rx->sync = 0;
++			continue;
++		}
++
++		rx->buf[rx->len++] = b;
++
++		/* Drop a bad header early, so its bytes cannot hide the next frame */
++		if ((rx->len == 2 || rx->len == 3) &&
++		    b != POGO_ADDR_KEYBOARD && b != POGO_ADDR_HOST) {
++			dev_dbg(pogo->dev, "bad header %*ph\n", rx->len, rx->buf);
++			rx->len = 0;
++			rx->sync = b == POGO_SYNC;
++			continue;
++		}
++
++		if (rx->len < POGO_HDR_LEN ||
++		    rx->len < POGO_HDR_LEN + rx->buf[4] + POGO_TRAILER_LEN)
++			continue;
++
++		scoped_guard(mutex, &pogo->lock)
++			pogo_handle_frame(pogo, rx->buf, rx->len);
++		rx->len = 0;
++	}
++
++	return count;
++}
++
++static const struct serdev_device_ops pogo_serdev_ops = {
++	.receive_buf = pogo_receive_buf,
++	.write_wakeup = serdev_device_write_wakeup,
++};
++
++static irqreturn_t pogo_detect_irq(int irq, void *data)
++{
++	struct pogo *pogo = data;
++
++	guard(mutex)(&pogo->lock);
++
++	if (pogo->state == POGO_IDLE && pogo->irq_armed) {
++		disable_irq_nosync(irq);
++		pogo->irq_armed = false;
++		pogo_start_detect(pogo, false);
++	}
++
++	return IRQ_HANDLED;
++}
++
++static void pogo_disable_works(void *data)
++{
++	struct pogo *pogo = data;
++
++	disable_delayed_work_sync(&pogo->detect_work);
++	disable_delayed_work_sync(&pogo->watchdog_work);
++	disable_work_sync(&pogo->connect_work);
++	disable_work_sync(&pogo->led_work);
++	disable_work_sync(&pogo->wake_work);
++}
++
++static void pogo_enable_works(struct pogo *pogo)
++{
++	enable_delayed_work(&pogo->detect_work);
++	enable_delayed_work(&pogo->watchdog_work);
++	enable_work(&pogo->connect_work);
++	enable_work(&pogo->led_work);
++	enable_work(&pogo->wake_work);
++}
++
++static void pogo_teardown(void *data)
++{
++	struct pogo *pogo = data;
++
++	guard(mutex)(&pogo->lock);
++
++	pogo_unregister_inputs(pogo);
++	gpiod_set_value_cansleep(pogo->power_gpio, 0);
++}
++
++static int pogo_probe(struct serdev_device *serdev)
++{
++	struct device *dev = &serdev->dev;
++	struct pogo *pogo;
++	unsigned int baud;
++	int ret;
++
++	pogo = devm_kzalloc(dev, sizeof(*pogo), GFP_KERNEL);
++	if (!pogo)
++		return -ENOMEM;
++
++	pogo->serdev = serdev;
++	pogo->dev = dev;
++	serdev_device_set_drvdata(serdev, pogo);
++
++	ret = devm_mutex_init(dev, &pogo->lock);
++	if (ret)
++		return ret;
++	ret = devm_mutex_init(dev, &pogo->tx_lock);
++	if (ret)
++		return ret;
++	init_completion(&pogo->reply_done);
++	INIT_DELAYED_WORK(&pogo->detect_work, pogo_detect_work);
++	INIT_DELAYED_WORK(&pogo->watchdog_work, pogo_watchdog_work);
++	INIT_WORK(&pogo->connect_work, pogo_connect_work);
++	INIT_WORK(&pogo->led_work, pogo_led_work);
++	INIT_WORK(&pogo->wake_work, pogo_wake_work);
++
++	snprintf(pogo->keyboard_phys, sizeof(pogo->keyboard_phys),
++		 "%s/input0", dev_name(dev));
++	snprintf(pogo->touchpad_phys, sizeof(pogo->touchpad_phys),
++		 "%s/input1", dev_name(dev));
++
++	ret = device_property_read_u32_array(dev, "touchpad-size",
++					     pogo->tp_size, 2);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read touchpad-size\n");
++
++	ret = device_property_read_u32_array(dev, "touchpad-resolution",
++					     pogo->tp_res, 2);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "failed to read touchpad-resolution\n");
++
++	/* Start powered off, as stock does, so the keyboard starts afresh */
++	pogo->power_gpio = devm_gpiod_get(dev, "power", GPIOD_OUT_LOW);
++	if (IS_ERR(pogo->power_gpio))
++		return dev_err_probe(dev, PTR_ERR(pogo->power_gpio),
++				     "failed to get power GPIO\n");
++
++	pogo->tx_enable_gpio = devm_gpiod_get(dev, "tx-enable", GPIOD_OUT_LOW);
++	if (IS_ERR(pogo->tx_enable_gpio))
++		return dev_err_probe(dev, PTR_ERR(pogo->tx_enable_gpio),
++				     "failed to get TX enable GPIO\n");
++
++	pogo->detect_gpio = devm_gpiod_get(dev, "detect", GPIOD_IN);
++	if (IS_ERR(pogo->detect_gpio))
++		return dev_err_probe(dev, PTR_ERR(pogo->detect_gpio),
++				     "failed to get detect GPIO\n");
++
++	pogo->detect_irq = gpiod_to_irq(pogo->detect_gpio);
++	if (pogo->detect_irq < 0)
++		return dev_err_probe(dev, pogo->detect_irq,
++				     "failed to get detect IRQ\n");
++
++	ret = devm_add_action_or_reset(dev, pogo_teardown, pogo);
++	if (ret)
++		return ret;
++
++	serdev_device_set_client_ops(serdev, &pogo_serdev_ops);
++	ret = devm_serdev_device_open(dev, serdev);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to open serial port\n");
++
++	baud = serdev_device_set_baudrate(serdev, POGO_BAUD);
++	if (baud != POGO_BAUD)
++		dev_warn(dev, "baud rate %u instead of %u\n", baud, POGO_BAUD);
++	serdev_device_set_flow_control(serdev, false);
++	ret = serdev_device_set_parity(serdev, SERDEV_PARITY_NONE);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to set parity\n");
++
++	/* Falling edge: an unpowered keyboard pulls the line low */
++	ret = devm_request_threaded_irq(dev, pogo->detect_irq, NULL,
++					pogo_detect_irq,
++					IRQF_TRIGGER_FALLING | IRQF_ONESHOT |
++					IRQF_NO_AUTOEN, "pogo-detect", pogo);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request detect IRQ\n");
++
++	ret = devm_add_action_or_reset(dev, pogo_disable_works, pogo);
++	if (ret)
++		return ret;
++
++	/* Attaching the keyboard wakes the system, as on stock */
++	ret = devm_device_init_wakeup(dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to init wakeup\n");
++
++	scoped_guard(mutex, &pogo->lock)
++		pogo_start_detect(pogo, false);
++
++	return 0;
++}
++
++/*
++ * An asleep keyboard holds the line low. Let it fall while RX is still muxed
++ * to the UART: once RX is a GPIO, the edge would trigger the wake interrupt.
++ */
++static void pogo_wait_line_low(struct pogo *pogo)
++{
++	unsigned long timeout = jiffies + msecs_to_jiffies(POGO_SLEEP_SETTLE_MS);
++	ktime_t start = ktime_get();
++
++	while (!gpiod_get_value_cansleep(pogo->detect_gpio)) {
++		if (time_after(jiffies, timeout)) {
++			dev_warn(pogo->dev, "line still high after sleep request\n");
++			return;
++		}
++		usleep_range(5000, 6000);
++	}
++
++	dev_dbg(pogo->dev, "line low %lld ms after sleep request\n",
++		ktime_ms_delta(ktime_get(), start));
++}
++
++static int pogo_suspend(struct device *dev)
++{
++	struct pogo *pogo = dev_get_drvdata(dev);
++	bool connected;
++	int ret = 0;
++
++	pogo_disable_works(pogo);
++
++	scoped_guard(mutex, &pogo->lock)
++		connected = pogo->state == POGO_CONNECTED;
++
++	/*
++	 * An asleep keyboard stops its heartbeat and wakes the UART's RX wake
++	 * interrupt on a keypress.
++	 */
++	if (connected) {
++		ret = pogo_set_host_asleep(pogo, true);
++		if (ret)
++			dev_warn(dev, "keyboard did not acknowledge sleep (%d), powering it off\n",
++				 ret);
++		else
++			pogo_wait_line_low(pogo);
++	}
++
++	guard(mutex)(&pogo->lock);
++
++	/* Do not let a keyboard that keeps talking wake us up right away */
++	if (pogo->state == POGO_POWERED || (pogo->state == POGO_CONNECTED && ret))
++		pogo_power_off(pogo);
++
++	if (pogo->state == POGO_IDLE && device_may_wakeup(dev))
++		pogo->irq_wake = !enable_irq_wake(pogo->detect_irq);
++
++	return 0;
++}
++
++static int pogo_resume(struct device *dev)
++{
++	struct pogo *pogo = dev_get_drvdata(dev);
++
++	pogo_enable_works(pogo);
++
++	guard(mutex)(&pogo->lock);
++
++	if (pogo->irq_wake) {
++		disable_irq_wake(pogo->detect_irq);
++		pogo->irq_wake = false;
++	}
++
++	switch (pogo->state) {
++	case POGO_DETECT:
++		mod_delayed_work(system_dfl_wq, &pogo->detect_work, 0);
++		break;
++	case POGO_POWERED:
++		pogo->power_on_time = jiffies;
++		pogo->wake_sent = false;
++		pogo->last_rx = jiffies;
++		mod_delayed_work(system_dfl_wq, &pogo->watchdog_work,
++				 msecs_to_jiffies(POGO_WATCHDOG_MS));
++		break;
++	case POGO_CONNECTED:
++		pogo->last_rx = jiffies + msecs_to_jiffies(POGO_RESUME_GRACE_MS);
++		mod_delayed_work(system_dfl_wq, &pogo->watchdog_work,
++				 msecs_to_jiffies(POGO_WATCHDOG_MS));
++		schedule_work(&pogo->wake_work);
++		break;
++	default:
++		break;
++	}
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(pogo_pm_ops, pogo_suspend, pogo_resume);
++
++static const struct of_device_id pogo_of_match[] = {
++	{ .compatible = "oneplus,pogo-keyboard" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, pogo_of_match);
++
++static struct serdev_device_driver pogo_driver = {
++	.probe = pogo_probe,
++	.driver = {
++		.name = "oneplus-pogo-keyboard",
++		.of_match_table = pogo_of_match,
++		.pm = pm_sleep_ptr(&pogo_pm_ops),
++	},
++};
++module_serdev_device_driver(pogo_driver);
++
++MODULE_DESCRIPTION("OnePlus pogo pin keyboard");
++MODULE_LICENSE("GPL");

@@ -1,0 +1,171 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] arm64: dts: qcom: caihong: describe the pogo keyboard
+
+The keyboard attaches through pogo pins on QUP1 SE7 (UART at 0xa9c000,
+TX GPIO 62, RX GPIO 63). As in the stock caihong device tree, GPIO 100
+powers the keyboard, GPIO 14 enables the half-duplex transceiver for
+transmission and GPIO 137, pulled up, reads low while an unpowered
+keyboard is attached. Pin drive strengths follow stock. The keyboard
+names, indexed by the brand byte the keyboard reports, and the touchpad
+size and resolution are the stock values.
+
+Add the SoC's UART node for SE7, which mainline lacks.
+
+RX (GPIO 63) is also the UART's wake interrupt, as on stock: an asleep
+keyboard wakes the tablet on a keypress. In the sleep pin state RX is a
+GPIO, so the interrupt sees the line while the UART is powered down.
+Requesting the wake interrupt muxes RX to GPIO during the UART probe, and
+the serdev child opens the port within that probe, so pinctrl would keep
+the already selected default state and RX would stay a GPIO. Start from
+an init state equal to the sleep state, so the default state is applied
+when the port is first powered.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+index 4624afb12..95f95c426 100644
+--- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
++++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+@@ -1212,3 +1212,92 @@ ctrl-pins {
+ 		};
+ 	};
+ };
++
++&tlmm {
++	pogo_uart_default: pogo-uart-default-state {
++		tx-pins {
++			pins = "gpio62";
++			function = "qup1_se7";
++			drive-strength = <8>;
++			bias-disable;
++		};
++
++		rx-pins {
++			pins = "gpio63";
++			function = "qup1_se7";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++
++	/*
++	 * While the UART is powered down, RX is a GPIO so a keypress on an
++	 * asleep keyboard raises the wake interrupt.
++	 */
++	pogo_uart_sleep: pogo-uart-sleep-state {
++		tx-pins {
++			pins = "gpio62";
++			function = "qup1_se7";
++			drive-strength = <8>;
++			bias-disable;
++		};
++
++		rx-pins {
++			pins = "gpio63";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++
++	pogo_keyboard_default: pogo-keyboard-default-state {
++		detect-pins {
++			pins = "gpio137";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-pull-up;
++		};
++
++		ctrl-pins {
++			pins = "gpio14", "gpio100";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++};
++
++&uart7 {
++	/delete-property/ interrupts;
++	interrupts-extended = <&intc GIC_SPI 579 IRQ_TYPE_LEVEL_HIGH 0>,
++			      <&tlmm 63 IRQ_TYPE_EDGE_FALLING>;
++
++	/*
++	 * Requesting the RX wake interrupt muxes RX to GPIO. Start from the
++	 * sleep state so that the default state is applied again afterwards.
++	 */
++	pinctrl-0 = <&pogo_uart_default>;
++	pinctrl-1 = <&pogo_uart_sleep>;
++	pinctrl-2 = <&pogo_uart_sleep>;
++	pinctrl-names = "default", "sleep", "init";
++
++	status = "okay";
++
++	keyboard {
++		compatible = "oneplus,pogo-keyboard";
++
++		power-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
++		tx-enable-gpios = <&tlmm 14 GPIO_ACTIVE_HIGH>;
++		/* An attached keyboard pulls the line low while unpowered */
++		detect-gpios = <&tlmm 137 GPIO_ACTIVE_LOW>;
++
++		pinctrl-0 = <&pogo_keyboard_default>;
++		pinctrl-names = "default";
++
++		keyboard-names = "OPPO Pad 3 Pro Keyboard",
++				 "OnePlus Pad Pro Keyboard",
++				 "OnePlus Pad Smart Keyboard";
++		touchpad-size = <2764 1630>;
++		touchpad-resolution = <23 23>;
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/sm8650.dtsi b/arch/arm64/boot/dts/qcom/sm8650.dtsi
+index 35324ff77..1dd76bcce 100644
+--- a/arch/arm64/boot/dts/qcom/sm8650.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8650.dtsi
+@@ -3545,6 +3545,32 @@ &config_noc SLAVE_QUP_1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+ 
+ 				status = "disabled";
+ 			};
++
++			uart7: serial@a9c000 {
++				compatible = "qcom,geni-uart";
++				reg = <0 0x00a9c000 0 0x4000>;
++
++				interrupts = <GIC_SPI 579 IRQ_TYPE_LEVEL_HIGH 0>;
++
++				clocks = <&gcc GCC_QUPV3_WRAP1_S7_CLK>;
++				clock-names = "se";
++
++				interconnects = <&clk_virt MASTER_QUP_CORE_1 QCOM_ICC_TAG_ALWAYS
++						 &clk_virt SLAVE_QUP_CORE_1 QCOM_ICC_TAG_ALWAYS>,
++						<&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
++						 &config_noc SLAVE_QUP_1 QCOM_ICC_TAG_ACTIVE_ONLY>;
++				interconnect-names = "qup-core",
++						     "qup-config";
++
++				power-domains = <&rpmhpd RPMHPD_CX>;
++
++				operating-points-v2 = <&qup_opp_table_100mhz>;
++
++				pinctrl-0 = <&qup_uart7_default>;
++				pinctrl-names = "default";
++
++				status = "disabled";
++			};
+ 		};
+ 
+ 		rng: rng@10c3000 {
+@@ -6955,6 +6981,14 @@ qup_spi14_data_clk: qup-spi14-data-clk-state {
+ 				bias-disable;
+ 			};
+ 
++			qup_uart7_default: qup-uart7-default-state {
++				/* TX, RX */
++				pins = "gpio62", "gpio63";
++				function = "qup1_se7";
++				drive-strength = <2>;
++				bias-disable;
++			};
++
+ 			qup_uart14_default: qup-uart14-default-state {
+ 				/* TX, RX */
+ 				pins = "gpio26", "gpio27";
