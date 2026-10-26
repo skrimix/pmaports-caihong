@@ -1,0 +1,17 @@
+# OnePlus Pad Pro Keyboard (CN) over Bluetooth LE (22d9:3869)
+
+# The HID descriptor declares a 27.64 x 16.30 inch touchpad (4 units/mm).
+# The pad is about 120 x 71 mm: 23 units/mm, as in the stock pogo DT.
+evdev:input:b0005v22D9p3869e*-e0,1,3,*
+ EVDEV_ABS_00=::23
+ EVDEV_ABS_01=::23
+ EVDEV_ABS_35=::23
+ EVDEV_ABS_36=::23
+
+# Esc sends AC Back; mic, search and lock send F13, F23 and F24.
+# Touchpad toggle is handled in firmware but also sends F22.
+evdev:input:b0005v22D9p3869e*-e0,1,4,*
+ KEYBOARD_KEY_c0224=esc
+ KEYBOARD_KEY_70068=micmute
+ KEYBOARD_KEY_70072=search
+ KEYBOARD_KEY_70073=screenlock

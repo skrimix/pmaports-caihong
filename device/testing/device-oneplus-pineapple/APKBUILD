@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=75
+pkgrel=77
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -49,6 +49,7 @@ source="
 	80-oneplus-pineapple.preset
 	81-libssc-oneplus-pineapple.rules
 	90-hide-android-partitions.rules
+	61-oneplus-pad-pro-keyboard.hwdb
 	caihong-persist-import
 	caihong-persist-import.service
 	caihong-sensors.c
@@ -92,6 +93,8 @@ package() {
 		"$pkgdir/usr/lib/udev/rules.d/81-libssc-oneplus-pineapple.rules"
 	install -Dm644 "$srcdir/90-hide-android-partitions.rules" \
 		"$pkgdir/usr/lib/udev/rules.d/90-hide-android-partitions.rules"
+	install -Dm644 "$srcdir/61-oneplus-pad-pro-keyboard.hwdb" \
+		"$pkgdir/usr/lib/udev/hwdb.d/61-oneplus-pad-pro-keyboard.hwdb"
 	install -Dm755 "$srcdir/caihong-persist-import" \
 		"$pkgdir/usr/libexec/caihong-persist-import"
 	install -Dm644 "$srcdir/caihong-persist-import.service" \
@@ -163,6 +166,7 @@ df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd55
 4950ba1d7a7bd6ea9a191f260095ba310738fa0d1f6d222f6cb487f1c98c2deb2cabd1382f59abf98e07c7289f761fd6d1576dd8702b5692bf1046674e4b72ee  80-oneplus-pineapple.preset
 18f063a3c6af8fd3ac1abc85c19a492554a42a18517a1b7d63170156e087f8fb6151f3fe89358c04f6e57fd9138edfe0a98de65de543f7dd967dc4a006f35f0d  81-libssc-oneplus-pineapple.rules
 926e1a2823ab7c75fee631e88012d18ec0f7bdce46f0ef857c19b33fe3c92d4aa71dcb4011121dcf8b58e1337f92dab657d136a3011393ebdb208f3d5bfeaaff  90-hide-android-partitions.rules
+1e474794a70fbe35b0baebfc324d5daa0f25b110031986f628a52f7cd838c437214b0fc061130ae08d00d4ced5cb6fe26c48bb6feb3542912cc30c2fb3a5140b  61-oneplus-pad-pro-keyboard.hwdb
 acd3ef4b56378d4195a9cb0af22318c74fb2ffdf1b70316836b4fc22ee51247202e187f88b6bea16ba7da9ea27692482b543bd2044586c682b52c903e2da259a  caihong-persist-import
 4e60222efeaa1e540b42b3201093c6a153cf9dc9c4358a84821ad01aab1f4190ca666be09d3d32077c545c9f6ad50cf197423db254d61b6fabfca90aec0c25c0  caihong-persist-import.service
 f3a1b96f12f2a6f06f2e00d410b01ee7a12cfa19ae0982f97479c8e303a68dfe7af8b14bc5b8ebe5da7e9266fe809684ad4c0995c52bb80dc7300795d98665ec  caihong-sensors.c
