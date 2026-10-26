@@ -1,0 +1,106 @@
+#!/usr/bin/python3
+"""Show Plasma's touchpad on/off OSD for the OnePlus Pad keyboard over Bluetooth.
+
+The touchpad toggle key switches the touchpad inside the keyboard firmware and also
+sends F22. The keyboard reports the new state as a notification on its vendor GATT
+service, 07 01 01 <state> <byte sum> with state 1 = off, once a host subscribes.
+Over pogo the same state arrives in the heartbeat instead.
+
+Runs in the user session: the OSD is on the session bus, and BlueZ lets the session
+user subscribe to the characteristic.
+"""
+
+import dbus
+import dbus.mainloop.glib
+from gi.repository import GLib
+
+
+BLUEZ = "org.bluez"
+DEVICE = "org.bluez.Device1"
+CHARACTERISTIC = "org.bluez.GattCharacteristic1"
+PROPERTIES = "org.freedesktop.DBus.Properties"
+OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
+STATUS_UUID = "5768dd00-b436-11ee-a506-0242ac120002"
+TOUCHPAD_STATE = bytes([0x07, 0x01, 0x01])
+OSD = ("org.kde.plasmashell", "/org/kde/osdService", "org.kde.osdService")
+
+
+class KeyboardOsd:
+    def __init__(self, system, session):
+        self.system = system
+        self.session = session
+        self.keyboards = {}  # device path -> status characteristic path
+        system.add_signal_receiver(self.properties_changed, "PropertiesChanged", PROPERTIES,
+                                   BLUEZ, path_keyword="path")
+        system.add_signal_receiver(self.interfaces_removed, "InterfacesRemoved",
+                                   OBJECT_MANAGER, BLUEZ)
+        system.watch_name_owner(BLUEZ, self.bluez_owner)
+
+    def objects(self):
+        manager = dbus.Interface(self.system.get_object(BLUEZ, "/"), OBJECT_MANAGER)
+        return manager.GetManagedObjects()
+
+    def bluez_owner(self, owner):
+        self.keyboards.clear()
+        if owner:
+            for path, interfaces in self.objects().items():
+                device = interfaces.get(DEVICE)
+                if device and device.get("Connected") and device.get("ServicesResolved"):
+                    self.connected(path)
+
+    def properties_changed(self, interface, changed, invalidated, path):
+        if interface == DEVICE:
+            if changed.get("ServicesResolved"):
+                self.connected(path)
+            elif not changed.get("Connected", True):
+                self.disconnected(path)
+        elif interface == CHARACTERISTIC and "Value" in changed:
+            if path in self.keyboards.values():
+                self.status(path, bytes(changed["Value"]))
+
+    def interfaces_removed(self, path, interfaces):
+        if DEVICE in interfaces:
+            self.disconnected(path)
+
+    def connected(self, device):
+        if device in self.keyboards:
+            return
+        characteristic = next(
+            (path for path, interfaces in self.objects().items()
+             if path.startswith(device + "/")
+             and interfaces.get(CHARACTERISTIC, {}).get("UUID") == STATUS_UUID), None)
+        if not characteristic:
+            return
+        self.keyboards[device] = characteristic
+        print(f"{device}: keyboard connected", flush=True)
+        try:
+            dbus.Interface(self.system.get_object(BLUEZ, characteristic),
+                           CHARACTERISTIC).StartNotify()
+        except dbus.exceptions.DBusException as e:
+            print(f"{device}: {e.get_dbus_message()}", flush=True)
+
+    def disconnected(self, device):
+        if self.keyboards.pop(device, None) is not None:
+            print(f"{device}: keyboard disconnected", flush=True)
+
+    def status(self, path, frame):
+        if (len(frame) != 5 or frame[:3] != TOUCHPAD_STATE
+                or sum(frame[:4]) & 0xFF != frame[4]):
+            print(f"{path}: unknown notification {frame.hex(' ')}", flush=True)
+            return
+        enabled = frame[3] == 0
+        print(f"{path}: touchpad {'on' if enabled else 'off'}", flush=True)
+        service, osd_path, interface = OSD
+        self.session.get_object(service, osd_path, introspect=False).touchpadEnabledChanged(
+            dbus.Boolean(enabled), dbus_interface=interface, reply_handler=lambda: None,
+            error_handler=lambda e: print(f"osd: {e.get_dbus_message()}", flush=True))
+
+
+def main():
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    KeyboardOsd(dbus.SystemBus(), dbus.SessionBus())
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

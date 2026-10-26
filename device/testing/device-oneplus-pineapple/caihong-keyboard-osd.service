@@ -1,0 +1,12 @@
+[Unit]
+Description=OnePlus Pad 2 keyboard touchpad on/off OSD
+PartOf=graphical-session.target
+After=plasma-core.target
+
+[Service]
+ExecStart=/usr/libexec/caihong-keyboard-osd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=plasma-workspace.target
