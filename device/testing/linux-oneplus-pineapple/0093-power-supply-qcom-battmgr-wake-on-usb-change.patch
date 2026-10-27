@@ -1,0 +1,26 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] power: supply: qcom_battmgr: wake on USB input changes
+
+Plugging in a charger while suspended delivers a USB property
+notification, but nothing wakes the system, so userspace only notices
+the charger after another wake source. Report it as a hard wakeup event
+on the USB supply, as the downstream battery charger driver does, so its
+power/wakeup attribute controls it.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index f6b77405d..6c2721639 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -3689,6 +3689,14 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+ 		break;
+ 	case NOTIF_USB_PROPERTY:
+ 		qcom_battmgr_pps_kick(battmgr);
++		/*
++		 * Wake from sleep on USB input changes such as plugging in a
++		 * charger, so that userspace can pick up the new charging state.
++		 * Controlled by the USB supply's power/wakeup attribute.
++		 */
++		pm_wakeup_dev_event(&battmgr->usb_psy->dev, 0, true);
+ 		power_supply_changed(battmgr->usb_psy);
+ 		break;
+ 	case NOTIF_WLS_PROPERTY:

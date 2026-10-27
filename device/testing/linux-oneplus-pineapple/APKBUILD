@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=78
+pkgrel=80
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -118,6 +118,7 @@ source="
 	0090-arm64-dts-qcom-caihong-adc-thermal-zones.patch
 	0091-arm64-dts-qcom-caihong-pogo-keyboard.patch
 	0092-input-keyboard-oneplus-pogo.patch
+	0093-power-supply-qcom-battmgr-wake-on-usb-change.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -240,6 +241,7 @@ bbb0faa22f4cfff854f9fb990afa61fa559c318abb566b1dc14e7bf781bdd35af3b6264222134094
 67e7cf925a795e1e326d98ac61fb10cc9d11f6eee88646794e5d235642a2e7d97b707fb82eaf77e0853fa4a4d61e71571c4d75a1eaa9be2cc4b36f374671a0e5  0090-arm64-dts-qcom-caihong-adc-thermal-zones.patch
 42da55f8998544d92f1a66b0367bc82bea8bd34eb19d38f85d908ad12ddab0b91c6da87b7977c8d7f28175415ad667c55e53bf04665f93b542b9712bba2dccab  0091-arm64-dts-qcom-caihong-pogo-keyboard.patch
 e4416cf64979803cc36d0055a54452db1628c17e76cbd1695f7e9543921c032061748f61dd4a113e4a193c7ef467cda94c3e5e3cf3c6d193e05de5f9e97be4dc  0092-input-keyboard-oneplus-pogo.patch
+9a22f3b33748d5a07e37667aee13e416262620820c1a137d74f1f9d6ef35c5a10941d4edbaba3c071addd1b454d83bc601ab6061db287ab8592ea70f744d2482  0093-power-supply-qcom-battmgr-wake-on-usb-change.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 8b58ea90ae4352aa8234457faf3aa92f3b481008bda2333a320a09b946860d29f0ac9b64be2145624205219311db7001f46cc6f148ee8e0c773546c191cb7fb9  config-oneplus-pineapple.aarch64
 "
