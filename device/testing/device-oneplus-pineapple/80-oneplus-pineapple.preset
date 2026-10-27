@@ -4,3 +4,4 @@ enable caihong-shell-back.service
 enable caihong-minidump-save.service
 enable caihong-pen.service
 enable caihong-keyboard.service
+enable ssc-lid.service

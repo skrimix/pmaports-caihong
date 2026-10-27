@@ -1,0 +1,6 @@
+# The ADSP sensor framework raises an SMP2P interrupt when it delivers an event
+# from a wake-up client, such as the Hall sensor behind ssc-lid. Mainline keeps
+# this wakeup source disabled by default; enable it so opening the lid wakes
+# the tablet. While asleep it otherwise stays quiet, and it also wakes on an
+# ADSP crash.
+ACTION=="add|bind", SUBSYSTEM=="platform", KERNEL=="smp2p-adsp", ATTR{power/wakeup}="enabled"

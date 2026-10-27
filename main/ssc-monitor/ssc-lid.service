@@ -1,0 +1,12 @@
+[Unit]
+Description=Lid switch from the SSC Hall sensor
+# Desktop sessions look for a lid only when they start.
+Before=display-manager.service
+
+[Service]
+ExecStart=/usr/libexec/ssc-lid
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
