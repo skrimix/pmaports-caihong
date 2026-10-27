@@ -1,14 +1,19 @@
 #!/usr/bin/python3
-"""Show Plasma's touchpad on/off OSD for the OnePlus Pad keyboard over Bluetooth.
+"""Show Plasma's touchpad on/off OSD for the OnePlus Pad keyboard.
 
 The touchpad toggle key switches the touchpad inside the keyboard firmware and also
-sends F22. The keyboard reports the new state as a notification on its vendor GATT
-service, 07 01 01 <state> <byte sum> with state 1 = off, once a host subscribes.
-Over pogo the same state arrives in the heartbeat instead.
+sends F22. Over Bluetooth, the keyboard reports the new state as a notification on
+its vendor GATT service, 07 01 01 <state> <byte sum> with state 1 = off, once a host
+subscribes. Over pogo the state arrives in the heartbeat, and the pogo driver sends
+a uevent when it changes.
 
 Runs in the user session: the OSD is on the session bus, and BlueZ lets the session
 user subscribe to the characteristic.
 """
+
+import glob
+import os
+import socket
 
 import dbus
 import dbus.mainloop.glib
@@ -23,6 +28,8 @@ OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
 STATUS_UUID = "5768dd00-b436-11ee-a506-0242ac120002"
 TOUCHPAD_STATE = bytes([0x07, 0x01, 0x01])
 OSD = ("org.kde.plasmashell", "/org/kde/osdService", "org.kde.osdService")
+POGO = "/sys/bus/serial/drivers/oneplus-pogo-keyboard/*"
+NETLINK_KOBJECT_UEVENT = 15  # not exported by the socket module
 
 
 class KeyboardOsd:
@@ -30,11 +37,47 @@ class KeyboardOsd:
         self.system = system
         self.session = session
         self.keyboards = {}  # device path -> status characteristic path
+        self.pogo = {}  # attached keyboard's DEVPATH -> touchpad disabled
         system.add_signal_receiver(self.properties_changed, "PropertiesChanged", PROPERTIES,
                                    BLUEZ, path_keyword="path")
         system.add_signal_receiver(self.interfaces_removed, "InterfacesRemoved",
                                    OBJECT_MANAGER, BLUEZ)
         system.watch_name_owner(BLUEZ, self.bluez_owner)
+        self.watch_uevents()
+
+    def watch_uevents(self):
+        """Watch kernel uevents for the pogo driver's touchpad state."""
+        self.uevents = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM,
+                                     NETLINK_KOBJECT_UEVENT)
+        self.uevents.bind((0, 1))
+        GLib.io_add_watch(self.uevents.fileno(), GLib.IO_IN, self.uevent)
+        # A keyboard attached before this service started
+        for path in glob.glob(POGO):
+            try:
+                with open(f"{path}/present") as f:
+                    present = f.read().strip() == "1"
+                with open(f"{path}/touchpad_disabled") as f:
+                    disabled = f.read().strip() == "1"
+            except OSError:
+                continue
+            if present:
+                self.pogo[os.path.realpath(path).removeprefix("/sys")] = disabled
+
+    def uevent(self, fd, condition):
+        fields = self.uevents.recv(16384).split(b"\0")
+        env = dict(f.decode(errors="replace").split("=", 1) for f in fields[1:] if b"=" in f)
+        if env.get("ACTION") != "change" or "KEYBOARD_PRESENT" not in env:
+            return True
+        path = env.get("DEVPATH")
+        if env["KEYBOARD_PRESENT"] != "1":
+            self.pogo.pop(path, None)
+            return True
+        disabled = env.get("TOUCHPAD_DISABLED") == "1"
+        # The attach event carries the current state; only changes get an OSD.
+        if self.pogo.get(path, disabled) != disabled:
+            self.show(f"pogo {path}", not disabled)
+        self.pogo[path] = disabled
+        return True
 
     def objects(self):
         manager = dbus.Interface(self.system.get_object(BLUEZ, "/"), OBJECT_MANAGER)
@@ -88,8 +131,10 @@ class KeyboardOsd:
                 or sum(frame[:4]) & 0xFF != frame[4]):
             print(f"{path}: unknown notification {frame.hex(' ')}", flush=True)
             return
-        enabled = frame[3] == 0
-        print(f"{path}: touchpad {'on' if enabled else 'off'}", flush=True)
+        self.show(path, frame[3] == 0)
+
+    def show(self, source, enabled):
+        print(f"{source}: touchpad {'on' if enabled else 'off'}", flush=True)
         service, osd_path, interface = OSD
         self.session.get_object(service, osd_path, introspect=False).touchpadEnabledChanged(
             dbus.Boolean(enabled), dbus_interface=interface, reply_handler=lambda: None,

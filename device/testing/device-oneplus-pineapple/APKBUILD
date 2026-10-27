@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-oneplus-pineapple
 pkgdesc="OnePlus Pad 2"
 pkgver=1
-pkgrel=79
+pkgrel=80
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -63,6 +63,8 @@ source="
 	caihong-minidump-save.service
 	caihong-pen
 	caihong-pen.service
+	caihong-keyboard
+	caihong-keyboard.service
 	caihong-keyboard-osd
 	caihong-keyboard-osd.service
 	90-dev-nopasswd
@@ -121,6 +123,9 @@ package() {
 	install -Dm755 "$srcdir/caihong-pen" "$pkgdir/usr/libexec/caihong-pen"
 	install -Dm644 "$srcdir/caihong-pen.service" \
 		"$pkgdir/usr/lib/systemd/system/caihong-pen.service"
+	install -Dm755 "$srcdir/caihong-keyboard" "$pkgdir/usr/libexec/caihong-keyboard"
+	install -Dm644 "$srcdir/caihong-keyboard.service" \
+		"$pkgdir/usr/lib/systemd/system/caihong-keyboard.service"
 	install -Dm755 "$srcdir/caihong-keyboard-osd" \
 		"$pkgdir/usr/libexec/caihong-keyboard-osd"
 	install -Dm644 "$srcdir/caihong-keyboard-osd.service" \
@@ -172,7 +177,7 @@ df1f05fa88520f8bd366eb564d5d9bf7f2f4ba0fe96852c77fcf3d90c2bbed78acfcf8ccda33dd55
 32abccb63255478f817d3095b472e93f2648753be38bab92a5ba2401805b273dde93b9046216ea54fdedd376ce84229a1e6e27f7b7d0ddae3887e3ef6ee09bc3  pad2-usb-gadget
 25eccfab783fa6c6745b14c005c47a05f71fd73b00c1c1149a03ee77675ded94e5d35e8112514db580eacd9f9baaa42832f6741bcca9c16e150695d6903f4d16  pad2-usb-gadget.service
 18e9d19a242f6736a238a1458d0200b05452532452ce5c2a1f13bac4f80eefc3088b010a396489b805f6f743a369fbcaee9f8c254af14fab11818882f86ca6d9  81-pad2-usb-gadget.rules
-4950ba1d7a7bd6ea9a191f260095ba310738fa0d1f6d222f6cb487f1c98c2deb2cabd1382f59abf98e07c7289f761fd6d1576dd8702b5692bf1046674e4b72ee  80-oneplus-pineapple.preset
+672872e15cc97917aab7f58047013cccc95ee1cbbde0b0c4832d16d4c124a16533112ce7caa417814202be589380affe9f0b4cde6fa03d3d5d891504cffa089c  80-oneplus-pineapple.preset
 b4ba4dea17e6d0074bc913973785d646868d0388c375aab89e4bb8bf7b783914f3fd9daa77498421c166a5c760517f0586017f00368bc03eb9b0c917a06c89f5  80-oneplus-pineapple-user.preset
 18f063a3c6af8fd3ac1abc85c19a492554a42a18517a1b7d63170156e087f8fb6151f3fe89358c04f6e57fd9138edfe0a98de65de543f7dd967dc4a006f35f0d  81-libssc-oneplus-pineapple.rules
 926e1a2823ab7c75fee631e88012d18ec0f7bdce46f0ef857c19b33fe3c92d4aa71dcb4011121dcf8b58e1337f92dab657d136a3011393ebdb208f3d5bfeaaff  90-hide-android-partitions.rules
@@ -189,7 +194,9 @@ aba868c8cfde8a26720c6ddd41b6a4c25b01975319cb52f28898598ca550a8fcaf5103d66b52a58d
 24dd8892e79efe0cd57add6326b4ab2741ca0298c2ce5674d49bbd63c4b96497046b97387fde9b61c1426feab4d1231e9edc1389f132ecaf0d590b63a8f664c3  caihong-minidump-save.service
 5c065915a4153d56bc732eb3816426986fcf66b0517e08d137847877f6d608c18260d49e15ec5470304d0bb0c4d0311cfa72e879a66f14cfd5aa369bd03bfe25  caihong-pen
 42c1278ba85f828f9d2ac25d91c599167a9ab052f51457485cd63305e0575ee4886404d3d7412c369e175edebb92568b0fce34790af9120a1fd61be957d51024  caihong-pen.service
-ff8124a776fc59cdb2f53699843de9992dfbbd8a0dd6bc90ecac1b9e237fc5a06d7754f85184a73b495dc1944371e79c2dbccf5ce69fcaf48a45181836912f98  caihong-keyboard-osd
+a04d125b4890acb37fe0e93285a9700b46a9f67877f6c188ccd7e26e93cd5e93131f126238bf6886966ceb060d24c83f386e9a51e2e23aa218f6a748619ae2b5  caihong-keyboard
+ce80197d0b325cfc0a21c15ee7d90c6f5ab6a117a12d2b0bd32b100d7cb2532b46e84a6016840b72e1fda1d13b3b6b76a6f041324ee6a0bed0b2df76ce81de15  caihong-keyboard.service
+92e731b1aea2f3c7b21b53c78f953852ce2fbd5f40132a422371406b25eb028f1dffd1dafb6fe99014b2cc65bbece4cd4c19978ce49ebd2eedf971920db6ae20  caihong-keyboard-osd
 50d439eaa7f7fda7840030c21a4f5395d498b19cd7c754458fd3d8fcec5dd5ec6ba4ff6def4a924dbad2beda7a4103dc5a04082dfc57cab4a61c1b8a718a879b  caihong-keyboard-osd.service
 d757e155c598ba8894e1f27d511bbb9504578503596d581ead84ac4c38318643fdb3cfa7164f77d361021af47022a4f3eaab20423784f54494e28aade1faffc0  90-dev-nopasswd
 39f18b25e12f5387dbbbfe699a59f6500b71eaaa81c3ec02e709e037ca9a89d3e9f3e5c2dc17da148069177994a6161b744918fbb13c4b255cc371009f559c64  99-watchdog.conf

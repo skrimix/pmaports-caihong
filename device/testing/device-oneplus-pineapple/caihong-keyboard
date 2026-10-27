@@ -1,0 +1,213 @@
+#!/usr/bin/python3
+"""Bond the OnePlus Pad keyboard over Bluetooth LE when it is attached to the pogo pins.
+
+The pogo driver reports the keyboard's Bluetooth address on attach, like the stock
+driver, whose uevent ipemanager uses to scan for the keyboard and bond it. Do the
+same when BlueZ does not know the keyboard, so that it keeps working over Bluetooth
+once detached. BlueZ reconnects bonded keyboards by itself, and an attached keyboard
+sends its input only over the pogo pins.
+"""
+
+import glob
+import socket
+
+import dbus
+import dbus.mainloop.glib
+import dbus.service
+from gi.repository import GLib
+
+
+BLUEZ = "org.bluez"
+ADAPTER = "org.bluez.Adapter1"
+AGENT_MANAGER = "org.bluez.AgentManager1"
+DEVICE = "org.bluez.Device1"
+PROPERTIES = "org.freedesktop.DBus.Properties"
+OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
+POGO = "/sys/bus/serial/drivers/oneplus-pogo-keyboard/*"
+NETLINK_KOBJECT_UEVENT = 15  # not exported by the socket module
+AGENT_PATH = "/org/postmarketos/caihong_keyboard/agent"
+DISCOVERY_TIMEOUT = 30  # seconds
+PAIR_TIMEOUT = 60  # seconds
+
+
+class Agent(dbus.service.Object):
+    """Accept the keyboard's Just Works pairing; used only for pairings this service starts."""
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Release(self):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
+    def RequestAuthorization(self, device):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device, passkey):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+    def AuthorizeService(self, device, uuid):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Cancel(self):
+        pass
+
+
+def attached_keyboards():
+    """Addresses of the keyboards attached now, from the pogo driver's sysfs."""
+    addresses = []
+    for path in glob.glob(POGO):
+        try:
+            with open(f"{path}/present") as f:
+                present = f.read().strip() == "1"
+            with open(f"{path}/address") as f:
+                address = f.read().strip().upper()
+        except OSError:
+            continue
+        if present and address:
+            addresses.append(address)
+    return addresses
+
+
+class KeyboardManager:
+    def __init__(self, bus):
+        self.bus = bus
+        self.bluez = False
+        self.discovering = None  # address of an attached keyboard being searched for
+        self.pairing = set()  # addresses
+        self.agent = Agent(bus, AGENT_PATH)
+        bus.add_signal_receiver(self.properties_changed, "PropertiesChanged", PROPERTIES,
+                                BLUEZ)
+        bus.add_signal_receiver(self.interfaces_added, "InterfacesAdded", OBJECT_MANAGER, BLUEZ)
+        bus.watch_name_owner(BLUEZ, self.bluez_owner)
+        self.watch_uevents()
+
+    def watch_uevents(self):
+        """Watch kernel uevents for the pogo driver's attach events."""
+        self.uevents = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM,
+                                     NETLINK_KOBJECT_UEVENT)
+        self.uevents.bind((0, 1))
+        GLib.io_add_watch(self.uevents.fileno(), GLib.IO_IN, self.uevent)
+
+    def uevent(self, fd, condition):
+        fields = self.uevents.recv(16384).split(b"\0")
+        env = dict(f.decode(errors="replace").split("=", 1) for f in fields[1:] if b"=" in f)
+        if env.get("ACTION") == "change" and env.get("KEYBOARD_PRESENT") == "1":
+            self.attached(env.get("KEYBOARD_ADDRESS", "").upper())
+        return True
+
+    def attached(self, address):
+        """Bond an attached keyboard that BlueZ does not know, as ipemanager does."""
+        if not self.bluez:
+            return
+        path, device = self.find(address)
+        if device and device.get("Bonded", device.get("Paired")):
+            return
+        if address in self.pairing or self.discovering:
+            return
+        if path:
+            self.pair(address, path)
+            return
+        adapter = self.adapter()
+        if not adapter:
+            return
+        print(f"keyboard {address} attached, searching", flush=True)
+        try:
+            adapter.SetDiscoveryFilter({"Transport": "le"})
+            adapter.StartDiscovery()
+        except dbus.exceptions.DBusException as e:
+            print(f"discovery: {e.get_dbus_message()}", flush=True)
+            return
+        self.discovering = address
+        GLib.timeout_add_seconds(DISCOVERY_TIMEOUT, self.discovery_timeout, address)
+
+    def stop_discovery(self):
+        self.discovering = None
+        try:
+            adapter = self.adapter()
+            if adapter:
+                adapter.StopDiscovery()
+        except dbus.exceptions.DBusException as e:
+            print(f"discovery: {e.get_dbus_message()}", flush=True)
+
+    def discovery_timeout(self, address):
+        if self.discovering == address:
+            print(f"keyboard {address} not found", flush=True)
+            self.stop_discovery()
+        return False
+
+    def properties_changed(self, interface, changed, invalidated):
+        # Bluetooth turned on with a keyboard attached
+        if interface == ADAPTER and changed.get("Powered"):
+            self.check_attached()
+
+    def interfaces_added(self, path, interfaces):
+        if ADAPTER in interfaces:
+            self.check_attached()
+        device = interfaces.get(DEVICE)
+        if device and self.discovering and device.get("Address") == self.discovering:
+            self.stop_discovery()
+            self.pair(str(device["Address"]), path)
+
+    def pair(self, address, path):
+        print(f"{path}: pairing attached keyboard", flush=True)
+        self.pairing.add(address)
+        device = dbus.Interface(self.bus.get_object(BLUEZ, path), DEVICE)
+
+        def paired():
+            self.pairing.discard(address)
+            print(f"{path}: paired", flush=True)
+            # Let the keyboard reconnect without authorization, as after a manual pairing.
+            dbus.Interface(self.bus.get_object(BLUEZ, path), PROPERTIES).Set(
+                DEVICE, "Trusted", True)
+
+        def failed(e):
+            self.pairing.discard(address)
+            print(f"{path}: pairing failed: {e.get_dbus_message()}", flush=True)
+
+        device.Pair(reply_handler=paired, error_handler=failed, timeout=PAIR_TIMEOUT)
+
+    def find(self, address):
+        for path, interfaces in self.objects().items():
+            device = interfaces.get(DEVICE)
+            if device and device.get("Address") == address:
+                return path, device
+        return None, None
+
+    def adapter(self):
+        path = next((p for p, i in self.objects().items()
+                     if i.get(ADAPTER, {}).get("Powered")), None)
+        return dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER) if path else None
+
+    def objects(self):
+        manager = dbus.Interface(self.bus.get_object(BLUEZ, "/"), OBJECT_MANAGER)
+        return manager.GetManagedObjects()
+
+    def bluez_owner(self, owner):
+        self.bluez = bool(owner)
+        self.discovering = None
+        self.pairing.clear()
+        if not owner:
+            return
+        try:
+            dbus.Interface(self.bus.get_object(BLUEZ, "/org/bluez"), AGENT_MANAGER) \
+                .RegisterAgent(AGENT_PATH, "NoInputNoOutput")
+        except dbus.exceptions.DBusException as e:
+            print(f"agent: {e.get_dbus_message()}", flush=True)
+        self.check_attached()
+
+    def check_attached(self):
+        """Handle a keyboard attached before BlueZ, its adapter or this service started."""
+        for address in attached_keyboards():
+            self.attached(address)
+
+
+def main():
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    KeyboardManager(dbus.SystemBus())
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

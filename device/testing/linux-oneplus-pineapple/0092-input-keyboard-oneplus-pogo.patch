@@ -70,10 +70,10 @@ index 60bb7baf8..1adcaf313 100644
  obj-$(CONFIG_KEYBOARD_PXA27x)		+= pxa27x_keypad.o
 diff --git a/drivers/input/keyboard/oneplus-pogo-keyboard.c b/drivers/input/keyboard/oneplus-pogo-keyboard.c
 new file mode 100644
-index 000000000..195ca0c5a
+index 000000000..7b4b147b6
 --- /dev/null
 +++ b/drivers/input/keyboard/oneplus-pogo-keyboard.c
-@@ -0,0 +1,1315 @@
+@@ -0,0 +1,1390 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * OnePlus pogo pin keyboard
@@ -582,6 +582,35 @@ index 000000000..195ca0c5a
 +	return "OnePlus Pogo Keyboard";
 +}
 +
++/*
++ * Tell userspace about attach, detach and touchpad on/off: a Bluetooth helper
++ * bonds the keyboard by its address, as stock does on attach.
++ */
++static void pogo_send_uevent(struct pogo *pogo)
++{
++	char present[24], addr[40], touchpad[32];
++	char *envp[] = { present, addr, touchpad, NULL };
++
++	snprintf(present, sizeof(present), "KEYBOARD_PRESENT=%d",
++		 pogo->state == POGO_CONNECTED);
++	snprintf(addr, sizeof(addr), "KEYBOARD_ADDRESS=%pMR", pogo->mac);
++	snprintf(touchpad, sizeof(touchpad), "TOUCHPAD_DISABLED=%d",
++		 pogo->touchpad_disabled);
++	kobject_uevent_env(&pogo->dev->kobj, KOBJ_CHANGE, envp);
++}
++
++/* Caller holds lock */
++static void pogo_set_touchpad_disabled(struct pogo *pogo, u8 disabled)
++{
++	if (pogo->touchpad_disabled == disabled)
++		return;
++
++	pogo->touchpad_disabled = disabled;
++	dev_dbg(pogo->dev, "touchpad %s\n", disabled ? "disabled" : "enabled");
++	if (pogo->state == POGO_CONNECTED)
++		pogo_send_uevent(pogo);
++}
++
 +static void pogo_unregister_inputs(struct pogo *pogo)
 +{
 +	if (pogo->touchpad) {
@@ -833,6 +862,8 @@ index 000000000..195ca0c5a
 +/* Caller holds lock */
 +static void pogo_power_off(struct pogo *pogo)
 +{
++	bool connected = pogo->state == POGO_CONNECTED;
++
 +	pogo_unregister_inputs(pogo);
 +	gpiod_set_value_cansleep(pogo->power_gpio, 0);
 +	pogo->last_status_len = 0;
@@ -841,6 +872,9 @@ index 000000000..195ca0c5a
 +		pogo_start_detect(pogo, true);
 +	else
 +		pogo_arm_irq(pogo);
++
++	if (connected)
++		pogo_send_uevent(pogo);
 +}
 +
 +static void pogo_detect_work(struct work_struct *work)
@@ -938,6 +972,7 @@ index 000000000..195ca0c5a
 +		pogo->last_rx = jiffies;
 +		dev_info(pogo->dev, "%s attached, address %pMR\n",
 +			 pogo->keyboard->name, pogo->mac);
++		pogo_send_uevent(pogo);
 +	}
 +
 +	pogo_query_version(pogo);
@@ -964,11 +999,8 @@ index 000000000..195ca0c5a
 +
 +		pogo->brand = q[0];
 +		memcpy(pogo->mac, q + 1, sizeof(pogo->mac));
-+		if (q + 7 < p + len && pogo->touchpad_disabled != q[7]) {
-+			pogo->touchpad_disabled = q[7];
-+			dev_dbg(pogo->dev, "touchpad %s\n",
-+				q[7] ? "disabled" : "enabled");
-+		}
++		if (q + 7 < p + len)
++			pogo_set_touchpad_disabled(pogo, q[7]);
 +	} else if (!power_up) {
 +		return;
 +	}
@@ -1007,8 +1039,7 @@ index 000000000..195ca0c5a
 +		break;
 +	case POGO_GENERAL_TOUCHPAD_STATE:
 +		if (len >= 3)
-+			dev_dbg(pogo->dev, "touchpad %s\n",
-+				p[2] ? "disabled" : "enabled");
++			pogo_set_touchpad_disabled(pogo, p[2]);
 +		break;
 +	}
 +}
@@ -1124,6 +1155,49 @@ index 000000000..195ca0c5a
 +	.receive_buf = pogo_receive_buf,
 +	.write_wakeup = serdev_device_write_wakeup,
 +};
++
++static ssize_t present_show(struct device *dev, struct device_attribute *attr,
++			    char *buf)
++{
++	struct pogo *pogo = dev_get_drvdata(dev);
++
++	guard(mutex)(&pogo->lock);
++
++	return sysfs_emit(buf, "%d\n", pogo->state == POGO_CONNECTED);
++}
++static DEVICE_ATTR_RO(present);
++
++static ssize_t address_show(struct device *dev, struct device_attribute *attr,
++			    char *buf)
++{
++	struct pogo *pogo = dev_get_drvdata(dev);
++
++	guard(mutex)(&pogo->lock);
++	if (pogo->state != POGO_CONNECTED)
++		return sysfs_emit(buf, "\n");
++
++	return sysfs_emit(buf, "%pMR\n", pogo->mac);
++}
++static DEVICE_ATTR_RO(address);
++
++static ssize_t touchpad_disabled_show(struct device *dev,
++				      struct device_attribute *attr, char *buf)
++{
++	struct pogo *pogo = dev_get_drvdata(dev);
++
++	guard(mutex)(&pogo->lock);
++
++	return sysfs_emit(buf, "%d\n", pogo->touchpad_disabled);
++}
++static DEVICE_ATTR_RO(touchpad_disabled);
++
++static struct attribute *pogo_attrs[] = {
++	&dev_attr_present.attr,
++	&dev_attr_address.attr,
++	&dev_attr_touchpad_disabled.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(pogo);
 +
 +static irqreturn_t pogo_detect_irq(int irq, void *data)
 +{
@@ -1382,6 +1456,7 @@ index 000000000..195ca0c5a
 +	.driver = {
 +		.name = "oneplus-pogo-keyboard",
 +		.of_match_table = pogo_of_match,
++		.dev_groups = pogo_groups,
 +		.pm = pm_sleep_ptr(&pogo_pm_ops),
 +	},
 +};

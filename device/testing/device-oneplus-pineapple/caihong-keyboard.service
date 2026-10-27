@@ -1,0 +1,11 @@
+[Unit]
+Description=OnePlus Pad 2 keyboard Bluetooth bonding on attach
+After=bluetooth.service
+
+[Service]
+ExecStart=/usr/libexec/caihong-keyboard
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=bluetooth.target
