@@ -1,15 +1,15 @@
 maintainer=""
 pkgname=firmware-oneplus-pineapple
 pkgver=1
-pkgrel=10
+pkgrel=14
 _commit="e5f0b275675db29de8c88972cc5246d89f1c9bce"
 pkgdesc="Firmware files for OnePlus pineapple and pineapplep"
 url="https://github.com/RubyLegend/firmware-oneplus-pineapple"
 arch="aarch64"
 depends="linux-firmware-ath12k linux-firmware-qcom wireless-regdb"
 license="proprietary"
-makedepends="alsa-utils"
-subpackages="$pkgname-sensors"
+makedepends="alsa-utils binutils-arm-none-eabi python3"
+subpackages="$pkgname-sensors $pkgname-keyboard:keyboard"
 source="
 	$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz 
 	0001-gpu-firmware.files
@@ -23,6 +23,11 @@ source="
 	caihong-topology.txt
 	caihong-sensors.tar.gz
 	caihong-sensors.txt
+	kbd-dfu
+	kbd-dfu-search_f4.S
+	kbd-dfu-build-patch.py
+	KA026_A_1.5.2_TP_A_0B.bin
+	KA026_A_1.5.7_TP_A_0D.bin
 	"
 options="!check !strip !archcheck !spdx !tracedeps pmb:cross-native"
 builddir="$srcdir/firmware-oneplus-pineapple-$_commit"
@@ -30,6 +35,15 @@ builddir="$srcdir/firmware-oneplus-pineapple-$_commit"
 build() {
 	cd "$srcdir/caihong-topology"
 	ALSA_CONFIG_TPLG="$srcdir/caihong-topology" alsatplg -c topology.conf -o OnePlus-Pad-2-tplg.bin
+
+	# Stock 1.5.7 keyboard firmware with Search + touchpad toggle key not
+	# toggling the touchpad; patch-s1 is the BLE Model Number marker.
+	cd "$srcdir"
+	arm-none-eabi-as -o search_f4.o kbd-dfu-search_f4.S
+	arm-none-eabi-objcopy -O binary search_f4.o search_f4.bin
+	python3 kbd-dfu-build-patch.py KA026_A_1.5.7_TP_A_0D.bin search_f4.bin \
+		KA026_A_1.5.7_TP_A_0D-search-f4.bin patch-s1
+	python3 kbd-dfu inspect KA026_A_1.5.7_TP_A_0D-search-f4.bin
 }
 
 package() {
@@ -86,6 +100,15 @@ sensors() {
 		"$subpkgdir/usr/share/doc/$subpkgname/caihong-sensors.txt"
 }
 
+keyboard() {
+	pkgdesc="OnePlus Pad Pro Keyboard firmware (stock and patched) and kbd-dfu updater"
+	depends="bluez python3 py3-dbus py3-gobject3"
+	install -Dm755 "$srcdir/kbd-dfu" "$subpkgdir/usr/bin/kbd-dfu"
+	for fw in KA026_A_1.5.2_TP_A_0B KA026_A_1.5.7_TP_A_0D KA026_A_1.5.7_TP_A_0D-search-f4; do
+		install -Dm644 "$srcdir/$fw.bin" "$subpkgdir/usr/share/kbd-dfu/$fw.bin"
+	done
+}
+
 sha512sums="
 e6d46ca82dc9de1119af35cfdcde14ae139c34fa31e727deee352a93adaa0fea6e6af96ad5c58e008990184ecb067b80c9452df4a67620a00e4d7a8b929089ba  firmware-oneplus-pineapple-e5f0b275675db29de8c88972cc5246d89f1c9bce.tar.gz
 dd22390e0ef5053fe19785db48ea7d2e7e580b4e753a01b727badee1d6b37f5e0c9d0a5297f44836e9881e546956f5a86d37ae42a0b706c70c03b805289b3bd0  0001-gpu-firmware.files
@@ -99,4 +122,9 @@ e55224c432f44688c9f6fe2e4748b9bcb09aaf8b38a2938cb9c8588ffa1a13532b06ab7b3ea2cc9b
 eb30c0d7e60bb4c39a9cb8028c5dab7db25123c6ffca0b1592fd5afbaf96e7a0d3f5eba0fac5c792a7898339d6357f54d13f1b7c89e5c08b1ee3f4cfb043156e  caihong-topology.txt
 f1f7c3180065eace4996f59333dc947cd14a4581b82e00d8fad0366b19e7e3d3ef2ab84639576cb8dfa95913b44e10b470baa36064e99d96e328934367d116f3  caihong-sensors.tar.gz
 99210dce6cd231ce32534a8b7d4973a078543336eb7c437a80420c4801fa984f82cd6cf21d09b4470ecb5d0b7f5d63432a58c497e30201f674781a1704202aed  caihong-sensors.txt
+a1a60ab0b4e028edacde480a6beb06be0075d30c087a9a29ea9f3059909ad96afa55ab08ceda2f22d492e533737444d82d5b855412671033ae5600e528d38ec7  kbd-dfu
+0b343d19d6778e01e552bbecf3404d282525c20c7ba76b45af58235c410bd714b09ef1125927b31c38dd57a3b4a410dcd04b54763a45c43d3f99245cfb8c9c43  kbd-dfu-search_f4.S
+1eca6743302cc56eb96700a70a817b99823a7f6d86e9ca159f4d5d482c064a222d42c7e4805ffbfa551d1bd34ba5a9201145e883571c1a073e6cb5edeba00e81  kbd-dfu-build-patch.py
+ba72b7ae96bf93626d361c8c593064e6aa0c90acbbf4ad69fab962ac90bab89b59e817c833086778010eee8948553fc6b437483b07e3f8480465c7f7f1c26dca  KA026_A_1.5.2_TP_A_0B.bin
+a80c01049cbfc810f689eef18fddfdd4cda396efc8076cc7f7d05d1f87d130939326fa52fb72c9deb3797570fa4cb38c9f0688dabcd4db1b35d7d6b91a6987cc  KA026_A_1.5.7_TP_A_0D.bin
 "

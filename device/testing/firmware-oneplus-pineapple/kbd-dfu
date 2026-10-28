@@ -1,0 +1,762 @@
+#!/usr/bin/python3
+"""Firmware updater for the OnePlus Pad Pro Keyboard (KA026) over Bluetooth LE.
+
+The keyboard MCU is updated over Nordic Secure DFU (service 0xFE59), the
+touchpad over the keyboard's vendor service. Both follow OPlus IPeManager and
+the keyboard's 1.5.7 firmware, as reverse-engineered.
+"""
+
+import argparse
+import binascii
+import hashlib
+import os
+import struct
+import sys
+import zlib
+
+FIRMWARE_DIR = "/usr/share/kbd-dfu"
+
+EPILOG = f"""\
+FILE is a path or the name of a container in {FIRMWARE_DIR} (see list).
+
+probe and flash need the keyboard detached and connected over Bluetooth;
+list and inspect run anywhere. probe changes nothing on the keyboard.
+
+flash updates the touchpad first, then the keyboard itself, as OxygenOS does.
+The keyboard skips a touchpad image of the version the touchpad already has.
+A transfer that stops before the keyboard has checked the whole image leaves
+the current firmware in place; kbd-dfu says when the result is unknown.
+"""
+
+DFU_SERVICE = "0000fe59-0000-1000-8000-00805f9b34fb"
+CONTROL_POINT = "8ec90001-f315-4f60-9fb8-838830daea50"
+PACKET = "8ec90002-f315-4f60-9fb8-838830daea50"
+FIRMWARE_STRING = "00000003-0000-1000-8000-00805f9b34fb"  # under DFU_SERVICE
+DEVICE_INFO = "0000180a-0000-1000-8000-00805f9b34fb"
+# " " on stock, the marker of images built by kbd-dfu-build-patch.py
+MODEL_NUMBER = "00002a24-0000-1000-8000-00805f9b34fb"
+VENDOR_SERVICE = "5768d878-b436-11ee-a506-0242ac120002"  # also identifies the keyboard
+VENDOR_WRITE = "5768da9e-b436-11ee-a506-0242ac120002"
+VENDOR_NOTIFY = "5768dd00-b436-11ee-a506-0242ac120002"
+
+# DFU control point
+OP_CREATE, OP_SET_PRN, OP_CRC, OP_EXECUTE, OP_SELECT = 0x01, 0x02, 0x03, 0x04, 0x06
+OP_END_SESSION = 0x0C  # Nordic Abort; unsupported here, so the keyboard ends the session
+OBJ_COMMAND, OBJ_DATA = 0x01, 0x02
+OBJ_NAMES = {OBJ_COMMAND: "command", OBJ_DATA: "data"}
+COMMAND_MAX = 128  # DFU_COMMAND_OBJ_MAX_SIZE
+RESPONSE = 0x60
+SUCCESS, NOT_SUPPORTED = 0x01, 0x02
+RESULTS = {
+    0x01: "success", 0x02: "opcode not supported", 0x03: "invalid parameter",
+    0x04: "insufficient resources", 0x05: "invalid object", 0x07: "unsupported type",
+    0x08: "operation not permitted", 0x0A: "operation failed",
+}
+APP_PACKET_SIZE = 507  # what IPeManager sends; capped at ATT MTU - 3 here
+CREATE_DATA_TIMEOUT = 30.0  # Create of the data object erases flash first
+
+# Touchpad update over the vendor service: frames 05 cmd len payload sum8,
+# replies 06 cmd len payload sum8 (sub_40B330 in the 1.5.7 MCU image)
+TP_FRAME, TP_REPLY = 0x05, 0x06
+TP_VERSION, TP_DATA, TP_END, TP_QUERY, TP_RESULT = 1, 2, 3, 4, 5
+TP_SAME, TP_START = 1, 2  # TP_VERSION replies
+TP_SUM_OK = 2  # TP_END reply
+TP_DATA_RESULTS = {1: "ok", 2: "packet out of sequence", 3: "duplicate packet"}
+TP_ERRORS = {  # TP_RESULT codes, from IPeManager; 1.5.7 sends only 1 and 9
+    2: "jump to ST mode failed", 3: "start ISP failed", 4: "chip ID check failed",
+    5: "set 2-byte mode failed", 6: "read firmware info failed", 7: "config check failed",
+    8: "read firmware info offset failed", 9: "writing the touchpad failed",
+}
+TP_CHUNK = 237
+TP_IMAGE_SIZE = 0xF800  # the keyboard's staging area; it writes all of it
+TP_CONFIG_MAGIC_AT, TP_CONFIG_MAGIC = 0xEFC0, b"CFT1"
+TP_VERSION_MAX = 10  # the keyboard copies the string into a 10-byte field
+# Sent instead of the container's version by --force-touchpad. The keyboard
+# compares only strlen(current) bytes. A touchpad it cannot identify reads as
+# "TP_", a prefix of every real version, so it would always be skipped; a
+# string that does not start with "TP_" always differs.
+TP_FORCE_VERSION = "FORCE"
+TP_START_TIMEOUT = 10.0  # TP_VERSION erases 17 flash sectors before replying
+TP_ISP_TIMEOUT = 120.0  # up to four ISP attempts; IPeManager waits 30 s for one
+
+MIN_BATTERY = 11  # IPeManager skips keyboard updates at 10 % or less
+
+DESCRIPTOR_MAGIC = 0x01BFDF55
+TYPE_DESCRIPTOR, TYPE_MCU, TYPE_TOUCHPAD = 1, 2, 4
+TYPE_NAMES = {TYPE_MCU: "keyboard", TYPE_TOUCHPAD: "touchpad"}
+
+
+class Error(Exception):
+    pass
+
+
+class ResultUnknown(Error):
+    """The keyboard got the whole image, but its result was not received."""
+
+
+# Firmware container: big-endian 64-byte header, then one 64-byte entry per
+# image (type, offset, length, SHA-256, version); the images follow.
+
+def parse_container(data):
+    """Return (header, entries); entries are dicts with type, offset, data, version."""
+    if len(data) < 64 or data[3] != 2 or data[7] != 1:
+        raise Error("not a multi-firmware container")
+    header = {"version": data[8], "count": data[9], "digest_type": data[10],
+              "digest": bytes(data[11:43])}
+    entries = []
+    for i in range(1, header["count"] + 1):
+        e = data[i * 64:(i + 1) * 64]
+        if len(e) < 64:
+            raise Error(f"entry {i} truncated")
+        typ, off, length = struct.unpack_from(">HII", e)
+        if off + length > len(data):
+            raise Error(f"entry {i} (type {typ}) exceeds the file")
+        entries.append({"type": typ, "offset": off, "data": bytes(data[off:off + length]),
+                        "digest": bytes(e[10:42]),
+                        "version": bytes(e[43:43 + e[42]]).decode("ascii", "replace")})
+    return header, entries
+
+
+def parse_descriptor(data):
+    """The type-1 entry, sent as the DFU command object."""
+    if len(data) < 12:
+        raise Error("descriptor too short")
+    magic, flags, _, count = struct.unpack_from("<IIHH", data)
+    if magic != DESCRIPTOR_MAGIC:
+        raise Error(f"descriptor magic {magic:#010x}")
+    images = []
+    for i in range(count):
+        off = 12 + 12 * i
+        if off + 12 > len(data):
+            raise Error("descriptor image list truncated")
+        typ, _, crc16, ident, size = struct.unpack_from("<BBHII", data, off)
+        images.append({"type": typ, "crc16": crc16, "id": ident, "size": size})
+    return {"flags": flags, "images": images}
+
+
+def check_touchpad(entry):
+    """Return a list of problems with a type-4 entry."""
+    problems = []
+    image, version = entry["data"], entry["version"]
+    if len(image) != TP_IMAGE_SIZE:
+        problems.append(f"touchpad image is {len(image)} bytes, "
+                        f"the keyboard writes {TP_IMAGE_SIZE}")
+    elif image[TP_CONFIG_MAGIC_AT:TP_CONFIG_MAGIC_AT + 4] != TP_CONFIG_MAGIC:
+        problems.append(f"touchpad image has no {TP_CONFIG_MAGIC.decode()} config at "
+                        f"{TP_CONFIG_MAGIC_AT:#x}")
+    if not version.startswith("TP_") or len(version) > TP_VERSION_MAX:
+        problems.append(f"touchpad version {version!r} is not TP_..., at most "
+                        f"{TP_VERSION_MAX} characters")
+    return problems
+
+
+def check_container(data):
+    """Return (entries, problems); no problems means consistent."""
+    header, entries = parse_container(data)
+    problems = []
+    if hashlib.sha256(data[64:256]).digest() != header["digest"]:
+        problems.append("header digest does not match the entry table")
+    for e in entries:
+        if hashlib.sha256(e["data"]).digest() != e["digest"]:
+            problems.append(f"type {e['type']}: SHA-256 mismatch")
+    by_type = {e["type"]: e for e in entries}
+    if TYPE_TOUCHPAD in by_type:
+        problems += check_touchpad(by_type[TYPE_TOUCHPAD])
+    if TYPE_DESCRIPTOR not in by_type or TYPE_MCU not in by_type:
+        problems.append("missing descriptor or MCU image")
+        return entries, problems
+    try:
+        desc = parse_descriptor(by_type[TYPE_DESCRIPTOR]["data"])
+    except Error as e:
+        problems.append(str(e))
+        return entries, problems
+    mcu = by_type[TYPE_MCU]["data"]
+    if len(by_type[TYPE_DESCRIPTOR]["data"]) > COMMAND_MAX:
+        problems.append(f"descriptor is longer than the keyboard's "
+                        f"{COMMAND_MAX}-byte command object")
+    if len(desc["images"]) != 1:
+        problems.append(f"descriptor lists {len(desc['images'])} images")
+    else:
+        img = desc["images"][0]
+        if img["size"] != len(mcu):
+            problems.append(f"descriptor size {img['size']} != MCU image {len(mcu)}")
+        if img["crc16"] != binascii.crc_hqx(mcu, 0):
+            problems.append("descriptor CRC16 does not match the MCU image")
+        if len(mcu) >= 0x38 and img["id"] != struct.unpack_from("<I", mcu, 0x34)[0]:
+            problems.append("descriptor ID does not match the MCU image header")
+    return entries, problems
+
+
+def firmware_parts(data):
+    """Return {type: entry} of a consistent container."""
+    entries, problems = check_container(data)
+    if problems:
+        raise Error("container is inconsistent: " + "; ".join(problems))
+    return {e["type"]: e for e in entries}
+
+
+def table(rows, indent=""):
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]) - 1)]
+    for r in rows:
+        print(indent + "  ".join([c.ljust(w) for c, w in zip(r, widths)] + [r[-1]]).rstrip())
+
+
+def resolve_firmware(name):
+    """A path, or the name of a packaged container with or without .bin."""
+    if os.path.exists(name):
+        return name
+    if os.sep not in name:
+        for candidate in (name, name + ".bin"):
+            path = os.path.join(FIRMWARE_DIR, candidate)
+            if os.path.exists(path):
+                return path
+    raise Error(f"no file {name!r} and no such container in {FIRMWARE_DIR} (see kbd-dfu list)")
+
+
+def cmd_inspect(args):
+    path = resolve_firmware(args.file)
+    entries, problems = check_container(open(path, "rb").read())
+    print(os.path.basename(path))
+    rows = [[TYPE_NAMES.get(e["type"], f"type {e['type']}"), e["version"],
+             f"{len(e['data'])} bytes"] for e in entries if e["type"] != TYPE_DESCRIPTOR]
+    if rows:
+        table(rows, "  ")
+    print("  checksums and descriptor consistent" if not problems else "  INCONSISTENT:")
+    for p in problems:
+        print(f"    {p}")
+    return 1 if problems else 0
+
+
+def cmd_list(args):
+    try:
+        names = sorted(n for n in os.listdir(FIRMWARE_DIR) if n.endswith(".bin"))
+    except FileNotFoundError:
+        names = []
+    if not names:
+        print(f"no firmware containers in {FIRMWARE_DIR}")
+        return 1
+    for name in names:
+        print(name.removesuffix(".bin"))
+    print("\nflash one with: kbd-dfu flash NAME")
+    return 0
+
+
+# DFU control point
+
+def parse_response(value, opcode):
+    """Return (result, payload) of a control point notification for opcode."""
+    if len(value) < 3 or value[0] != RESPONSE:
+        raise Error(f"unexpected notification {value.hex(' ')}")
+    if value[1] != opcode:
+        raise Error(f"response to opcode {value[1]:#04x}, expected {opcode:#04x}")
+    return value[2], bytes(value[3:])
+
+
+def parse_select(payload):
+    """Return (max_size, offset, crc32) of a Select response."""
+    if len(payload) < 12:
+        raise Error(f"short Select response {payload.hex(' ')}")
+    return struct.unpack_from("<III", payload)
+
+
+def parse_crc(payload):
+    """Return (offset, crc32) of a CRC response or packet receipt."""
+    if len(payload) < 8:
+        raise Error(f"short CRC response {payload.hex(' ')}")
+    return struct.unpack_from("<II", payload)
+
+
+def check(result, what):
+    if result != SUCCESS:
+        raise Error(f"{what}: {RESULTS.get(result, hex(result))}")
+
+
+def check_crc(payload, offset, crc, what):
+    got_offset, got_crc = parse_crc(payload)
+    if (got_offset, got_crc) != (offset, crc):
+        raise Error(f"{what}: keyboard has offset {got_offset}, CRC32 {got_crc:#010x}; "
+                    f"expected {offset}, {crc:#010x}")
+
+
+def send_object(kb, obj, data, packet_size, prn, create_timeout=None, progress=None):
+    """Create an object, send it in packets and check its CRC32.
+
+    With prn, the keyboard sends a receipt every prn packets, which also paces
+    the writes; a mismatch aborts, as the keyboard cannot rewind an object.
+    Unlike touchpad replies, receipts are not matched against duplicates (see
+    upload_touchpad): no other BlueZ client subscribes to the control point."""
+    name = OBJ_NAMES[obj]
+    check(kb.request(bytes([OP_SELECT, obj]))[0], f"Select {name}")
+    check(kb.request(struct.pack("<BBI", OP_CREATE, obj, len(data)),
+                     create_timeout)[0], f"Create {name}")
+    check(kb.request(struct.pack("<BH", OP_SET_PRN, prn))[0], "Set PRN")
+    crc = 0
+    for n, offset in enumerate(range(0, len(data), packet_size), 1):
+        chunk = data[offset:offset + packet_size]
+        crc = zlib.crc32(chunk, crc)
+        kb.send_packet(chunk)
+        if prn and n % prn == 0:
+            result, payload = kb.wait_response(OP_CRC)
+            check(result, "packet receipt")
+            check_crc(payload, offset + len(chunk), crc, "packet receipt")
+        if progress:
+            progress(offset + len(chunk), len(data))
+    result, payload = kb.request(bytes([OP_CRC]))
+    check(result, f"CRC {name}")
+    check_crc(payload, len(data), crc, f"CRC {name}")
+
+
+def upload_mcu(kb, command, image, packet_size, progress=None):
+    """The IPeManager sequence: command object without receipts, data with PRN 1.
+
+    Raise ResultUnknown if Execute of the data object goes unanswered: the
+    keyboard may have switched to the new image already."""
+    send_object(kb, OBJ_COMMAND, command, packet_size, 0)
+    check(kb.request(bytes([OP_EXECUTE]))[0], "Execute command")
+    send_object(kb, OBJ_DATA, image, packet_size, 1, CREATE_DATA_TIMEOUT, progress)
+    try:
+        result = kb.request(bytes([OP_EXECUTE]))[0]
+    except (Error, KeyboardInterrupt) as e:
+        raise ResultUnknown(f"Execute data: {e or 'interrupted'}") from e
+    check(result, "Execute data")
+
+
+# Touchpad update over the vendor service
+
+def tp_frame(cmd, payload):
+    frame = bytes([TP_FRAME, cmd, len(payload)]) + bytes(payload)
+    return frame + bytes([sum(frame) & 0xFF])
+
+
+def parse_tp_reply(value, cmd):
+    """Return the payload of a vendor notification answering cmd, or None for
+    other notifications (such as the touchpad state, 07 01 01 ...)."""
+    if len(value) < 4 or value[0] != TP_REPLY or value[1] != cmd:
+        return None
+    end = 3 + value[2]
+    if len(value) < end + 1:
+        raise Error(f"truncated touchpad reply {value.hex(' ')}")
+    if sum(value[:end]) & 0xFF != value[end]:
+        raise Error(f"touchpad reply checksum mismatch: {value.hex(' ')}")
+    if end == 3:
+        raise Error(f"empty touchpad reply {value.hex(' ')}")
+    return bytes(value[3:end])
+
+
+def tp_version_string(payload):
+    return payload.split(b"\0", 1)[0].decode("ascii", "replace")
+
+
+def upload_touchpad(kb, version, image, force=False, progress=None, status=print):
+    """The IPeManager sequence (c/o.java). Return False if the keyboard reports
+    that the touchpad already has this version, True once it reports success.
+
+    Raise ResultUnknown if the result goes unreported after the image sum was
+    sent: the keyboard starts writing the touchpad once the sum matches."""
+    sent = TP_FORCE_VERSION if force else version
+    reply = kb.tp_request(TP_VERSION, sent.encode("ascii"), TP_START_TIMEOUT)
+    if reply[0] == TP_SAME:
+        return False
+    if reply[0] != TP_START:
+        raise Error(f"touchpad version check: unexpected reply {reply.hex(' ')}")
+    for psn, offset in enumerate(range(0, len(image), TP_CHUNK), 1):
+        chunk = image[offset:offset + TP_CHUNK]
+        # The keyboard echoes the psn of the frame it got. BlueZ repeats each
+        # notification once per StartNotify client (caihong-keyboard-osd also
+        # subscribes), so earlier packets' replies can still arrive here.
+        reply = kb.tp_request(TP_DATA, struct.pack("<H", psn) + chunk,
+                              match=lambda r: len(r) >= 3 and r[0] | r[1] << 8 == psn)
+        result = reply[2]
+        if result != 1:
+            raise Error(f"touchpad packet {psn}: {TP_DATA_RESULTS.get(result, hex(result))}")
+        if progress:
+            progress(offset + len(chunk), len(image))
+    # The app sends len // 237 + 1 as the packet count; the keyboard checks only the sum.
+    end = struct.pack("<HI", len(image) // TP_CHUNK + 1, sum(image) & 0xFFFFFFFF)
+    try:
+        sum_ok = kb.tp_request(TP_END, end)[0] == TP_SUM_OK
+        if sum_ok:
+            status("writing, keep the keyboard nearby")
+            result = kb.tp_wait(TP_RESULT, TP_ISP_TIMEOUT)[0]
+    except (Error, KeyboardInterrupt) as e:
+        raise ResultUnknown(f"touchpad: {e or 'interrupted'}") from e
+    if not sum_ok:
+        raise Error("touchpad image sum rejected by the keyboard; the touchpad was not written")
+    if result != 1:
+        raise Error(f"touchpad update failed: {TP_ERRORS.get(result, hex(result))}")
+    return True
+
+
+class Keyboard:
+    """The keyboard's DFU and vendor services over BlueZ D-Bus."""
+
+    def __init__(self, address=None, timeout=5.0):
+        import dbus
+        import dbus.mainloop.glib
+        from gi.repository import GLib
+        self.dbus, self.GLib = dbus, GLib
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        self.bus = dbus.SystemBus()
+        self.timeout = timeout
+        self.loop = GLib.MainLoop()
+        self.connected = True
+        self.queues = {}  # characteristic path -> notifications
+        self.ifaces = {}
+        self.notifying = []
+        manager = dbus.Interface(self.bus.get_object("org.bluez", "/"),
+                                 "org.freedesktop.DBus.ObjectManager")
+        objects = manager.GetManagedObjects()
+        self.device, dev = self.find_device(objects, address)
+        self.name, self.address = str(dev.get("Name", "?")), str(dev.get("Address", "?"))
+        battery = objects[self.device].get("org.bluez.Battery1", {})
+        self.battery = int(battery["Percentage"]) if "Percentage" in battery else None
+        self.chars = self.find_characteristics(objects)
+        for uuid in (CONTROL_POINT, PACKET):
+            if uuid not in self.chars:
+                raise Error(f"DFU characteristic {uuid} not found")
+        # BlueZ >= 5.62 reports the ATT MTU
+        self.mtus = {uuid: int(objects[path]["org.bluez.GattCharacteristic1"].get("MTU", 23))
+                     for uuid, path in self.chars.items()}
+        self.bus.add_signal_receiver(self.changed, "PropertiesChanged",
+                                     "org.freedesktop.DBus.Properties", "org.bluez",
+                                     path_keyword="path")
+
+    @staticmethod
+    def find_device(objects, address):
+        """Return (path, properties) of the connected keyboard: the device at
+        address, or else the one with the keyboard's vendor service."""
+        known = []
+        for path, ifaces in objects.items():
+            dev = ifaces.get("org.bluez.Device1")
+            if not dev:
+                continue
+            if address:
+                if str(dev.get("Address", "")).lower() == address.lower():
+                    known.append((str(path), dev))
+            elif VENDOR_SERVICE in [str(u) for u in dev.get("UUIDs", [])]:
+                known.append((str(path), dev))
+        if not known:
+            raise Error(f"BlueZ knows no device {address}" if address
+                        else "BlueZ knows no OnePlus keyboard; pair it first")
+        found = [(p, d) for p, d in known if d.get("Connected") and d.get("ServicesResolved")]
+        if not found:
+            raise Error("keyboard is not connected; detach it and press a few keys")
+        if len(found) > 1:
+            names = ", ".join(f"{d.get('Address')} ({d.get('Name')})" for _, d in found)
+            raise Error(f"several keyboards connected, pick one with --device: {names}")
+        return found[0]
+
+    def find_characteristics(self, objects):
+        """Return {UUID: path} of the characteristics of the services used here."""
+        services = {str(path) for path, ifaces in objects.items()
+                    if str(path).startswith(self.device + "/")
+                    and str(ifaces.get("org.bluez.GattService1", {}).get("UUID"))
+                    in (DFU_SERVICE, VENDOR_SERVICE, DEVICE_INFO)}
+        chars = {}
+        for path, ifaces in objects.items():
+            c = ifaces.get("org.bluez.GattCharacteristic1")
+            if c and str(c.get("Service")) in services:
+                chars[str(c["UUID"])] = str(path)
+        return chars
+
+    def char(self, uuid):
+        if uuid not in self.ifaces:
+            self.ifaces[uuid] = self.dbus.Interface(
+                self.bus.get_object("org.bluez", self.chars[uuid]),
+                "org.bluez.GattCharacteristic1")
+        return self.ifaces[uuid]
+
+    def changed(self, interface, changed, invalidated, path=None):
+        if interface == "org.bluez.GattCharacteristic1" and "Value" in changed:
+            if path in self.queues:
+                self.queues[path].append(bytes(changed["Value"]))
+        elif interface == "org.bluez.Device1" and path == self.device:
+            if not changed.get("Connected", True):
+                self.connected = False
+        else:
+            return
+        self.loop.quit()
+
+    def read(self, uuid):
+        if uuid not in self.chars:
+            return None
+        return bytes(self.char(uuid).ReadValue({}))
+
+    def has_touchpad_service(self):
+        return VENDOR_WRITE in self.chars and VENDOR_NOTIFY in self.chars
+
+    def describe(self):
+        """Return table rows of what the keyboard reports about itself."""
+        info = self.read(FIRMWARE_STRING)
+        firmware = info.rstrip(b"\0").decode("ascii", "replace") if info is not None else "unknown"
+        model = self.read(MODEL_NUMBER)
+        if model is not None and model.strip():
+            firmware += f", model number {model.decode('ascii', 'replace')}"
+        touchpad = "unknown"
+        if self.has_touchpad_service():
+            self.start(VENDOR_NOTIFY)
+            touchpad = tp_version_string(self.tp_request(TP_QUERY, b""))
+        rows = [["Keyboard", f"{self.name} ({self.address})"],
+                ["Firmware", firmware],
+                ["Touchpad", touchpad]]
+        if self.battery is not None:
+            rows.append(["Battery", f"{self.battery} %"])
+        return rows
+
+    def check_battery(self):
+        if self.battery is None:
+            print("warning: BlueZ reports no battery level; make sure the keyboard is charged",
+                  file=sys.stderr)
+        elif self.battery < MIN_BATTERY:
+            raise Error(f"keyboard battery at {self.battery} %; charge it first "
+                        f"(at least {MIN_BATTERY} %)")
+
+    def start(self, uuid):
+        self.queues.setdefault(self.chars[uuid], [])
+        self.char(uuid).StartNotify()
+        self.notifying.append(uuid)
+
+    def stop(self):
+        while self.notifying:
+            try:
+                self.char(self.notifying.pop()).StopNotify()
+            except self.dbus.exceptions.DBusException:
+                pass
+
+    def write(self, uuid, payload, kind):
+        self.char(uuid).WriteValue(self.dbus.Array(payload, signature="y"), {"type": kind})
+
+    def wait(self, uuid, accept, what, timeout=None):
+        """Return accept(value) for the first notification of uuid for which it
+        is not None. accept may raise on an unexpected notification."""
+        queue = self.queues[self.chars[uuid]]
+
+        def timed_out():
+            nonlocal timer
+            timer = None
+            self.loop.quit()
+            return False
+
+        timer = self.GLib.timeout_add(int((timeout or self.timeout) * 1000), timed_out)
+        try:
+            while True:
+                # Signals are dispatched only from the main loop, so a
+                # notification that arrived during the write is queued by now.
+                while queue:
+                    result = accept(queue.pop(0))
+                    if result is not None:
+                        return result
+                if not self.connected:
+                    raise Error(f"keyboard disconnected while waiting for {what}")
+                if timer is None:
+                    raise Error(f"no {what}")
+                self.loop.run()
+        finally:
+            if timer is not None:
+                self.GLib.source_remove(timer)
+
+    # DFU control point
+    def request(self, payload, timeout=None):
+        """Write to the control point and wait for its response notification."""
+        self.queues[self.chars[CONTROL_POINT]].clear()
+        self.write(CONTROL_POINT, payload, "request")
+        return self.wait_response(payload[0], timeout)
+
+    def wait_response(self, opcode, timeout=None):
+        return self.wait(CONTROL_POINT, lambda v: parse_response(v, opcode),
+                         f"response to opcode {opcode:#04x}", timeout)
+
+    def send_packet(self, payload):
+        self.write(PACKET, payload, "command")
+
+    def end_session(self):
+        """End the DFU session with an unsupported opcode, which the keyboard
+        handles as a failed update: no reboot. Return its result, or None."""
+        try:
+            return self.request(bytes([OP_END_SESSION]))[0]
+        except Exception as e:
+            print(f"kbd-dfu: ending the DFU session failed: {e}", file=sys.stderr)
+            return None
+
+    # Vendor service
+    def tp_request(self, cmd, payload, timeout=None, match=None):
+        self.queues[self.chars[VENDOR_NOTIFY]].clear()
+        self.write(VENDOR_WRITE, tp_frame(cmd, payload), "command")
+        return self.tp_wait(cmd, timeout, match)
+
+    def tp_wait(self, cmd, timeout=None, match=None):
+        """Return the payload of the next reply to cmd for which match is true."""
+        def accept(value):
+            reply = parse_tp_reply(value, cmd)
+            return reply if reply is not None and (match is None or match(reply)) else None
+        return self.wait(VENDOR_NOTIFY, accept, f"touchpad reply to command {cmd}", timeout)
+
+
+def cmd_probe(args):
+    kb = Keyboard(args.device)
+    try:
+        rows = kb.describe()
+        kb.start(CONTROL_POINT)
+        selects = []
+        try:
+            for obj in (OBJ_COMMAND, OBJ_DATA):
+                result, payload = kb.request(bytes([OP_SELECT, obj]))
+                check(result, f"Select {OBJ_NAMES[obj]}")
+                selects.append((OBJ_NAMES[obj],) + parse_select(payload))
+        finally:
+            result = kb.end_session()
+        partial = [f"{name} object at {offset} bytes" for name, _, offset, _ in selects if offset]
+        rows.append(["DFU", "responds" + (f", unfinished {', '.join(partial)}" if partial else "")])
+        table(rows)
+        if args.verbose:
+            for name, max_size, offset, crc in selects:
+                print(f"  select {name}: max size {max_size:#x}, offset {offset}, "
+                      f"CRC32 {crc:#010x}")
+            if result is not None:
+                print(f"  end session: {RESULTS.get(result, hex(result))}")
+        if result is not None and result != NOT_SUPPORTED:
+            print(f"warning: the keyboard answered the end of the DFU session with "
+                  f"{RESULTS.get(result, hex(result))}, not opcode not supported", file=sys.stderr)
+    finally:
+        kb.stop()
+    return 0
+
+
+def progress_printer(label):
+    """Print label, then every 10 % on the same line."""
+    last = -10
+    print(f"{label}:", end="", flush=True)
+
+    def progress(done, total):
+        nonlocal last
+        pct = done * 100 // total
+        if pct >= last + 10 or done == total:
+            last = pct - pct % 10
+            print(f" {pct}%", end="\n" if done == total else "", flush=True)
+    return progress
+
+
+def cmd_flash(args):
+    path = resolve_firmware(args.file)
+    parts = firmware_parts(open(path, "rb").read())
+    touchpad = None if args.mcu_only else parts.get(TYPE_TOUCHPAD)
+    mcu = None if args.touchpad_only else parts[TYPE_MCU]
+    if args.touchpad_only and touchpad is None:
+        raise Error("the container has no touchpad image")
+    if args.force_touchpad and touchpad is None:
+        raise Error("--force-touchpad needs a touchpad image to send")
+
+    kb = Keyboard(args.device)
+    try:
+        table(kb.describe())
+        kb.check_battery()
+        if touchpad:
+            if not kb.has_touchpad_service():
+                raise Error("the keyboard has no vendor service for the touchpad update")
+            if kb.mtus[VENDOR_WRITE] - 3 < TP_CHUNK + 6:
+                raise Error(f"ATT MTU {kb.mtus[VENDOR_WRITE]} is too small for touchpad packets")
+        if mcu:
+            packet_size = min(APP_PACKET_SIZE, kb.mtus[PACKET] - 3)
+        print(f"\nFlashing {os.path.basename(path).removesuffix('.bin')}:")
+        rows = []
+        if touchpad:
+            rows.append(["touchpad", touchpad["version"],
+                         "(always sent)" if args.force_touchpad
+                         else "(skipped if already installed)"])
+        if mcu:
+            rows.append(["keyboard", mcu["version"], ""])
+        table(rows, "  ")
+        if not args.yes:
+            try:
+                answer = input("Type yes to continue: ")
+            except EOFError:
+                answer = ""
+            if answer.strip() != "yes":
+                print("Not flashed.")
+                return 1
+
+        if touchpad:
+            try:
+                progress = progress_printer("Touchpad")
+                if upload_touchpad(kb, touchpad["version"], touchpad["data"], args.force_touchpad,
+                                   progress, lambda s: print(f"Touchpad: {s}...", flush=True)):
+                    print(f"Touchpad: {touchpad['version']} installed")
+                else:
+                    print(f" {touchpad['version']} already installed, skipped")
+            except BaseException as e:
+                print("", file=sys.stderr)
+                if isinstance(e, ResultUnknown):
+                    print("kbd-dfu: the touchpad may have been written. Once the keyboard is "
+                          "connected, check its version with kbd-dfu probe, and flash again if "
+                          "it is not the new one.", file=sys.stderr)
+                if mcu:
+                    print("kbd-dfu: the keyboard firmware was not sent", file=sys.stderr)
+                raise
+        if mcu:
+            kb.start(CONTROL_POINT)
+            try:
+                upload_mcu(kb, parts[TYPE_DESCRIPTOR]["data"], mcu["data"], packet_size,
+                           progress_printer("Keyboard"))
+            except ResultUnknown:
+                print("\nkbd-dfu: the keyboard may already have switched to the new firmware; "
+                      "check with kbd-dfu probe once it reconnects", file=sys.stderr)
+                raise
+            except BaseException:
+                print("", file=sys.stderr)
+                if kb.connected:
+                    kb.end_session()
+                print("kbd-dfu: keyboard firmware not flashed; it keeps running the current one",
+                      file=sys.stderr)
+                raise
+            print("Keyboard: verified; it now reboots into the new firmware and reconnects.")
+            print("Check the result with: kbd-dfu probe")
+    finally:
+        kb.stop()
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=EPILOG,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("list", help=f"list the firmware containers in {FIRMWARE_DIR}")
+    p.set_defaults(func=cmd_list)
+    p = sub.add_parser("inspect", help="check a firmware container")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_inspect)
+    device_help = "Bluetooth address (default: the connected OnePlus keyboard)"
+    p = sub.add_parser("probe", help="read-only probe of the connected keyboard")
+    p.add_argument("--device", help=device_help)
+    p.add_argument("-v", "--verbose", action="store_true", help="also print the DFU object state")
+    p.set_defaults(func=cmd_probe)
+    p = sub.add_parser("flash", help="update the keyboard's touchpad and MCU from a container")
+    p.add_argument("file", help=f"container path or name in {FIRMWARE_DIR}")
+    p.add_argument("--device", help=device_help)
+    p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    only = p.add_mutually_exclusive_group()
+    only.add_argument("--mcu-only", action="store_true", help="do not update the touchpad")
+    only.add_argument("--touchpad-only", action="store_true", help="do not update the MCU")
+    p.add_argument("--force-touchpad", action="store_true",
+                   help="recovery: always send the touchpad image (same version: "
+                        "written four times and reported as failed)")
+    p.set_defaults(func=cmd_flash)
+    args = parser.parse_args()
+    if getattr(args, "force_touchpad", False) and args.mcu_only:
+        parser.error("--force-touchpad and --mcu-only exclude each other")
+    try:
+        return args.func(args)
+    except Error as e:
+        print(f"kbd-dfu: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("kbd-dfu: interrupted", file=sys.stderr)
+        return 130
+    except Exception as e:
+        if type(e).__name__ != "DBusException":  # dbus is imported only for the keyboard
+            raise
+        print(f"kbd-dfu: {e.get_dbus_name()}: {e.get_dbus_message()}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
