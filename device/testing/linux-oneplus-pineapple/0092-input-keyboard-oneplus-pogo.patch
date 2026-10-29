@@ -70,10 +70,10 @@ index 60bb7baf8..1adcaf313 100644
  obj-$(CONFIG_KEYBOARD_PXA27x)		+= pxa27x_keypad.o
 diff --git a/drivers/input/keyboard/oneplus-pogo-keyboard.c b/drivers/input/keyboard/oneplus-pogo-keyboard.c
 new file mode 100644
-index 000000000..7b4b147b6
+index 000000000..d308c16b7
 --- /dev/null
 +++ b/drivers/input/keyboard/oneplus-pogo-keyboard.c
-@@ -0,0 +1,1390 @@
+@@ -0,0 +1,1450 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * OnePlus pogo pin keyboard
@@ -84,6 +84,10 @@ index 000000000..7b4b147b6
 + * the tablet then powers it, and the keyboard sends framed keyboard, consumer
 + * and touchpad reports plus a heartbeat every 100 ms. The tablet drives a
 + * transceiver enable line while it transmits.
++ *
++ * An optional tablet mode switch reports whether a keyboard is attached, so
++ * desktops can switch to their touch layout and auto-rotation when it is
++ * detached.
 + *
 + * Written from the OnePlus downstream driver (oplus_bsp_pogo_keyboard).
 + */
@@ -190,6 +194,14 @@ index 000000000..7b4b147b6
 +#define POGO_REPLY_TIMEOUT_MS		100
 +#define POGO_RETRIES			3
 +#define POGO_LED_DELAY_MS		15
++
++/*
++ * Off by default: with the switch, report tablet mode when detached.
++ */
++static bool tablet_mode_switch;
++module_param(tablet_mode_switch, bool, 0444);
++MODULE_PARM_DESC(tablet_mode_switch,
++		 "Report SW_TABLET_MODE while no keyboard is attached");
 +
 +#define POGO_KEY(usage, key)	{ KE_KEY, POGO_KEY_SCAN(usage), { key } }
 +#define POGO_CONSUMER(usage, key) { KE_KEY, POGO_CONSUMER_SCAN(usage), { key } }
@@ -348,8 +360,10 @@ index 000000000..7b4b147b6
 +
 +	struct input_dev *keyboard;
 +	struct input_dev *touchpad;
++	struct input_dev *tablet_switch;
 +	char keyboard_phys[64];
 +	char touchpad_phys[64];
++	char switch_phys[64];
 +	char touchpad_name[64];
 +
 +	/* Reply to the pending pogo_command(), protected by lock */
@@ -609,6 +623,17 @@ index 000000000..7b4b147b6
 +	dev_dbg(pogo->dev, "touchpad %s\n", disabled ? "disabled" : "enabled");
 +	if (pogo->state == POGO_CONNECTED)
 +		pogo_send_uevent(pogo);
++}
++
++/* Caller holds lock */
++static void pogo_report_tablet_mode(struct pogo *pogo)
++{
++	if (!pogo->tablet_switch)
++		return;
++
++	input_report_switch(pogo->tablet_switch, SW_TABLET_MODE,
++			    pogo->state != POGO_CONNECTED);
++	input_sync(pogo->tablet_switch);
 +}
 +
 +static void pogo_unregister_inputs(struct pogo *pogo)
@@ -873,6 +898,7 @@ index 000000000..7b4b147b6
 +	else
 +		pogo_arm_irq(pogo);
 +
++	pogo_report_tablet_mode(pogo);
 +	if (connected)
 +		pogo_send_uevent(pogo);
 +}
@@ -972,6 +998,7 @@ index 000000000..7b4b147b6
 +		pogo->last_rx = jiffies;
 +		dev_info(pogo->dev, "%s attached, address %pMR\n",
 +			 pogo->keyboard->name, pogo->mac);
++		pogo_report_tablet_mode(pogo);
 +		pogo_send_uevent(pogo);
 +	}
 +
@@ -1244,6 +1271,30 @@ index 000000000..7b4b147b6
 +	gpiod_set_value_cansleep(pogo->power_gpio, 0);
 +}
 +
++/* Tablet mode until a keyboard connects */
++static int pogo_register_tablet_switch(struct pogo *pogo)
++{
++	struct input_dev *input;
++	int ret;
++
++	input = devm_input_allocate_device(pogo->dev);
++	if (!input)
++		return -ENOMEM;
++
++	input->name = "OnePlus Pogo Tablet Mode Switch";
++	input->phys = pogo->switch_phys;
++	input->id.bustype = BUS_HOST;
++	input_set_capability(input, EV_SW, SW_TABLET_MODE);
++	__set_bit(SW_TABLET_MODE, input->sw);
++
++	ret = input_register_device(input);
++	if (ret)
++		return ret;
++	pogo->tablet_switch = input;
++
++	return 0;
++}
++
 +static int pogo_probe(struct serdev_device *serdev)
 +{
 +	struct device *dev = &serdev->dev;
@@ -1276,6 +1327,8 @@ index 000000000..7b4b147b6
 +		 "%s/input0", dev_name(dev));
 +	snprintf(pogo->touchpad_phys, sizeof(pogo->touchpad_phys),
 +		 "%s/input1", dev_name(dev));
++	snprintf(pogo->switch_phys, sizeof(pogo->switch_phys),
++		 "%s/input2", dev_name(dev));
 +
 +	ret = device_property_read_u32_array(dev, "touchpad-size",
 +					     pogo->tp_size, 2);
@@ -1308,6 +1361,13 @@ index 000000000..7b4b147b6
 +	if (pogo->detect_irq < 0)
 +		return dev_err_probe(dev, pogo->detect_irq,
 +				     "failed to get detect IRQ\n");
++
++	if (tablet_mode_switch) {
++		ret = pogo_register_tablet_switch(pogo);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to register tablet mode switch\n");
++	}
 +
 +	ret = devm_add_action_or_reset(dev, pogo_teardown, pogo);
 +	if (ret)

@@ -1,0 +1,3 @@
+# The pogo keyboard driver's switch reports tablet mode. Don't let KWin pick
+and keep a stale guess by disabling its tablet mode heuristic.
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Novatek NT36532 Touchscreen", TAG+="kwin-ignore-tablet-mode"
