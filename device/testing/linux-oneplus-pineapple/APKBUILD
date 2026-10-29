@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=82
+pkgrel=84
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -119,6 +119,7 @@ source="
 	0091-arm64-dts-qcom-caihong-pogo-keyboard.patch
 	0092-input-keyboard-oneplus-pogo.patch
 	0093-power-supply-qcom-battmgr-wake-on-usb-change.patch
+	0094-power-supply-qcom-battmgr-charge-control.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -242,6 +243,7 @@ bbb0faa22f4cfff854f9fb990afa61fa559c318abb566b1dc14e7bf781bdd35af3b6264222134094
 42da55f8998544d92f1a66b0367bc82bea8bd34eb19d38f85d908ad12ddab0b91c6da87b7977c8d7f28175415ad667c55e53bf04665f93b542b9712bba2dccab  0091-arm64-dts-qcom-caihong-pogo-keyboard.patch
 e8c25f5f8122714e66ecd6e108c132f235e59a761f408f155677a544fdb658587e9edb21c3ca00adb932d39f3ab603a73c757e2951114fbc0940c49e3750baaa  0092-input-keyboard-oneplus-pogo.patch
 57e660294eba98cba9195517381f69615a1275d24ef22cb7c16b2108ff2cc5db1b335e672286d0f5545e18dc6beb984c6f68eee6aa368ca1d4782e86523a6012  0093-power-supply-qcom-battmgr-wake-on-usb-change.patch
+8845284f1020f0b9f726c46618bfe1fd907d55f588d63593fa3ba29e581010eeb4411137949d3419f75437361417ed1d3dbb60e1b1bf3b5fab9b10a6ce2ebe4c  0094-power-supply-qcom-battmgr-charge-control.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 8b58ea90ae4352aa8234457faf3aa92f3b481008bda2333a320a09b946860d29f0ac9b64be2145624205219311db7001f46cc6f148ee8e0c773546c191cb7fb9  config-oneplus-pineapple.aarch64
 "

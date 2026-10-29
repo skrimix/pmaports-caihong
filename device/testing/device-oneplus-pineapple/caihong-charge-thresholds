@@ -1,0 +1,27 @@
+#!/bin/sh
+# Keep a battery's charge thresholds across reboots. The kernel starts without a
+# limit, and Plasma writes sysfs directly, expecting firmware to keep the values.
+set -eu
+dir=${CAIHONG_POWER_SUPPLY:-/sys/class/power_supply}/$2
+state=${STATE_DIRECTORY:-/var/lib/caihong-charge-thresholds}/$2
+
+case $1 in
+load)
+	[ -e "$state" ] || exit 0
+	read -r start end < "$state"
+	echo "$end" > "$dir/charge_control_end_threshold"
+	echo "$start" > "$dir/charge_control_start_threshold"
+	echo "restored thresholds $start/$end"
+	;;
+save)
+	start=$(cat "$dir/charge_control_start_threshold")
+	end=$(cat "$dir/charge_control_end_threshold")
+	echo "$start $end" > "$state.tmp"
+	mv "$state.tmp" "$state"
+	echo "saved thresholds $start/$end"
+	;;
+*)
+	echo "usage: $0 load|save BATTERY" >&2
+	exit 2
+	;;
+esac

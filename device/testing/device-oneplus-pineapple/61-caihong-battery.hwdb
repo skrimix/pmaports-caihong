@@ -1,0 +1,3 @@
+# Give the battery a CURRENT_LIMIT, UPower's default entry looks for a DMI string.
+battery:qcom-battmgr-bat:*
+ CHARGE_LIMIT=75,80

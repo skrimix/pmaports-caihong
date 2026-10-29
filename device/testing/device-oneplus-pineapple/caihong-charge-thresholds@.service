@@ -1,0 +1,12 @@
+[Unit]
+Description=Load/save charge thresholds of battery %i
+# UPower 1.91.0 writes its CHARGE_LIMIT once it finds the battery. The saved
+# values already include its last write, so restore after it.
+After=upower.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/caihong-charge-thresholds load %i
+ExecStop=/usr/libexec/caihong-charge-thresholds save %i
+StateDirectory=caihong-charge-thresholds

@@ -1,0 +1,309 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] power: supply: qcom_battmgr: add OnePlus Pad 2 charge thresholds and bypass
+
+The OEM kernel implements its charge limit (chg_up_limit) and bypass
+charging (PLC) as host policy: battery charging is turned off while the
+charger keeps powering the system. Do the same in the PPS and ordinary
+charging policy, and expose it through the standard battery properties
+charge_control_start_threshold, charge_control_end_threshold and
+charge_behaviour (auto, inhibit-charge) with a power supply extension.
+
+Charging stops when the capacity reaches the end threshold and resumes
+when it falls below the start threshold. With a start threshold of 0 or
+one not below the end, charging resumes as soon as the capacity drops
+below the end threshold. An end threshold of 100 means no limit, as in
+the OEM policy. The defaults are 0 and 100, the values UPower expects
+by default and writes to turn its limit off.
+
+inhibit-charge holds the capacity at the level it had when the charger
+was attached or the behaviour was selected, and charges again after a 1%
+drop, as the OEM bypass does on the buck path. Unlike the OEM bypass on
+PPS adapters, it does not keep a low-current PPS session running: a
+running session ends and may restart once charging is released.
+
+While charging is held with a charger attached, the battery status reads
+"Not charging".
+
+The thresholds compare the capacity the battery reports, not the OEM UI
+SOC. The firmware's own threshold properties are not used, as their IDs
+conflict with Oplus controls on this firmware.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 72a1779b0..1ec6d8bff 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -424,6 +424,13 @@ struct qcom_battmgr_pps {
+ 	bool allowed;		/* pps_charging switch */
+ 	bool active;		/* pps_active: from pump setup to exit */
+ 	u32 limit_ma;		/* debugfs pps_limit_ma */
++	/* Charge thresholds and behaviour, written from sysfs */
++	int start_soc, end_soc;
++	bool inhibit;
++	/* Worker state for them */
++	bool held;		/* battery charging held off */
++	bool hold_inhibit;	/* inhibit as last applied */
++	int hold_soc;		/* level kept while inhibited, -1 to capture on next check */
+ 
+ 	int state;
+ 	bool blocked;
+@@ -886,6 +893,10 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 		if (val->intval == POWER_SUPPLY_STATUS_NOT_CHARGING &&
+ 		    READ_ONCE(battmgr->pps.suspended))
+ 			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++		/* Charging held off by the charge limit with a charger attached */
++		else if (val->intval == POWER_SUPPLY_STATUS_CHARGING &&
++			 READ_ONCE(battmgr->pps.held) && READ_ONCE(battmgr->pps.wired.active))
++			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
+ 		val->intval = battmgr->info.charge_type;
+@@ -2159,6 +2170,51 @@ static int qcom_battmgr_pps_next_ma(int curr_set, int target)
+ 	return target;
+ }
+ 
++/*
++ * charge_control_{start,end}_threshold and charge_behaviour, after the OEM
++ * chg_up_limit and bypass (PLC) policies: once the capacity reaches the end
++ * threshold, battery charging stays off while the charger powers the system,
++ * until the capacity falls below the start threshold. A start threshold of 0
++ * or one not below the end resumes charging below the end threshold. An end
++ * threshold of 100 means no limit (charge_limit_value < OPLUS_FULL_SOC).
++ * inhibit-charge lowers the end to the level at charger attach or when it was
++ * selected, so charging resumes after a 1% drop, as the OEM bypass does on
++ * the buck path. Returns whether charging is held.
++ */
++static bool qcom_battmgr_charge_held(struct qcom_battmgr *battmgr, int soc)
++{
++	struct qcom_battmgr_pps *pps = &battmgr->pps;
++	int start = READ_ONCE(pps->start_soc), end = READ_ONCE(pps->end_soc);
++	bool inhibit = READ_ONCE(pps->inhibit), held;
++
++	lockdep_assert_held(&pps->lock);
++
++	if (end >= 100)
++		end = INT_MAX;
++	if (inhibit != pps->hold_inhibit) {
++		pps->hold_inhibit = inhibit;
++		pps->hold_soc = -1;
++	}
++	if (inhibit) {
++		if (pps->hold_soc < 0)
++			pps->hold_soc = soc;
++		end = min(end, pps->hold_soc);
++	}
++	if (start <= 0 || start > end)
++		start = end;
++	if (end == INT_MAX)
++		held = false;
++	else
++		held = soc >= end || (pps->held && soc >= start);
++	if (held != pps->held)
++		dev_info(battmgr->dev, "charging: %s at %d%% (start %d%%, end %d%%%s)\n",
++			 held ? "held" : "resumed", soc,
++			 READ_ONCE(pps->start_soc), READ_ONCE(pps->end_soc),
++			 inhibit ? ", inhibited" : "");
++	WRITE_ONCE(pps->held, held);
++	return held;
++}
++
+ static const char *qcom_battmgr_pps_check(struct qcom_battmgr *battmgr,
+ 					  const struct qcom_battmgr_pps_inputs *in)
+ {
+@@ -2210,6 +2266,12 @@ static int qcom_battmgr_pps_step(struct qcom_battmgr *battmgr, const char **reas
+ 		*retry = true;
+ 		return 0;
+ 	}
++	/* The OEM limit stops PPS (pps_not_allow); it may restart once released. */
++	if (qcom_battmgr_charge_held(battmgr, in.soc)) {
++		*reason = "charge limit";
++		*retry = true;
++		return 0;
++	}
+ 
+ 	switch (pps->state) {
+ 	case PPS_RAMP:
+@@ -2540,6 +2602,7 @@ static void qcom_battmgr_wired_attach(struct qcom_battmgr *battmgr)
+ 	memcpy(w->thr_dc, qcom_battmgr_wired_thr_dc, sizeof(w->thr_dc));
+ 	w->caps = w->boost_off = false;
+ 	w->boost_retries = 0;
++	battmgr->pps.hold_soc = -1;
+ 	qcom_battmgr_wired_set_active(battmgr, true);
+ }
+ 
+@@ -2789,9 +2852,9 @@ static unsigned int qcom_battmgr_wired_update(struct qcom_battmgr *battmgr)
+ {
+ 	struct qcom_battmgr_pps *pps = &battmgr->pps;
+ 	struct qcom_battmgr_wired *w = &pps->wired;
+-	int mode, region, fcc, target, vbat_mv, vbus_mv, ret;
++	int mode, region, fcc, target, vbat_mv, vbus_mv, soc, ret;
+ 	unsigned int delay = 0;
+-	bool collapse;
++	bool collapse, held;
+ 
+ 	if (battmgr->oplus_otg_state || pps->blocked)
+ 		return 0;
+@@ -2805,9 +2868,11 @@ static unsigned int qcom_battmgr_wired_update(struct qcom_battmgr *battmgr)
+ 	mutex_lock(&battmgr->lock);
+ 	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_VOLT_NOW, 0) ?:
+ 	      qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_TEMP, 0) ?:
++	      qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET, BATT_CAPACITY, 0) ?:
+ 	      qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_VOLT_NOW, 0);
+ 	vbat_mv = battmgr->status.voltage_now / 1000;
+ 	vbus_mv = battmgr->usb.voltage_now / 1000;
++	soc = battmgr->status.percent;
+ 	/* The OEM regions follow the common shell selection; a charger is attached. */
+ 	w->temp_dc = qcom_battmgr_shell_selected(battmgr, battmgr->status.temperature) ?
+ 		     battmgr->shell_temperature / 100 : battmgr->status.temperature;
+@@ -2836,10 +2901,13 @@ static unsigned int qcom_battmgr_wired_update(struct qcom_battmgr *battmgr)
+ 
+ 	/*
+ 	 * oplus_wired_temp_region_update_work(): no battery charging when hot
+-	 * or cold, set before the charge current as the OEM does.
++	 * or cold, set before the charge current as the OEM does. The charge
++	 * limit also turns it off (CHG_DISABLE), leaving the input to power
++	 * the system.
+ 	 */
++	held = qcom_battmgr_charge_held(battmgr, soc);
+ 	ret = qcom_battmgr_wired_enable(battmgr, w->region != WIRED_T_HOT &&
+-					 w->region != WIRED_T_COLD);
++					 w->region != WIRED_T_COLD && !held);
+ 	if (ret)
+ 		goto err;
+ 
+@@ -3000,6 +3067,8 @@ static int qcom_battmgr_pps_enter(struct qcom_battmgr *battmgr)
+ 		reason = "no USBIN presence";
+ 	else if (in.soc > PPS_SOC_MAX)
+ 		reason = "state of charge";
++	else if (qcom_battmgr_charge_held(battmgr, in.soc))
++		reason = "charge limit";
+ 	/* oplus_pps_charge_allow_check() */
+ 	else if (in.temp_dc < qcom_battmgr_pps_range_dc[0] ||
+ 		 in.temp_dc >= qcom_battmgr_pps_range_dc[PPS_RANGE_NUM] - PPS_TEMP_HYST_DC ||
+@@ -3383,6 +3452,93 @@ static const struct attribute_group qcom_battmgr_pps_group = {
+ 	.attrs = qcom_battmgr_pps_attrs,
+ };
+ 
++static const enum power_supply_property qcom_battmgr_charge_control_props[] = {
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
++};
++
++static int qcom_battmgr_charge_control_get(struct power_supply *psy,
++					   const struct power_supply_ext *ext, void *data,
++					   enum power_supply_property psp,
++					   union power_supply_propval *val)
++{
++	struct qcom_battmgr_pps *pps = &((struct qcom_battmgr *)data)->pps;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
++		val->intval = READ_ONCE(pps->start_soc);
++		return 0;
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		val->intval = READ_ONCE(pps->end_soc);
++		return 0;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		val->intval = READ_ONCE(pps->inhibit) ? POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
++			      POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++/* The worker applies changes; a running PPS session sees them in its next cycle. */
++static int qcom_battmgr_charge_control_set(struct power_supply *psy,
++					   const struct power_supply_ext *ext, void *data,
++					   enum power_supply_property psp,
++					   const union power_supply_propval *val)
++{
++	struct qcom_battmgr *battmgr = data;
++	struct qcom_battmgr_pps *pps = &battmgr->pps;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
++		if (val->intval < 0 || val->intval > 100)
++			return -EINVAL;
++		WRITE_ONCE(pps->start_soc, val->intval);
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		if (val->intval < 0 || val->intval > 100)
++			return -EINVAL;
++		WRITE_ONCE(pps->end_soc, val->intval);
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		if (val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO &&
++		    val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE)
++			return -EINVAL;
++		WRITE_ONCE(pps->inhibit, val->intval == POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE);
++		break;
++	default:
++		return -EINVAL;
++	}
++	qcom_battmgr_pps_kick(battmgr);
++	return 0;
++}
++
++static int qcom_battmgr_charge_control_writeable(struct power_supply *psy,
++						 const struct power_supply_ext *ext, void *data,
++						 enum power_supply_property psp)
++{
++	return 1;
++}
++
++static const struct power_supply_ext qcom_battmgr_charge_control_ext = {
++	.name = "caihong-charge-control",
++	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
++	.properties = qcom_battmgr_charge_control_props,
++	.num_properties = ARRAY_SIZE(qcom_battmgr_charge_control_props),
++	.get_property = qcom_battmgr_charge_control_get,
++	.set_property = qcom_battmgr_charge_control_set,
++	.property_is_writeable = qcom_battmgr_charge_control_writeable,
++};
++
++static void qcom_battmgr_charge_control_remove(void *data)
++{
++	struct qcom_battmgr *battmgr = data;
++
++	power_supply_unregister_extension(battmgr->bat_psy, &qcom_battmgr_charge_control_ext);
++}
++
+ static int qcom_battmgr_pps_control_show(struct seq_file *seq, void *unused)
+ {
+ 	struct qcom_battmgr *battmgr = seq->private;
+@@ -3422,6 +3578,8 @@ static int qcom_battmgr_pps_control_show(struct seq_file *seq, void *unused)
+ 		   pps->wired.temp_dc, pps->wired.chg_en, pps->wired.fcc_ma, pps->wired.icl_ma,
+ 		   pps->wired.icl_target_ma, pps->wired.vbus_mv, pps->wired.pdo_5v_ma,
+ 		   pps->wired.pdo_9v_ma, pps->wired.boost_retries, pps->wired.boost_off);
++	seq_printf(seq, "charge control: start %d%% end %d%% inhibit %d held %d hold %d%%\n",
++		   pps->start_soc, pps->end_soc, pps->inhibit, pps->held, pps->hold_soc);
+ 	for (i = 0; i < PPS_CP_NUM; i++)
+ 		seq_printf(seq, "pump %d: 06=0x%02x 07=0x%02x 0e=0x%02x vbus %d mV ibus %d mA vout %d mV tdie %d\n",
+ 			   i, pps->cp_sample[i].status, pps->cp_sample[i].ctrl,
+@@ -3521,6 +3679,8 @@ static int qcom_battmgr_pps_init(struct qcom_battmgr *battmgr, struct dentry *de
+ 	INIT_DELAYED_WORK(&pps->work, qcom_battmgr_pps_worker);
+ 	pps->allowed = true;
+ 	pps->limit_ma = PPS_MAX_MA;
++	pps->end_soc = 100;	/* no limit; 0 and 100 are the defaults UPower expects */
++	pps->hold_soc = -1;
+ 	ret = devm_device_add_group(battmgr->dev, &qcom_battmgr_pps_group);
+ 	if (ret)
+ 		return ret;
+@@ -3561,7 +3721,14 @@ static int qcom_battmgr_pps_init(struct qcom_battmgr *battmgr, struct dentry *de
+ 		return ret;
+ 	}
+ 
+-	return devm_add_action_or_reset(battmgr->dev, qcom_battmgr_pps_remove, battmgr);
++	ret = devm_add_action_or_reset(battmgr->dev, qcom_battmgr_pps_remove, battmgr);
++	if (ret)
++		return ret;
++	ret = power_supply_register_extension(battmgr->bat_psy, &qcom_battmgr_charge_control_ext,
++					      battmgr->dev, battmgr);
++	if (ret)
++		return ret;
++	return devm_add_action_or_reset(battmgr->dev, qcom_battmgr_charge_control_remove, battmgr);
+ }
+ 
+ static void qcom_battmgr_remove_debugfs(void *data)
