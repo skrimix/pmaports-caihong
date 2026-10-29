@@ -11,7 +11,7 @@ diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_bat
 index f6b77405d..6c2721639 100644
 --- a/drivers/power/supply/qcom_battmgr.c
 +++ b/drivers/power/supply/qcom_battmgr.c
-@@ -3689,6 +3689,14 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+@@ -3689,6 +3689,12 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
  		break;
  	case NOTIF_USB_PROPERTY:
  		qcom_battmgr_pps_kick(battmgr);
