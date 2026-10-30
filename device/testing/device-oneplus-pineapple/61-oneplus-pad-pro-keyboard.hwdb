@@ -10,7 +10,8 @@ evdev:input:b0005v22D9p3869e*-e0,1,3,*
  EVDEV_ABS_36=::23
 
 # Esc sends AC Back; mic, search and lock send F13, F23 and F24.
-# Touchpad toggle is handled in firmware but also sends F22 over BLE.
+# Touchpad toggle is handled in firmware but also sends F16/F17 (F22 on older fw)
+# over BLE.
 evdev:input:b0005v22D9p3869e*-e0,1,4,*
 evdev:input:b0019v22D9p3869e*-e0,1,4,*
  KEYBOARD_KEY_c0224=esc
