@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=89
+pkgrel=90
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -123,6 +123,8 @@ source="
 	0095-arm64-dts-qcom-caihong-disable-crypto.patch
 	0096-PCI-host-common-endpoint-d3cold.patch
 	0097-clk-qcom-gcc-sm8650-pcie-gdsc-collapse.patch
+	0098-ASoC-qcom-q6apm-release-graphs-across-suspend.patch
+	0099-ASoC-qcom-caihong-suspend.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -250,6 +252,8 @@ e8c25f5f8122714e66ecd6e108c132f235e59a761f408f155677a544fdb658587e9edb21c3ca00ad
 5d86e3427edf7aacc48b9625aafe00e2f628873de89f60ec2ab0b2eae6bd59324ccf16a2ae4e15ffe7ebbc03cd333cfcee769aeb108ff66da2b6612c423d3d1d  0095-arm64-dts-qcom-caihong-disable-crypto.patch
 41a1702656d3755d0b96248a1eaea038c3b018488a4116a6d2df8a0e1c02cc05b672c980031318d2e00e025931a530a89165ea91978d8320fb199ac8be9e79d3  0096-PCI-host-common-endpoint-d3cold.patch
 59b4bc742c7b03965732e4982459c6f341f99f353bd4b14ad231d63e83df110cb1cee29d06a1116310aed2f2804c102b5b9cb36eebe3eee104c6f74efdd575c2  0097-clk-qcom-gcc-sm8650-pcie-gdsc-collapse.patch
+e65d9b25cbce5e460e03b083085022b68c4643e4b9716ef4752dfcee397c12f0939e2567d54e65f8d51c9c6b64320e8d68f0882f6ad81febea79c33d6945c4e0  0098-ASoC-qcom-q6apm-release-graphs-across-suspend.patch
+a4cfe95cf1519c6ed3293474e2785f256263dedcd84e7793458d19dc19c9a2925916a90551697c9fd4ffebc49e23e5649215d8ec58309ff7a682a6e9130abf32  0099-ASoC-qcom-caihong-suspend.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 8b58ea90ae4352aa8234457faf3aa92f3b481008bda2333a320a09b946860d29f0ac9b64be2145624205219311db7001f46cc6f148ee8e0c773546c191cb7fb9  config-oneplus-pineapple.aarch64
 "

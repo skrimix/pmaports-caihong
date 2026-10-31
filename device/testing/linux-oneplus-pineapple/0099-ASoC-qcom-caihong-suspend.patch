@@ -1,0 +1,130 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] ASoC: qcom: caihong: suspend the card and release the TDM clock
+
+qcom_snd_parse_of() marks the TDM backend link ignore_suspend and the
+card had no PM ops, so snd_soc_suspend() never ran and a PCM open at
+suspend kept running. Use snd_soc_pm_ops and clear ignore_suspend on the
+link; nothing has to play across system suspend.
+
+The tdm-bit clock is enabled from backend startup to shutdown. It is a
+q6prm vote, so a PCM still open at suspend keeps LPASS, and with it CX,
+powered for the whole sleep. Release it in suspend_post and take it back
+in resume_pre. The speaker calibration lives in the released graph, so
+apply it again on the next start.
+
+Based on armada-os 0528 and 0531 (Armada) for sc8280xp.
+
+diff --git a/sound/soc/qcom/caihong.c b/sound/soc/qcom/caihong.c
+index 674bc2554..d5c6b4a59 100644
+--- a/sound/soc/qcom/caihong.c
++++ b/sound/soc/qcom/caihong.c
+@@ -47,6 +47,7 @@ struct caihong_audio {
+ 	struct mutex lock;
+ 	bool running, active, fault;
+ 	bool calibration_applied;
++	bool tdm_open, suspended;
+ 	u32 resistance[4];
+ 	unsigned int volume;
+ 	int rows[6];
+@@ -426,12 +427,18 @@ static int caihong_tdm_init(struct snd_soc_pcm_runtime *rtd)
+ 	return snd_soc_add_card_controls(rtd->card, controls, ARRAY_SIZE(controls));
+ }
+ 
++/* BE startup and shutdown run under the card's DPCM mutex. */
+ static int caihong_tdm_startup(struct snd_pcm_substream *substream)
+ {
+ 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+ 	struct caihong_audio *audio = snd_soc_card_get_drvdata(rtd->card);
++	int ret = 0;
+ 
+-	return clk_prepare_enable(audio->tdm_clk);
++	if (!audio->suspended)
++		ret = clk_prepare_enable(audio->tdm_clk);
++	if (!ret)
++		audio->tdm_open = true;
++	return ret;
+ }
+ 
+ static void caihong_tdm_shutdown(struct snd_pcm_substream *substream)
+@@ -445,7 +452,9 @@ static void caihong_tdm_shutdown(struct snd_pcm_substream *substream)
+ 	mutex_lock(&audio->lock);
+ 	audio->calibration_applied = false;
+ 	mutex_unlock(&audio->lock);
+-	clk_disable_unprepare(audio->tdm_clk);
++	if (!audio->suspended)
++		clk_disable_unprepare(audio->tdm_clk);
++	audio->tdm_open = false;
+ }
+ 
+ static int caihong_tdm_fixup(struct snd_soc_pcm_runtime *rtd,
+@@ -519,6 +528,44 @@ static int caihong_late_probe(struct snd_soc_card *card)
+ 	return 0;
+ }
+ 
++/* The PCMs are suspended and the backend graph is released by now. The
++ * tdm-bit clock is a q6prm vote that keeps LPASS, and with it CX, powered for
++ * the whole sleep.
++ */
++static int caihong_suspend_post(struct snd_soc_card *card)
++{
++	struct caihong_audio *audio = snd_soc_card_get_drvdata(card);
++
++	snd_soc_dpcm_mutex_lock(card);
++	if (audio->tdm_open)
++		clk_disable_unprepare(audio->tdm_clk);
++	audio->suspended = true;
++	snd_soc_dpcm_mutex_unlock(card);
++	/* The calibration went with the graph. */
++	mutex_lock(&audio->lock);
++	audio->calibration_applied = false;
++	mutex_unlock(&audio->lock);
++	return 0;
++}
++
++static int caihong_resume_pre(struct snd_soc_card *card)
++{
++	struct caihong_audio *audio = snd_soc_card_get_drvdata(card);
++	int ret = 0;
++
++	snd_soc_dpcm_mutex_lock(card);
++	audio->suspended = false;
++	if (audio->tdm_open)
++		ret = clk_prepare_enable(audio->tdm_clk);
++	/* Shutdown must not disable a clock that failed to come back. */
++	if (ret)
++		audio->tdm_open = false;
++	snd_soc_dpcm_mutex_unlock(card);
++	if (ret)
++		dev_err(card->dev, "failed to re-enable the TDM clock: %d\n", ret);
++	return 0;
++}
++
+ static int caihong_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -541,6 +588,8 @@ static int caihong_probe(struct platform_device *pdev)
+ 	card->owner = THIS_MODULE;
+ 	card->driver_name = "caihong";
+ 	card->late_probe = caihong_late_probe;
++	card->suspend_post = caihong_suspend_post;
++	card->resume_pre = caihong_resume_pre;
+ 	snd_soc_card_set_drvdata(card, audio);
+ 	ret = qcom_snd_parse_of(card);
+ 	if (ret)
+@@ -551,6 +600,8 @@ static int caihong_probe(struct platform_device *pdev)
+ 		link->init = caihong_tdm_init;
+ 		link->ops = &caihong_tdm_ops;
+ 		link->be_hw_params_fixup = caihong_tdm_fixup;
++		/* Nothing plays across system suspend; let the card suspend the link. */
++		link->ignore_suspend = 0;
+ 	}
+ 	return devm_snd_soc_register_card(dev, card);
+ }
+@@ -566,6 +617,7 @@ static struct platform_driver caihong_driver = {
+ 	.driver = {
+ 		.name = "snd-caihong",
+ 		.of_match_table = caihong_match,
++		.pm = &snd_soc_pm_ops,
+ 	},
+ };
+ module_platform_driver(caihong_driver);

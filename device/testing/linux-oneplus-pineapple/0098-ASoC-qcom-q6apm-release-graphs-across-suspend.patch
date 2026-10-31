@@ -1,0 +1,327 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] ASoC: qcom: q6apm: release AudioReach graphs across system suspend
+
+An open AudioReach graph keeps the ADSP out of power collapse, so a PCM
+left open at suspend, such as a UI sound still draining or a paused
+player, keeps CX up for the whole sleep.
+
+Release the stream graphs at device suspend and the port graphs at
+component suspend, and drop SNDRV_PCM_INFO_RESUME so userspace prepares
+the streams again after resume. This relies on the card suspending its
+PCMs, which qcom_snd_parse_of() disables with ignore_suspend.
+
+The stream (source) graph has to be open before its port (sink) graph,
+and DPCM prepares the BEs before their FE, so the stream graphs reopen
+at device resume, which the card's device link orders before the card
+resumes. A BE that was prepared but not running is not prepared again
+by DPCM, so its trigger sets the graph up again.
+
+Based on armada-os 0530 (Armada), without its restore of prepared ports
+at component resume, which serves an MI2S codec that needs the bit
+clock before the trigger.
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm-dai.c b/sound/soc/qcom/qdsp6/q6apm-dai.c
+index 033197bdd..eb6a63711 100644
+--- a/sound/soc/qcom/qdsp6/q6apm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6apm-dai.c
+@@ -90,7 +90,7 @@ struct q6apm_dai_data {
+ static const struct snd_pcm_hardware q6apm_dai_hardware_capture = {
+ 	.info =                 (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_BLOCK_TRANSFER |
+ 				 SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_INTERLEAVED |
+-				 SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_RESUME |
++				 SNDRV_PCM_INFO_PAUSE |
+ 				 SNDRV_PCM_INFO_NO_REWINDS | SNDRV_PCM_INFO_SYNC_APPLPTR |
+ 				 SNDRV_PCM_INFO_BATCH),
+ 	.formats =              (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE),
+@@ -110,7 +110,7 @@ static const struct snd_pcm_hardware q6apm_dai_hardware_capture = {
+ static const struct snd_pcm_hardware q6apm_dai_hardware_playback = {
+ 	.info =                 (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_BLOCK_TRANSFER |
+ 				 SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_INTERLEAVED |
+-				 SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_RESUME |
++				 SNDRV_PCM_INFO_PAUSE |
+ 				 SNDRV_PCM_INFO_NO_REWINDS | SNDRV_PCM_INFO_SYNC_APPLPTR |
+ 				 SNDRV_PCM_INFO_BATCH),
+ 	.formats =              (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE),
+@@ -211,6 +211,22 @@ static void event_handler_compr(uint32_t opcode, uint32_t token,
+ 	}
+ }
+ 
++static void q6apm_dai_release_graph(struct q6apm_dai_rtd *prtd, int stream)
++{
++	if (prtd->state) {
++		/* only stop graph that is started */
++		q6apm_graph_stop(prtd->graph);
++		q6apm_free_fragments(prtd->graph, stream);
++	}
++
++	q6apm_graph_close(prtd->graph);
++	prtd->graph = NULL;
++	prtd->state = Q6APM_STREAM_IDLE;
++	prtd->queue_ptr = 0;
++	prtd->last_pos_index = 0;
++	prtd->push_pull_size = 0;
++}
++
+ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 			     struct snd_pcm_substream *substream)
+ {
+@@ -317,6 +333,10 @@ static int q6apm_dai_ack(struct snd_soc_component *component, struct snd_pcm_sub
+ 	struct q6apm_dai_rtd *prtd = runtime->private_data;
+ 	int i, ret = 0, avail_periods;
+ 
++	/* No fragments to queue before prepare, also after suspend released the graph */
++	if (!prtd->graph || prtd->state == Q6APM_STREAM_IDLE)
++		return 0;
++
+ 	if (q6apm_is_graph_in_push_pull_mode(prtd->graph))
+ 		return 0;
+ 
+@@ -458,14 +478,8 @@ static int q6apm_dai_close(struct snd_soc_component *component,
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct q6apm_dai_rtd *prtd = runtime->private_data;
+ 
+-	if (prtd->state) {
+-		/* only stop graph that is started */
+-		q6apm_graph_stop(prtd->graph);
+-		q6apm_free_fragments(prtd->graph, substream->stream);
+-	}
+-
+-	q6apm_graph_close(prtd->graph);
+-	prtd->graph = NULL;
++	if (prtd->graph)
++		q6apm_dai_release_graph(prtd, substream->stream);
+ 	kfree(prtd);
+ 	runtime->private_data = NULL;
+ 
+@@ -479,6 +493,9 @@ static snd_pcm_uframes_t q6apm_dai_pointer(struct snd_soc_component *component,
+ 	struct q6apm_dai_rtd *prtd = runtime->private_data;
+ 	snd_pcm_uframes_t ptr;
+ 
++	if (!prtd->graph)
++		return 0;
++
+ 	if (q6apm_is_graph_in_push_pull_mode(prtd->graph)) {
+ 		int retries = 10;
+ 		uint32_t index, fc1, fc2;
+@@ -1001,6 +1018,88 @@ static const struct snd_compress_ops q6apm_dai_compress_ops = {
+ 	.copy		= q6apm_compr_copy,
+ };
+ 
++static bool q6apm_dai_rtd_has_component(struct snd_soc_pcm_runtime *rtd,
++					 struct snd_soc_component *component)
++{
++	struct snd_soc_component *c;
++	int i;
++
++	for_each_rtd_components(rtd, i, c)
++		if (c == component)
++			return true;
++	return false;
++}
++
++/*
++ * An open graph keeps the ADSP out of power collapse, so release the graphs of
++ * PCMs left open across system suspend. The card has suspended the PCMs, and
++ * userspace prepares them again after resume. Reopen the graphs at device
++ * resume, which the card's device link orders before the card resumes: the
++ * stream (source) graph has to be open before its BE (sink) graph, and DPCM
++ * prepares the BEs before their FE.
++ */
++static void q6apm_dai_suspend_resume(struct device *dev, bool suspend)
++{
++	struct snd_soc_component *component = snd_soc_lookup_component(dev, NULL);
++	struct snd_soc_pcm_runtime *rtd;
++	struct snd_pcm_substream *substream;
++	struct q6apm_dai_rtd *prtd;
++	struct q6apm_graph *graph;
++	int stream;
++
++	if (!component || !component->card)
++		return;
++
++	for_each_card_rtds(component->card, rtd) {
++		/* A BE substream shares its FE's runtime */
++		if (rtd->dai_link->no_pcm || !rtd->pcm ||
++		    !q6apm_dai_rtd_has_component(rtd, component))
++			continue;
++
++		guard(mutex)(&rtd->pcm->open_mutex);
++		for_each_pcm_streams(stream) {
++			substream = rtd->pcm->streams[stream].substream;
++			for (; substream; substream = substream->next) {
++				if (!substream->runtime || !substream->runtime->private_data)
++					continue;
++
++				prtd = substream->runtime->private_data;
++				if (suspend) {
++					if (prtd->graph)
++						q6apm_dai_release_graph(prtd, stream);
++					continue;
++				}
++				if (prtd->graph)
++					continue;
++
++				graph = q6apm_graph_open(dev, event_handler, prtd,
++							 snd_soc_rtd_to_cpu(rtd, 0)->driver->id,
++							 stream);
++				if (IS_ERR(graph)) {
++					dev_err(dev, "Failed to reopen graph after suspend (%ld)\n",
++						PTR_ERR(graph));
++					continue;
++				}
++				prtd->graph = graph;
++			}
++		}
++	}
++}
++
++static int q6apm_dai_suspend(struct device *dev)
++{
++	q6apm_dai_suspend_resume(dev, true);
++	return 0;
++}
++
++static int q6apm_dai_resume(struct device *dev)
++{
++	q6apm_dai_suspend_resume(dev, false);
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(q6apm_dai_pm_ops, q6apm_dai_suspend, q6apm_dai_resume);
++
+ static const struct snd_soc_component_driver q6apm_fe_dai_component = {
+ 	.name		= DRV_NAME,
+ 	.open		= q6apm_dai_open,
+@@ -1052,6 +1151,7 @@ static struct platform_driver q6apm_dai_platform_driver = {
+ 	.driver = {
+ 		.name = "q6apm-dai",
+ 		.of_match_table = of_match_ptr(q6apm_dai_device_id),
++		.pm = pm_sleep_ptr(&q6apm_dai_pm_ops),
+ 	},
+ 	.probe = q6apm_dai_probe,
+ };
+diff --git a/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c b/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
+index e204fd59e..7468c2af6 100644
+--- a/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
++++ b/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
+@@ -200,31 +200,6 @@ static void q6apm_lpass_dai_shutdown(struct snd_pcm_substream *substream, struct
+ 	}
+ }
+ 
+-static int q6apm_lpass_dai_trigger(struct snd_pcm_substream *substream, int cmd,
+-				   struct snd_soc_dai *dai)
+-{
+-	struct q6apm_lpass_dai_data *dai_data = dev_get_drvdata(dai->dev);
+-	int ret = 0;
+-
+-	switch (cmd) {
+-	case SNDRV_PCM_TRIGGER_START:
+-	case SNDRV_PCM_TRIGGER_RESUME:
+-	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+-		if (!dai_data->is_port_started[dai->id]) {
+-			ret = q6apm_graph_start(dai_data->graph[dai->id]);
+-			if (ret < 0)
+-				dev_err(dai->dev, "Failed to start APM port %d\n", dai->id);
+-			else
+-				dai_data->is_port_started[dai->id] = true;
+-		}
+-		break;
+-	default:
+-		break;
+-	}
+-
+-	return ret;
+-}
+-
+ static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
+ {
+ 	struct q6apm_lpass_dai_data *dai_data = dev_get_drvdata(dai->dev);
+@@ -241,9 +216,10 @@ static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct s
+ 
+ 	/**
+ 	 * It is recommend to load DSP with source graph first and then sink
+-	 * graph, so sequence for playback and capture will be different
++	 * graph, so sequence for playback and capture will be different.
++	 * System suspend also releases capture graphs.
+ 	 */
+-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && dai_data->graph[dai->id] == NULL) {
++	if (dai_data->graph[dai->id] == NULL) {
+ 		graph = q6apm_graph_open(dai->dev, NULL, dai->dev, graph_id, substream->stream);
+ 		if (IS_ERR(graph)) {
+ 			dev_err(dai->dev, "Failed to open graph (%d)\n", graph_id);
+@@ -274,6 +250,40 @@ static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct s
+ 	return rc;
+ }
+ 
++static int q6apm_lpass_dai_trigger(struct snd_pcm_substream *substream, int cmd,
++				   struct snd_soc_dai *dai)
++{
++	struct q6apm_lpass_dai_data *dai_data = dev_get_drvdata(dai->dev);
++	int ret = 0;
++
++	switch (cmd) {
++	case SNDRV_PCM_TRIGGER_START:
++	case SNDRV_PCM_TRIGGER_RESUME:
++	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		/*
++		 * System suspend released the graph, and DPCM does not prepare
++		 * again a BE that was prepared but not running.
++		 */
++		if (!dai_data->graph[dai->id]) {
++			ret = q6apm_lpass_dai_prepare(substream, dai);
++			if (ret)
++				return ret;
++		}
++		if (!dai_data->is_port_started[dai->id]) {
++			ret = q6apm_graph_start(dai_data->graph[dai->id]);
++			if (ret < 0)
++				dev_err(dai->dev, "Failed to start APM port %d\n", dai->id);
++			else
++				dai_data->is_port_started[dai->id] = true;
++		}
++		break;
++	default:
++		break;
++	}
++
++	return ret;
++}
++
+ static int q6apm_lpass_dai_startup(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
+ {
+ 	struct q6apm_lpass_dai_data *dai_data = dev_get_drvdata(dai->dev);
+@@ -445,12 +455,34 @@ static const struct snd_soc_dai_ops q6tdm_ops = {
+ 	.trigger	= q6apm_lpass_dai_trigger,
+ };
+ 
++/* An open graph keeps the ADSP out of power collapse; prepare opens it again */
++static int q6apm_lpass_dai_suspend(struct snd_soc_component *component)
++{
++	struct q6apm_lpass_dai_data *dai_data = dev_get_drvdata(component->dev);
++	int i;
++
++	for (i = 0; i < APM_PORT_MAX; i++) {
++		if (!dai_data->graph[i])
++			continue;
++
++		if (dai_data->is_port_started[i]) {
++			q6apm_graph_stop(dai_data->graph[i]);
++			dai_data->is_port_started[i] = false;
++		}
++		q6apm_graph_close(dai_data->graph[i]);
++		dai_data->graph[i] = NULL;
++	}
++
++	return 0;
++}
++
+ static const struct snd_soc_component_driver q6apm_lpass_dai_component = {
+ 	.name = "q6apm-be-dai-component",
+ 	.of_xlate_dai_name = q6dsp_audio_ports_of_xlate_dai_name,
+ 	.be_pcm_base = AUDIOREACH_BE_PCM_BASE,
+ 	.use_dai_pcm_id = true,
+ 	.remove_order   = SND_SOC_COMP_ORDER_FIRST,
++	.suspend = q6apm_lpass_dai_suspend,
+ };
+ 
+ static int of_q6apm_parse_dai_data(struct device *dev,
