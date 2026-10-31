@@ -1,0 +1,23 @@
+From: skrimix <skrimix.git@fastmail.org>
+Subject: [PATCH] arm64: dts: qcom: caihong: disable the unbound crypto engine
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+index 95f95c426..c74ab5796 100644
+--- a/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
++++ b/arch/arm64/boot/dts/qcom/sm8650-oneplus-caihong.dts
+@@ -459,6 +459,15 @@ &sdhc_2 {
+ 	status = "disabled";
+ };
+ 
++/*
++ * CRYPTO_DEV_QCE depends on BROKEN, so nothing binds this node and the
++ * interconnect providers never reach sync_state(), keeping every bus at
++ * its boot-time maximum vote.
++ */
++&crypto {
++	status = "disabled";
++};
++
+ &remoteproc_mpss {
+ 	status = "disabled";
+ };

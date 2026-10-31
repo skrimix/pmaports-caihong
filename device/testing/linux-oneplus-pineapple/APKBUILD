@@ -3,7 +3,7 @@
 maintainer="Serhii Hatsan <serhiihatcan@gmail.com>"
 pkgname="linux-oneplus-pineapple"
 pkgver=7.3
-pkgrel=84
+pkgrel=89
 pkgdesc="OnePlus Pad 2 kernel fork"
 arch="aarch64"
 _carch="arm64"
@@ -120,6 +120,9 @@ source="
 	0092-input-keyboard-oneplus-pogo.patch
 	0093-power-supply-qcom-battmgr-wake-on-usb-change.patch
 	0094-power-supply-qcom-battmgr-charge-control.patch
+	0095-arm64-dts-qcom-caihong-disable-crypto.patch
+	0096-PCI-host-common-endpoint-d3cold.patch
+	0097-clk-qcom-gcc-sm8650-pcie-gdsc-collapse.patch
 
 	dummy-dtbo.dtso
 	$_config
@@ -244,6 +247,9 @@ bbb0faa22f4cfff854f9fb990afa61fa559c318abb566b1dc14e7bf781bdd35af3b6264222134094
 e8c25f5f8122714e66ecd6e108c132f235e59a761f408f155677a544fdb658587e9edb21c3ca00adb932d39f3ab603a73c757e2951114fbc0940c49e3750baaa  0092-input-keyboard-oneplus-pogo.patch
 57e660294eba98cba9195517381f69615a1275d24ef22cb7c16b2108ff2cc5db1b335e672286d0f5545e18dc6beb984c6f68eee6aa368ca1d4782e86523a6012  0093-power-supply-qcom-battmgr-wake-on-usb-change.patch
 8845284f1020f0b9f726c46618bfe1fd907d55f588d63593fa3ba29e581010eeb4411137949d3419f75437361417ed1d3dbb60e1b1bf3b5fab9b10a6ce2ebe4c  0094-power-supply-qcom-battmgr-charge-control.patch
+5d86e3427edf7aacc48b9625aafe00e2f628873de89f60ec2ab0b2eae6bd59324ccf16a2ae4e15ffe7ebbc03cd333cfcee769aeb108ff66da2b6612c423d3d1d  0095-arm64-dts-qcom-caihong-disable-crypto.patch
+41a1702656d3755d0b96248a1eaea038c3b018488a4116a6d2df8a0e1c02cc05b672c980031318d2e00e025931a530a89165ea91978d8320fb199ac8be9e79d3  0096-PCI-host-common-endpoint-d3cold.patch
+59b4bc742c7b03965732e4982459c6f341f99f353bd4b14ad231d63e83df110cb1cee29d06a1116310aed2f2804c102b5b9cb36eebe3eee104c6f74efdd575c2  0097-clk-qcom-gcc-sm8650-pcie-gdsc-collapse.patch
 a1bf654b0f4f3a3b7358c19250400435ae2dcb9c461cf407972576d2489792dbe1c63fe596485de8d01e8417e2c22cf5fe510b9b5ef0c987bc86f523de0d4266  dummy-dtbo.dtso
 8b58ea90ae4352aa8234457faf3aa92f3b481008bda2333a320a09b946860d29f0ac9b64be2145624205219311db7001f46cc6f148ee8e0c773546c191cb7fb9  config-oneplus-pineapple.aarch64
 "
